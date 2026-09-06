@@ -1,4 +1,6 @@
 """camera.* - the lid camera pipeline through forgectrl."""
+import json
+
 from ..catalog import test
 from .. import hw
 from ..baseline import LID_LAMP_ATTR
@@ -380,3 +382,66 @@ def lid_privacy(ctx):
     ctx.check(st == 200 and data[:2] == b"\xff\xd8",
               "snapshot after closing the lid -> %s", st)
     ctx.log("lid closed again: snapshot %d bytes", len(data))
+
+
+@test("camera.key-read", title="The camera key reads without a login", subsystem="camera",
+      kind="auto", est_min=1,
+      covers=[("forgectrl", "src/camkey.*"), ("forgectrl", "src/auth.c"),
+              ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/panel.js"),
+              ("forgectrl", "src/ui/index.html"), ("forgectrl", "src/ui/help.js")],
+      requires=["forgectrl.auth"],
+      description="With the read routes closed to the network (panel_open_reads=0), a camera "
+                  "status read from the board's LAN address is refused without the key and "
+                  "served with it, on HTTP and on HTTPS; a wrong key is refused; the key never "
+                  "authorizes a write; a rotation from the panel route stops the old key and "
+                  "the new one reads. The setting is put back after.")
+def key_read(ctx):
+    from .commission import request
+    from .forgectrl import lan_ip
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ip = lan_ip()
+    ctx.check(ip, "cannot determine the board's LAN address")
+    http_base = "http://%s" % ip
+    tls_base = "https://%s" % ip
+    token = {"X-ForgeFIRM-Token": fc.token}
+
+    st, body, _ = request(fc.base, "GET", "/system/camera-key", headers=token)
+    ctx.check(st == 200, "GET /system/camera-key from loopback -> %s", st)
+    key = json.loads(body)["key"]
+    ctx.check(len(key) == 32, "the key is not 32 characters: %r", key)
+    ev["key_len"] = len(key)
+
+    before = fc.settings().get("panel_open_reads", "")
+    st, _ = fc.post("/settings", params={"panel_open_reads": "0"})
+    ctx.check(st == 200, "closing the reads -> %s", st)
+    try:
+        for base in (http_base, tls_base):
+            st, _, _ = request(base, "GET", "/cam/status")
+            ctx.log("GET %s/cam/status (no key) -> %s", base, st)
+            ctx.check(st == 403, "a closed read without the key -> %s, expected 403", st)
+            st, _, _ = request(base, "GET", "/cam/status?key=" + key)
+            ctx.log("GET %s/cam/status?key=... -> %s", base, st)
+            ctx.check(st == 200, "a read with the key -> %s, expected 200", st)
+            st, _, _ = request(base, "GET", "/cam/status", headers={"X-ForgeFIRM-Camera-Key": key})
+            ctx.check(st == 200, "a read with the key header -> %s, expected 200", st)
+            wrong = ("0" if key[0] != "0" else "1") + key[1:]
+            st, _, _ = request(base, "GET", "/cam/status?key=" + wrong)
+            ctx.check(st == 403, "a wrong key -> %s, expected 403", st)
+        # the key is a read credential only
+        st, _, _ = request(tls_base, "POST", "/settings", data={"panel_open_reads": "0"},
+                           headers={"X-ForgeFIRM-Camera-Key": key})
+        ctx.log("POST /settings with the camera key -> %s", st)
+        ctx.check(st == 403, "the camera key authorized a write (%s)", st)
+        # rotation
+        st, body, _ = request(fc.base, "POST", "/system/camera-key?rotate=1", headers=token)
+        ctx.check(st == 200, "rotate -> %s", st)
+        new = json.loads(body)["key"]
+        ctx.check(new != key, "rotation kept the same key")
+        st, _, _ = request(http_base, "GET", "/cam/status?key=" + key)
+        ctx.check(st == 403, "the old key still reads after rotation (%s)", st)
+        st, _, _ = request(http_base, "GET", "/cam/status?key=" + new)
+        ctx.check(st == 200, "the new key does not read (%s)", st)
+        ev["rotated"] = True
+    finally:
+        fc.post("/settings", params={"panel_open_reads": before})

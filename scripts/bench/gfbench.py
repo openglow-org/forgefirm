@@ -18,7 +18,7 @@ degc(raw)      the factory B-equation coolant conversion
 data_path(f)   where a tool keeps its data files: FORGETEST_BENCH_DATA
                when set (the bench page passes <data>/bench/), else next
                to the tool.
-forgectrl_*    the machine-services HTTP API (:8080) with the panel token
+forgectrl_*    the machine-services HTTP API (:80) with the panel token
                from GF_TOKEN or, on the board, /data/forgefirm/panel.token.
 """
 import json
@@ -90,7 +90,7 @@ def data_path(name):
 # ------------------------------------------------------------- forgectrl
 
 def forgectrl_base():
-    return os.environ.get("FORGECTRL_URL") or "http://%s:8080" % HOST
+    return os.environ.get("FORGECTRL_URL") or "http://%s:%s" % (HOST, os.environ.get("FORGECTRL_PORT") or "80")
 
 
 def token():

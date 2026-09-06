@@ -1,0 +1,63 @@
+#!/bin/sh
+# Rewrites the address block of /etc/issue, the serial-console login
+# banner: the control panel by mDNS name, then one https:// URL per
+# global address of wlan0 (and eth0 when the machine has one). Every
+# other line of /etc/issue stays as the image build wrote it. The block
+# sits between the marker lines "# ForgeFIRM addresses" and "# end" and
+# is appended when absent. Called by the init script at boot and by the
+# udhcpc hook on every lease event. Idempotent: the file is written only
+# when the block changes.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+ISSUE=/etc/issue
+MARK_BEGIN='# ForgeFIRM addresses'
+MARK_END='# end'
+PANEL='Control panel: https://forgefirm.local/'
+
+# One URL per global address; an IPv6 address gets its URL brackets.
+# Tentative, deprecated and temporary addresses are left out.
+addresses () {
+  command -v ip >/dev/null 2>&1 || return 0
+  for dev in wlan0 eth0; do
+    [ -d "/sys/class/net/$dev" ] || continue
+    ip addr show dev "$dev" 2>/dev/null | awk '
+      ($1 == "inet" || $1 == "inet6") && / scope global/ \
+          && !/tentative/ && !/deprecated/ && !/temporary/ {
+        a = $2
+        sub(/\/.*/, "", a)
+        if ($1 == "inet6") a = "[" a "]"
+        print "https://" a "/"
+      }'
+  done
+}
+
+block () {
+  echo "$MARK_BEGIN"
+  echo "$PANEL"
+  addrs=$(addresses)
+  if [ -n "$addrs" ]; then
+    echo "$addrs"
+  else
+    echo "no network address yet"
+  fi
+  echo "$MARK_END"
+}
+
+[ -f "$ISSUE" ] || exit 0
+
+new=$(block)
+old=$(awk -v b="$MARK_BEGIN" -v e="$MARK_END" \
+        '$0 == b { p = 1 } p { print } $0 == e { p = 0 }' "$ISSUE")
+[ "$new" = "$old" ] && exit 0
+
+tmp="$ISSUE.tmp.$$"
+awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v blk="$new" '
+  $0 == b { print blk; seen = 1; skip = 1; next }
+  $0 == e && skip { skip = 0; next }
+  !skip { print }
+  END { if (!seen) print blk }
+' "$ISSUE" > "$tmp" || { rm -f "$tmp"; exit 1; }
+chmod 0644 "$tmp"
+mv -f "$tmp" "$ISSUE"
+exit 0

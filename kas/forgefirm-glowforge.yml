@@ -115,7 +115,8 @@ local_conf_header:
   # would apply to every target built from this config, including the release
   # forgefirm-image. It lives in forgefirm-image-dev.bb's IMAGE_FEATURES so a
   # single build yields a hardened release image and a debug dev image.
-  # release.sh gates the release rootfs against a passwordless root entry.
+  # release.sh checks the built release rootfs for the root policy (an
+  # empty root field, sshd refusing root and empty passwords).
 
   build-tweaks: |
     # Parallelism sized for a 12-core / 16 GB build VM; raise on larger hosts.

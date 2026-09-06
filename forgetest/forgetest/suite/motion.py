@@ -392,7 +392,7 @@ def _liveness_masked_restart(ctx, fc, ev):
     ctx.check(lines and "MOTION OK" in lines[0],
               "the first probe after the restart was not MOTION OK: %s", lines[:1])
     ctx.check(len(lines) == 1, "the probe needed the recovery ladder (%d probes) - a false dead verdict", len(lines))
-    ctx.check(ctx.sysfs("cnc/motor_lock") == "8", "motor_lock reads %s after the controller start (expected 8)",
+    ctx.check(ctx.sysfs("cnc/motor_lock") == "0", "motor_lock reads %s after the controller start (expected 0)",
               ctx.sysfs("cnc/motor_lock"))
     ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle after the probe")
     x1 = _kernel_x_mm(ctx)

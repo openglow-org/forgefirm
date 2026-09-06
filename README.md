@@ -34,8 +34,9 @@ machine is idle:**
   EPIT), fed live by a local planner. M3/M4 dynamic laser power, coolant-flow
   verification, over-temp holds, and an operator button press to arm the laser
   for each job.
-* **Cloud mode**: The machine presents itself as a stock Glowforge to the
-  Glowforge web service, so the phone and web apps work as they always did.
+* **Cloud mode**: The machine signs in to the Glowforge web service with its
+  own identity, names its software as ForgeFIRM, and uses the service the way
+  a stock machine does, so the phone and web apps work as they always did.
   Optional, and off by default. GRBL mode jogs and cuts without it; the one
   GRBL-mode function that still reaches the Glowforge service is
   camera-referenced homing (below), until limit-switch homing lands.

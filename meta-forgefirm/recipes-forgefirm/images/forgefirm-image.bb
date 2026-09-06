@@ -23,9 +23,10 @@ FORGEFIRM_RELEASE_TRIM ?= "nano"
 IMAGE_INSTALL:remove = "python3 ${FORGEFIRM_RELEASE_TRIM}"
 
 # grblhal-glowforge: the grblHAL motion controller (Grbl over TCP:23).
-# forgectrl: the ForgeFIRM machine-services daemon (HTTP :8080): controller
-# supervisor, pulse-device broker, cooling engine, cameras, telemetry,
-# settings, diagnostics, web control panel, and A/B updates.
+# forgectrl: the ForgeFIRM machine-services daemon (HTTP :80, HTTPS :443
+# with a self-signed certificate): controller supervisor, pulse-device
+# broker, cooling engine, cameras, telemetry, settings, diagnostics, web
+# control panel, and A/B updates.
 # gfhome: one-shot Glowforge web-service homing, invoked by the controller
 # for $H when homing_mode = gfcloud (/data/forgefirm.conf).
 # gfcloud: full Glowforge web-service controller daemon (the factory cloud
@@ -43,6 +44,31 @@ IMAGE_INSTALL:remove = "python3 ${FORGEFIRM_RELEASE_TRIM}"
 # updates, and controller writes). rsyslog itself comes in through
 # VIRTUAL-RUNTIME_base-utils-syslog (conf/distro/forgefirm.conf).
 IMAGE_INSTALL:append = " grblhal-glowforge forgectrl gfhome gfcloud v4l-utils fwup ffboot slotmigrate forgefirm-logging"
+
+# forgefirm-users: replays the operator account record
+# (/data/forgefirm/users, written by forgectrl) into the system account
+# files at boot, before sshd, and on reload; also installs the warning an
+# interactive root shell prints. forgefirm-banner: keeps the control
+# panel addresses in the serial-console banner (/etc/issue).
+# avahi-daemon: mDNS, so the panel answers at https://forgefirm.local/
+# and shows up in service browsers. The daemon is installed by name (the
+# zeroconf distro feature stays off: it would bring libnss-mdns); the
+# build options and the configuration are in conf/distro/forgefirm.conf
+# and recipes-connectivity/avahi.
+IMAGE_INSTALL:append = " forgefirm-users forgefirm-banner avahi-daemon"
+
+# Root policy. root has no password and logs in at the serial console
+# only: that is the recovery path when the network, the panel or an
+# account is broken, and the console is behind the case. Over the
+# network, sshd refuses root (PermitRootLogin no) and any account without
+# a password (PermitEmptyPasswords no), both set by
+# recipes-connectivity/openssh, and sshd runs only when the panel turns
+# it on. Operator logins are the accounts in the record (forgefirm-users).
+# empty-root-password keeps the rootfs postprocess from locking root
+# (zap_empty_root_password in rootfs-postcommands.bbclass); it is not
+# debug-tweaks, which belongs to the dev image alone and would open SSH.
+# scripts/release.sh checks the built rootfs for exactly this state.
+IMAGE_FEATURES += "empty-root-password"
 
 # Mesa GLES2/EGL on etnaviv for forgectrl's GPU demosaic (loaded with
 # dlopen at runtime; forgectrl itself has no build-time GL dependency,
@@ -80,3 +106,30 @@ write_forgefirm_version() {
 }
 write_forgefirm_version[vardepsexclude] += "DATETIME"
 ROOTFS_POSTPROCESS_COMMAND += "write_forgefirm_version;"
+
+# The license texts ride with the software. The license class writes
+# the image's license manifest (every installed package with its
+# license) and copies each package's license texts into
+# /usr/share/common-licenses, one copy of each generic text and
+# symlinks to it per package. That tree costs several megabytes of
+# small files on a raw ext4 rootfs, so it is packed into one
+# reproducible tar.gz (sorted names, no timestamps, no owners) at
+# /usr/share/forgefirm/licenses.tar.gz and the tree is removed. The
+# control panel serves the bundle and its manifest (GET /system/licenses,
+# GET /system/licenses/manifest). The license class runs first
+# (license_create_manifest is prepended to this list); this step is
+# appended, so it runs after.
+COPY_LIC_MANIFEST = "1"
+COPY_LIC_DIRS = "1"
+
+pack_licenses() {
+    d="${IMAGE_ROOTFS}${datadir}/common-licenses"
+    [ -d "$d" ] || bbfatal "pack_licenses: $d is missing (COPY_LIC_DIRS off?)"
+    [ -f "$d/license.manifest" ] || bbfatal "pack_licenses: no license.manifest in $d"
+    install -d "${IMAGE_ROOTFS}${datadir}/forgefirm"
+    tar -C "${IMAGE_ROOTFS}${datadir}" --sort=name --mtime=@0 --owner=0 --group=0 \
+        --numeric-owner -cf - common-licenses | gzip -9 -n \
+        > "${IMAGE_ROOTFS}${datadir}/forgefirm/licenses.tar.gz"
+    rm -rf "$d"
+}
+ROOTFS_POSTPROCESS_COMMAND += "pack_licenses;"

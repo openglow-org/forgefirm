@@ -252,3 +252,57 @@ def image_health(ctx):
     ctx.check("kernel-module-glowforge" in manifest.components, "manifest lacks kernel-module-glowforge")
     ctx.check("linux-fslc" in manifest.components, "manifest lacks the kernel entry")
     ctx.log("manifest %s: %d components", manifest.content_sha[:12], len(manifest.components))
+
+
+@test("image.license-bundle", title="The license texts travel with the image",
+      subsystem="image", kind="auto", est_min=1,
+      covers=[("forgectrl", "src/main.c"), ("forgectrl", "src/ui/index.html"),
+              ("forgectrl", "src/ui/wizard.html"), ("forgectrl", "src/ui/login.html")],
+      requires=["forgectrl.panel-serves"],
+      description="The image carries /usr/share/forgefirm/licenses.tar.gz, a gzip tar with "
+                  "the license manifest (every installed package with its license) and the "
+                  "license texts, and no loose common-licenses tree; the panel serves the "
+                  "bundle, the manifest as text, and the Licenses page every footer links, "
+                  "each without a login.")
+def license_bundle(ctx):
+    import io
+    import tarfile
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    path = "/usr/share/forgefirm/licenses.tar.gz"
+    ctx.check(os.path.isfile(path), "%s is missing", path)
+    ctx.check(not os.path.isdir("/usr/share/common-licenses"),
+              "the loose common-licenses tree is still on the rootfs")
+    size = os.path.getsize(path)
+    ev["bundle_bytes"] = size
+    ctx.log("%s: %d bytes", path, size)
+    with tarfile.open(path, "r:gz") as t:
+        names = t.getnames()
+        ctx.check("common-licenses/license.manifest" in names, "no license.manifest in the bundle")
+        manifest = t.extractfile("common-licenses/license.manifest").read().decode("utf-8", "replace")
+    packages = manifest.count("PACKAGE NAME: ")
+    texts = sum(1 for n in names if "/generic_" in n and not n.endswith("/"))
+    ev["packages"] = packages
+    ev["generic_texts"] = texts
+    ctx.log("manifest lists %d packages; %d generic license entries", packages, texts)
+    ctx.check(packages >= 40, "only %d packages in the manifest", packages)
+    ctx.check(texts >= 5, "only %d generic license entries", texts)
+    for name in ("forgectrl", "grblhal-glowforge", "kernel-module-glowforge"):
+        ctx.check("RECIPE NAME: %s\n" % name in manifest, "%s is not in the manifest", name)
+
+    st, body = fc.get("/system/licenses/manifest", raw=True)
+    ctx.check(st == 200, "GET /system/licenses/manifest -> %s", st)
+    ctx.check(isinstance(body, (bytes, bytearray)) and b"PACKAGE NAME: " in body,
+              "the served manifest is not the manifest")
+    st, body = fc.get("/system/licenses", raw=True)
+    ctx.check(st == 200, "GET /system/licenses -> %s", st)
+    ctx.check(isinstance(body, (bytes, bytearray)) and len(body) == size,
+              "the served bundle is %s bytes, the file %d", len(body) if body else None, size)
+    with tarfile.open(fileobj=io.BytesIO(bytes(body)), mode="r:gz") as t:
+        ctx.check("common-licenses/license.manifest" in t.getnames(),
+                  "the served bundle holds no manifest")
+    st, body = fc.get("/licenses", raw=True)
+    ctx.check(st == 200, "GET /licenses -> %s", st)
+    text = bytes(body).decode("utf-8", "replace") if body else ""
+    ctx.check("/system/licenses" in text and "PACKAGE NAME: " in text,
+              "the Licenses page lacks the download link or the manifest")

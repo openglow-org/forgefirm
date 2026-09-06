@@ -82,11 +82,11 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(set(items), {"cnc/motor_lock", "cnc/step_freq", "cnc/streaming"})
         for x in left:
             self.assertEqual(x.action, "restored", str(x))
-        self.assertEqual(self._read("cnc/motor_lock"), "8")
+        self.assertEqual(self._read("cnc/motor_lock"), "0")
         self.assertEqual(self._read("cnc/step_freq"), "28160")
         self.assertEqual(self._read("cnc/streaming"), "0")
         self.assertEqual(items["cnc/motor_lock"].found, "15")
-        self.assertEqual(items["cnc/motor_lock"].expected, "8")
+        self.assertEqual(items["cnc/motor_lock"].expected, "0")
 
     def test_unlocked_latch_is_relocked(self):
         self._attr("cnc/interlock_circuit", "5")        # bit 3 clear = unlocked
@@ -194,7 +194,7 @@ class BaselineTests(unittest.TestCase):
             else:
                 # a young host: the reference is taken from the fake tree
                 self.assertIsNotNone(ref)
-                self.assertEqual(ref["sysfs"]["cnc/motor_lock"], "8")
+                self.assertEqual(ref["sysfs"]["cnc/motor_lock"], "0")
                 self.assertTrue(os.path.exists(os.path.join(self.tmp, "boot-test-boot.json")))
                 # and loaded back the second time
                 self.lines[:] = []
@@ -205,7 +205,7 @@ class BaselineTests(unittest.TestCase):
             os.environ.pop("FORGETEST_BOOT_ID", None)
 
     def test_fixed_constants_checked_against_a_dump(self):
-        ref = {"sysfs": {"cnc/motor_lock": "8", "cnc/step_freq": "10000"}}
+        ref = {"sysfs": {"cnc/motor_lock": "0", "cnc/step_freq": "10000"}}
         diffs = baseline.check_fixed_against(ref, self.lines.append)
         self.assertEqual(diffs, ["cnc/step_freq: boot=10000 constant=28160"])
 
@@ -286,7 +286,7 @@ class BaselineTests(unittest.TestCase):
                 self.assertEqual(ref["ts"], "old")
             else:
                 self.assertTrue(any("retaking" in l for l in self.lines))
-                self.assertEqual(ref["sysfs"]["cnc/motor_lock"], "8")
+                self.assertEqual(ref["sysfs"]["cnc/motor_lock"], "0")
         finally:
             os.environ.pop("FORGETEST_BOOT_ID", None)
 
@@ -325,6 +325,7 @@ class BaselineModeTests(BaselineTests):
         The fake client takes the marker down as gfcloud does, first thing
         at its start; with refuse the POST is refused and no client starts."""
         baseline.NOHUNT_MARKER = os.path.join(self.tmp, "nohunt-marker")
+        self.fc.state["settings"].setdefault("cloud_enabled", "1")
         seen = []
 
         def on_post(path, form):
@@ -354,6 +355,19 @@ class BaselineModeTests(BaselineTests):
         self.assertTrue(ok, detail)
         self.assertEqual(seen, [("/mode", {"controller": "cloud"}, True)])
         self.assertFalse(os.path.exists(baseline.NOHUNT_MARKER))      # one start, never left behind
+
+    def test_a_switch_to_cloud_turns_cloud_mode_on_when_it_is_off(self):
+        # A test that declares cloud mode gets it: cloud_enabled goes to 1
+        # first, with the typed phrase the daemon asks for and a log line,
+        # and only then the mode switch.
+        lines = []
+        seen = self.nohunt_marker()
+        self.fc.state["settings"]["cloud_enabled"] = "0"
+        ok, detail = baseline.Baseline(lines.append).switch_mode("cloud")
+        self.assertTrue(ok, detail)
+        self.assertEqual(seen[0], ("/settings", {"cloud_enabled": "1", "phrase": "I UNDERSTAND"}, False))
+        self.assertEqual(seen[1], ("/mode", {"controller": "cloud"}, True))
+        self.assertTrue(any("cloud mode turned on for the test" in ln for ln in lines))
 
     def test_a_switch_to_grbl_sets_no_marker(self):
         seen = self.nohunt_marker()

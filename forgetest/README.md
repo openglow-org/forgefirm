@@ -16,7 +16,7 @@ inheritance, the gate, the coverage rule - is
 ## Run the daemon on a workstation (against a mock or a manifest file)
 
     FORGETEST_DATA=/tmp/ft FORGETEST_MANIFEST=../tree-manifest.json \
-    FORGECTRL_URL=http://<machine>:8080 python3 -m forgetest --port 8090
+    FORGECTRL_URL=http://<machine> python3 -m forgetest --port 8090
 
 `scripts/manifest-from-tree.py` produces `tree-manifest.json` from the recipe
 pins; the coverage lint is `python3 -m forgetest.coverage --manifest ...`.
@@ -31,7 +31,8 @@ pins; the coverage lint is `python3 -m forgetest.coverage --manifest ...`.
 | `FORGETEST_BENCH_DIR` | `/usr/share/forgetest/bench` | the installed bench scripts |
 | `FORGETEST_BENCH_DATA` | `<FORGETEST_DATA>/bench` | passed to bench tools: where they keep their data files (with `GF_HOST=127.0.0.1` and the panel token in `GF_TOKEN`) |
 | `FORGETEST_MARKER` | `/run/forgetest.active` | takeover marker |
-| `FORGECTRL_URL`, `FORGECTRL_TOKEN_FILE` | `http://127.0.0.1:8080`, `/data/forgefirm/panel.token` | forgectrl client |
+| `FORGECTRL_URL`, `FORGECTRL_TOKEN_FILE` | `http://127.0.0.1`, `/data/forgefirm/panel.token` | forgectrl client (HTTP; the token authorizes writes from the board) |
+| `FORGECTRL_TLS_URL` | `https://127.0.0.1` | forgectrl over HTTPS (self-signed, unverified), for the login test |
 | `GF_SYSFS_ROOT` | `/sys/glowforge/` | kernel module sysfs |
 | `GRBL_HOST`, `GRBL_PORT` | 127.0.0.1, 23 | Grbl TCP |
 

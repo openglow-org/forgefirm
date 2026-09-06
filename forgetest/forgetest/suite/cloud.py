@@ -165,17 +165,6 @@ GFHOME_LOG = "/data/log/forgefirm/gfhome/gfhome.log"
 HOMING_TIMEOUT_S = 600
 
 
-def homing_mode_is_gfcloud():
-    """Precheck: the web-service homing needs homing_mode = gfcloud."""
-    try:
-        hm = (hw.Forgectrl().settings() or {}).get("homing_mode")
-    except hw.HwError as e:
-        return "forgectrl unreachable: %s" % e
-    if hm != "gfcloud":
-        return "homing_mode is %r; the web-service homing needs gfcloud" % (hm,)
-    return None
-
-
 def judge_hunt_with_lid_open(ctx, ev, offset):
     """The connect-time hunt from `offset` on: its terminal line is
     :completed, nothing before it was refused for the lid, and the lens
@@ -246,9 +235,9 @@ def gfhome_homing(ctx, ev, g):
       covers=_HOMING_PATH + [("forgectrl", "src/cool.*"), ("forgectrl", "src/airflow.*"),
                              ("grblhal-glowforge", "src/**")],
       requires=["forgectrl.auth", "motion.pacing"], actions=["lid"],
-      precheck=homing_mode_is_gfcloud,
-      steps=["Bed clear; cloud credentials configured and homing_mode = gfcloud; the machine on "
-             "the network.",
+      steps=["Bed clear; cloud credentials configured; the machine on the network. The test "
+             "turns cloud mode and the gfcloud homing on itself when they are off, and puts "
+             "the settings back at the end.",
              "Open the lid when told and leave it open through the cloud client's connect and its "
              "hunt; close it when told. Nothing else: the switch back and the $H homing run on "
              "their own, and the head ends parked at the home corner."],
@@ -374,9 +363,17 @@ def mode_switch(ctx):
 
     # -- the web-service homing from grbl mode --------------------------------
     ev["homing_mode"] = (fc.settings() or {}).get("homing_mode")
-    ctx.check(ev["homing_mode"] == "gfcloud", "homing_mode is %r; $H needs gfcloud", ev["homing_mode"])
-    with ctx.grbl() as g:
-        gfhome_homing(ctx, ev, g)
+    if ev["homing_mode"] != "gfcloud":
+        st, body = fc.post("/settings", data={"homing_mode": "gfcloud"})
+        ctx.log("homing_mode=gfcloud for the homing -> %s %s", st, body if isinstance(body, str) else "")
+        ctx.check(st == 200, "homing_mode=gfcloud -> %s %s", st, body)
+    try:
+        with ctx.grbl() as g:
+            gfhome_homing(ctx, ev, g)
+    finally:
+        if ev["homing_mode"] != "gfcloud":
+            st, body = fc.post("/settings", data={"homing_mode": ev["homing_mode"] or "none"})
+            ctx.log("restore homing_mode=%r -> %s", ev["homing_mode"], st)
     ctx.log("PASS: grbl -> cloud (session, hunt with the lid open, lens homed, airflow unjudged) -> "
             "grbl (port open, %s), then $H homed in %.1f s", ev["grbl_state"], ev["homing_s"])
 

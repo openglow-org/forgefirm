@@ -10,8 +10,8 @@ P=$(pidof forgectrl)
 CTRL=$(pidof grblHAL_glowforge)
 echo "forgectrl pid $P, controller pid ${CTRL:-none}"
 # Kick the helpers off in the background.
-( curl -s -X POST -H "X-ForgeFIRM-Token: $TOK" http://127.0.0.1:8080/update/check >/tmp/upd.out 2>&1 ) &
-( curl -s -o /tmp/snap.jpg http://127.0.0.1:8080/cam/snapshot ) &
+( curl -s -X POST -H "X-ForgeFIRM-Token: $TOK" http://127.0.0.1:${FORGECTRL_PORT:-80}/update/check >/tmp/upd.out 2>&1 ) &
+( curl -s -o /tmp/snap.jpg http://127.0.0.1:${FORGECTRL_PORT:-80}/cam/snapshot ) &
 hits=0; seen=0; names=""
 i=0
 while [ $i -lt 60 ]; do          # ~6 s of scanning at 10 Hz

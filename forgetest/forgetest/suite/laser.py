@@ -93,6 +93,7 @@ def sample(ctx):
         "verdict": cs.get("verdict"),
         "beam": hw.sysfs_int("head/beam_detect_analog"),
         "beam_d": hw.sysfs_int("head/beam_detect_digital"),
+        "exhaust": (st.get("fans") or {}).get("exhaust"),
         "button_lit": hw.button_lit(),
         "hv_enable": (st.get("switches") or {}).get("hv_enable"),
         "button_latch": hw.sysfs_int("cnc/button_latch"),
@@ -494,6 +495,18 @@ def emission_witness(ctx):
                 "HV_ENABLE dipped=%s, back with emission after it=%s", gap["button_latch_unlocked_max"],
                 gap["button_latch_unlocked_samples"], gap["button_latch_set_at"], gap["hv_enable_dipped"],
                 gap["hv_enable_back_lit"])
+        # The first fire waits for the airflow: the exhaust reads at or
+        # above its floor on the first sample that shows emission.
+        floor = (ctx.forgectrl.settings() or {}).get("cool_tach_exhaust_min_rpm") or ""
+        try:
+            floor = float(floor) if floor else 6400.0
+        except ValueError:
+            floor = 6400.0
+        first_lit = next((s for s in samples if s["emission"]), None)
+        ev["exhaust_at_first_fire"] = first_lit["exhaust"] if first_lit else None
+        ev["exhaust_floor"] = floor
+        ctx.log("exhaust at the first emission sample: %s rpm (floor %.0f)",
+                ev["exhaust_at_first_fire"], floor)
         # X-3: job-based disarm at Idle after M2
         dt = wait_disarm(ctx, 75)
         ev["disarm_after_idle_s"] = round(dt, 1) if dt is not None else None
@@ -506,6 +519,9 @@ def emission_witness(ctx):
               "their idle duty (phase %s at t=%s s, emission %s)",
               first_idle_fire[1], first_idle_fire[0], first_idle_fire[2])
     ctx.check(end == 0, "emission_samples did not return to 0 at Idle (%s)", end)
+    ctx.check(ev["exhaust_at_first_fire"] is not None and ev["exhaust_at_first_fire"] >= floor,
+              "the beam started before the exhaust reached its floor (%s rpm at the first "
+              "emission sample, floor %.0f)", ev["exhaust_at_first_fire"], floor)
     ctx.check(hv and max(hv) > min(hv), "HV current did not rise during the burn (%s..%s)",
               ev["hv_min"], ev["hv_max"])
     ctx.check(dt is not None and dt < 10.0,

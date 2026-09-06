@@ -79,6 +79,12 @@ over TCP, then checks the dumps against the kernel feeder contract:
      the default gamma of 2 than at gamma 1, and the cruise middle
      renders the same - the exponent shapes only the velocity-scaled
      rolloff, never the programmed level
+ 24. a hold verdict is held again after a resume: with the engine's
+     verdict at its fail tier (hold, fire blocked, no resume) the client
+     holds the job; a ~ under that verdict, which is what a button press
+     or a sender does, moves the head for at most one client poll, dark,
+     before the client holds it again and says so; the clean verdict then
+     resumes the hold the client took, and the rest of the line cuts lit
 
 The analog sessions select the reference mode through the config; on
 hardware the controller ignores it (density is the only product model -
@@ -136,6 +142,16 @@ JOB_M4 = [
     "G1 X10 S1000",
     "G0 X0",
     "M5",
+]
+
+# Session Z: the lens is in the stream. The sender references the lens
+# (M103, as a commissioning card does), then a 1 mm move up and back at
+# the screw's 2.922 half-steps per millimeter: three Z steps with the
+# direction bit set, three with it clear.
+JOB_Z = [
+    "M103 Z3 P14 Q20",
+    "G0 Z4",
+    "G0 Z3",
 ]
 
 # Session B: M3 constant power to the end of the stream. The core never
@@ -372,17 +388,28 @@ def wait_state(sock, log, prefix, timeout=5.0):
     fail("controller never reached %s" % prefix)
 
 
+# The published verdict is clean unless a session sets this: then it is
+# the engine's fail tier (hold, fire blocked, no resume), what an airflow
+# fault publishes. A ("verdict", "hold") step sets it, ("verdict",
+# "clean") clears it.
+VERDICT_HOLD = threading.Event()
+
+
 def publish_verdicts(path, stop):
-    """Publish a fresh, clean cooling verdict every 0.5 s (the arm flow
-    refuses without one; freshness window is 2 s). Same-host monotonic
-    clock, atomic rename so the reader never sees a torn file. "armed"
-    is the engine's acknowledgment that it has taken the controller's
-    armed window; the arm waits for it, so a stand-in engine that means
-    to let jobs run must assert it."""
+    """Publish a fresh cooling verdict every 0.5 s (the arm flow refuses
+    without one; freshness window is 2 s), clean unless VERDICT_HOLD is
+    set. Same-host monotonic clock, atomic rename so the reader never
+    sees a torn file. "armed" is the engine's acknowledgment that it has
+    taken the controller's armed window; the arm waits for it, so a
+    stand-in engine that means to let jobs run must assert it."""
     while not stop.is_set():
-        body = ('{"ts_mono":%.3f,"fire_ok":true,"hold":false,'
-                '"resume_ok":true,"armed":true,"reason":""}'
-                % time.clock_gettime(time.CLOCK_MONOTONIC))
+        hold = VERDICT_HOLD.is_set()
+        body = ('{"ts_mono":%.3f,"fire_ok":%s,"hold":%s,'
+                '"resume_ok":%s,"armed":true,"reason":"%s"}'
+                % (time.clock_gettime(time.CLOCK_MONOTONIC),
+                   "false" if hold else "true", "true" if hold else "false",
+                   "false" if hold else "true",
+                   "harness: airflow fault" if hold else ""))
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             f.write(body)
@@ -412,6 +439,7 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
         env["GFHOME_CONF"] = conf_path
 
     stop = threading.Event()
+    VERDICT_HOLD.clear()
     pub = threading.Thread(target=publish_verdicts, args=(verdict, stop), daemon=True)
     pub.start()
 
@@ -444,6 +472,11 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
                 sock.sendall(step[1])           # a realtime character: no ok follows
             elif isinstance(step, tuple) and step[0] == "wait_state":
                 wait_state(sock, log, step[1])
+            elif isinstance(step, tuple) and step[0] == "verdict":
+                if step[1] == "hold":
+                    VERDICT_HOLD.set()
+                else:
+                    VERDICT_HOLD.clear()
             else:
                 send_line(sock, step, log)
 
@@ -466,6 +499,7 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
             proc.kill()
         stop.set()
         pub.join(2)
+        VERDICT_HOLD.clear()
 
     data = open(dump, "rb").read()
     if not data and arm_required:
@@ -495,6 +529,18 @@ def check_fire_gaps(name, data):
         else:
             run = 0
     return worst
+
+
+def check_z_move(name, data):
+    """The lens in the stream: a job's Z move steps it, up with the
+    direction bit set, down with it clear, the count the scale gives."""
+    ticks = tick_bytes(data)
+    up = sum(1 for b in ticks if b & 0x20 and b & 0x40)
+    down = sum(1 for b in ticks if b & 0x20 and not b & 0x40)
+    if up != 3 or down != 3:
+        fail("[%s] Z steps up %d, down %d (expected 3 and 3 for 1 mm at "
+             "2.922 half-steps per mm)" % (name, up, down))
+    print("PASS [%s]: a 1 mm Z move steps the lens %d up and %d back" % (name, up, down))
 
 
 def check_termination(name, data):
@@ -735,6 +781,10 @@ def main():
     data = run_session("m4", JOB_M4, conf=ANALOG_CONF)
     fire_ticks, powers, x_max, tail_steps = check_m4_job(data)
     check_termination("m4", data)
+
+    # --- session Z: the lens in the stream --------------------------------
+    zdata = run_session("z", JOB_Z, arm_required=False)
+    check_z_move("z", zdata)
     gap_a = check_fire_gaps("m4", data)
     print("PASS [m4]: %d bytes, %d power bytes, %d fire ticks, powers %s, "
           "X peak %d steps net 0, %d dark return steps, max fire gap %d"
@@ -1004,6 +1054,57 @@ def main():
         print("PASS [hold-%s]: lit into the hold (%d fire ticks), dark while held "
               "(%d ticks), lit from the first step out (%d fire ticks)"
               % (mode, decel, dlen, accel))
+
+    # --- rule 24: a hold verdict is held again after a resume -----------
+    # One long line at 50 mm/s. Mid-move the engine's verdict goes to its
+    # fail tier (hold, fire blocked, no resume: an airflow fault) and the
+    # client takes the feed hold. A ~ then resumes the job under the
+    # standing verdict, which is what a button press or a sender does;
+    # the client must hold it again within its poll, saying so, and the
+    # stretch it moved in between ships dark. The clean verdict then
+    # resumes the hold the client took, and the rest of the line cuts lit.
+    TICK_HZ = 28160
+    steps = ["G90", "G21", "M3 S500", "G1 X150 F3000", ("sleep", 0.7),
+             ("verdict", "hold"), ("wait_state", "Hold:0"), ("sleep", 0.5),
+             ("rt", b"~"), ("sleep", 1.2), ("wait_state", "Hold:0"),
+             ("sleep", 0.5), ("verdict", "clean"), WAIT_IDLE, "M5"]
+    data = run_session("verdict-rehold", steps, conf=DENSITY_CONF_FLOORED)
+    text = run_session.text
+    if "held again" not in text:
+        fail("[verdict-rehold] the client did not say it held the job again")
+    if "resuming" not in text:
+        fail("[verdict-rehold] the client did not resume its own hold once the verdict cleared")
+    ticks = tick_bytes(data)
+    step = [1 if t & 0x05 else 0 for t in ticks]
+    fire = [1 if t & 0x10 else 0 for t in ticks]
+    first = step.index(1)
+    last = len(step) - 1 - step[::-1].index(1)
+    holds, run = [], 0                              # the stationary stretches inside the motion
+    for i in range(first, last + 1):
+        if step[i]:
+            if run >= 2000:
+                holds.append((i - run, i))
+            run = 0
+        else:
+            run += 1
+    if len(holds) != 2:
+        fail("[verdict-rehold] expected two holds in the stream, found %d: %s"
+             % (len(holds), holds))
+    (_h1s, h1e), (h2s, h2e) = holds
+    between = sum(fire[h1e:h2s])
+    if between:
+        fail("[verdict-rehold] FIRE while resumed under the hold verdict: %d fire ticks "
+             "between the holds" % between)
+    if h2s - h1e > TICK_HZ:
+        fail("[verdict-rehold] the second hold came late: %d ticks (%.2f s) of motion under "
+             "the verdict" % (h2s - h1e, (h2s - h1e) / float(TICK_HZ)))
+    lit_after = sum(fire[h2e:last + 1])
+    if lit_after < 50:
+        fail("[verdict-rehold] the resume after the clean verdict ran dark (%d fire ticks)"
+             % lit_after)
+    print("PASS [verdict-rehold]: held, resumed dark for %d ticks (%.2f s), held again, "
+          "lit after the clear (%d fire ticks)"
+          % (h2s - h1e, (h2s - h1e) / float(TICK_HZ), lit_after))
 
     # --- rule 22: a jog never fires, whatever the modal spindle says ----
     # The arm flow runs on the M3 (window open), the modal spindle is on

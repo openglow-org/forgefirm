@@ -180,16 +180,27 @@ else
   echo "acceptance gate OK ($ART)"
 fi
 
-# Back-door gate: the release image must not ship a passwordless root. A
-# debug-tweaks image sets root's password field empty (root::...); a
-# hardened image leaves it locked (root:*: / root:!:) or hashed. Read the
-# actual built shadow file - this catches the flag however it slipped in
-# (recipe, local.conf, an inherited class).
-ROOT_PW=$(debugfs -R "cat /etc/shadow" "$EXT4" 2>/dev/null \
-          | awk -F: '$1=="root"{print $2; exit}')
-[ -n "$ROOT_PW" ] \
-  || die "release rootfs has a passwordless root (debug-tweaks leaked into forgefirm-image?)"
-echo "root login gate OK (root password field is not empty)"
+# Root policy gate. The release image ships root WITHOUT a password (the
+# serial console is the recovery path) and sshd refuses root and empty
+# passwords: PermitRootLogin no and PermitEmptyPasswords no must be
+# active (uncommented) in the built sshd_config, and root's shadow field
+# must be empty. Read the built files, not the recipes: this catches a
+# drift however it got in (recipe, local.conf, an inherited class).
+SSHD_CONFIG=$(debugfs -R "cat /etc/ssh/sshd_config" "$EXT4" 2>/dev/null)
+[ -n "$SSHD_CONFIG" ] \
+  || die "release rootfs carries no /etc/ssh/sshd_config"
+printf '%s\n' "$SSHD_CONFIG" | grep -Eq '^PermitRootLogin[[:space:]]+no[[:space:]]*$' \
+  || die "release sshd_config has no active 'PermitRootLogin no' (recipes-connectivity/openssh drift?)"
+printf '%s\n' "$SSHD_CONFIG" | grep -Eq '^PermitEmptyPasswords[[:space:]]+no[[:space:]]*$' \
+  || die "release sshd_config has no active 'PermitEmptyPasswords no' (recipes-connectivity/openssh drift?)"
+ROOT_SHADOW=$(debugfs -R "cat /etc/shadow" "$EXT4" 2>/dev/null \
+              | awk -F: '$1=="root"{print; exit}')
+[ -n "$ROOT_SHADOW" ] \
+  || die "release rootfs has no root entry in /etc/shadow"
+ROOT_PW=$(printf '%s\n' "$ROOT_SHADOW" | awk -F: '{print $2}')
+[ -z "$ROOT_PW" ] \
+  || die "release rootfs has a non-empty root password field: the policy is an empty field (empty-root-password in forgefirm-image.bb); a build drift"
+echo "root policy gate OK (root field empty; sshd refuses root and empty passwords)"
 
 # Config-level guard: debug-tweaks must not sit in the shared kas config,
 # where it would apply to every target including the release image.

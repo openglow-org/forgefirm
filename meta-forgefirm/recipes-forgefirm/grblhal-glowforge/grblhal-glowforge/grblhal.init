@@ -18,7 +18,7 @@
 
 DAEMON_BIN=/usr/bin/grblHAL_glowforge
 TOKEN_FILE=/data/forgefirm/panel.token
-CTRL_URL="http://127.0.0.1:${FORGECTRL_PORT:-8080}"
+CTRL_URL="http://127.0.0.1:${FORGECTRL_PORT:-80}"
 
 super_post() {
   [ -r "$TOKEN_FILE" ] || return 1

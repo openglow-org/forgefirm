@@ -174,7 +174,10 @@ class Session:
         self.workdir = tempfile.mkdtemp(prefix="laser-lifecycle-")
         conf = os.path.join(self.workdir, "forgefirm.conf")
         with open(conf, "w") as f:
-            f.write("laser_disarm_s = %d\n%s" % (disarm_s, conf_extra))
+            # The fan grace at 0 keeps the arm's acknowledgment budget at its
+            # 5 s floor, so the refusal cases stay short; a case that wants
+            # the real budget sets cool_fan_grace_s in conf_extra.
+            f.write("laser_disarm_s = %d\ncool_fan_grace_s = 0\n%s" % (disarm_s, conf_extra))
         verdict = os.path.join(self.workdir, "cooling.state")
         env = dict(os.environ, GF_VERDICT_FILE=verdict, GFHOME_CONF=conf,
                    GF_STATE_DIR=self.workdir, FFLOG_STDERR="1")
@@ -339,6 +342,38 @@ def test_status_files():
         assert ts1 > ts0, "ts_mono did not advance"
         print("PASS [state-files]: published, armed/switch/revert followed, "
               "generation %d -> %d" % (gen0, gen1))
+    finally:
+        s.close()
+
+
+def test_laser_keys_reload():
+    """M102 reloads the corner gamma, the curve, and the floor inside an
+    armed job, synchronized, and the state file follows them."""
+    print("laser keys reload: M102 takes rewritten laser keys mid-job")
+    s = Session("keys-reload", disarm_s=30, conf_extra="laser_corner_gamma = 1.5\n")
+    try:
+        st = read_state(s, '"gamma":1.50')
+        assert '"gamma":1.50' in st, "the gamma from the conf is not in force at boot: %r" % st
+        send_line(s.sock, "G91", s.log)
+        send_line(s.sock, "M4 S100", s.log)
+        st = read_state(s, '"armed":true')
+        assert '"armed":true' in st, "armed window not published: %r" % st
+        send_line(s.sock, "G1 X2 F600", s.log)
+        conf = os.path.join(s.workdir, "forgefirm.conf")
+        with open(conf, "w") as f:
+            f.write("laser_disarm_s = 30\nlaser_corner_gamma = 1.25\nlaser_dose_curve = off\n"
+                    "laser_floor_density = 0\n")
+        send_line(s.sock, "M102", s.log)
+        assert wait_for(s.log, "laser keys reloaded: corner gamma 1.25, curve off, floor 0 %", 5, s.sock), \
+            "M102 did not report the reload: %r" % s.log[-6:]
+        st = read_state(s, '"gamma":1.25')
+        assert '"gamma":1.25' in st and '"curve":"off"' in st and '"floor_pct":0' in st, \
+            "the reloaded keys did not reach the state file: %r" % st
+        assert '"armed":true' in st, "the reload closed the armed window: %r" % st
+        send_line(s.sock, "G1 X2 F600", s.log)
+        send_line(s.sock, "M5", s.log)
+        send_line(s.sock, "M2", s.log)
+        print("PASS [keys-reload]: gamma 1.50 -> 1.25, the curve off, the floor 0, inside the armed job")
     finally:
         s.close()
 
@@ -694,6 +729,32 @@ def test_arm_proceeds_on_a_late_ack():
         s.close()
 
 
+def test_arm_waits_for_the_fans():
+    """Rule 5: the acknowledgment budget follows the fan grace. The
+    engine acknowledges once the fans are at their floors, seconds after
+    the arm; with cool_fan_grace_s at 8 the controller waits up to 13 s
+    for it, and an acknowledgment at 9 s arms the job rather than
+    refusing it at the old 5 s budget."""
+    ack_s = 9.0
+    s = Session("arm-fans", fire_ok=True, ack_after_s=ack_s,
+                conf_extra="cool_fan_grace_s = 8\n")
+    try:
+        t0 = time.time()
+        s.send_raw("M4 S100")
+        s.send_raw("G1 X1 F600")
+        if not wait_for(s.log, ARMED, 20, s.sock):
+            fail("[arm-fans] the arm never completed with the acknowledgment at %.0f s "
+                 "(the budget did not follow cool_fan_grace_s)" % ack_s)
+        dt = time.time() - t0
+        if dt < ack_s - 0.5:
+            fail("[arm-fans] armed after %.1f s, before the fans were up at %.1f s" % (dt, ack_s))
+        if BLOCKED in "".join(s.log):
+            fail("[arm-fans] the wait for the fans was reported as a refusal")
+        print("PASS [arm-fans]: the arm waited %.1f s for the fans, then armed" % dt)
+    finally:
+        s.close()
+
+
 def test_sigterm_mid_job():
     """Rule 5: a termination signal during an armed job is a STOP, not a
     "finish the job first". The supervisor's expected-stop path (mode
@@ -989,6 +1050,7 @@ def main():
         fail("controller binary not found at %s" % BIN)
     test_job_window()
     test_status_files()
+    test_laser_keys_reload()
     test_sender_change()
     test_sender_change_mid_job()
     test_sender_change_holds_and_rearms()
@@ -1005,6 +1067,7 @@ def main():
     test_verdict_blocks_arm()
     test_arm_waits_for_engine_ack()
     test_arm_proceeds_on_a_late_ack()
+    test_arm_waits_for_the_fans()
     test_sigterm_mid_job()
     print("PASS: the armed-window lifecycle holds")
 

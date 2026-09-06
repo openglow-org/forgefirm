@@ -1,0 +1,152 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          forgefirm-users
+# Required-Start:    $local_fs
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:
+# Short-Description: ForgeFIRM accounts: replay the record into the system files
+### END INIT INFO
+
+# The account record is the source of truth for the operator accounts;
+# the account files on the rootfs are rebuilt from it. forgectrl writes
+# the record and runs "reload" here. At boot this runs at S05: /data is
+# mounted (mountall, rcS) and sshd (S09) is not up yet.
+#
+# Record: /data/forgefirm/users, one line per account
+#   name:hash:uid
+# hash is a sha512-crypt string ($6$...), uid is 1000 or more.
+# Home directory /data/forgefirm/home/<name>, mode 0700. Shell /bin/sh.
+#
+# Rules:
+#   - idempotent: a second run changes nothing;
+#   - no record: nothing happens (a machine before the first-run wizard,
+#     or a bench image without /data);
+#   - every local account with a uid from 1000 to 65533 that the record
+#     does not name is removed, so an account reset removes the old
+#     account; root and the system accounts are never touched.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+RECORD=/data/forgefirm/users
+HOMES=/data/forgefirm/home
+LOGIN_SHELL=/bin/sh
+UID_LOW=1000
+UID_HIGH=65533
+
+log () {
+  echo "forgefirm-users: $*"
+  { echo "forgefirm-users: $*" > /dev/kmsg; } 2>/dev/null
+}
+
+# A portable account name: a letter or underscore, then letters, digits,
+# underscore, dash.
+valid_name () {
+  case "$1" in
+    ''|[!a-z_]*|*[!a-z0-9_-]*) return 1 ;;
+  esac
+  return 0
+}
+
+valid_uid () {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge "$UID_LOW" ] && [ "$1" -le "$UID_HIGH" ]
+}
+
+passwd_uid () {
+  awk -F: -v n="$1" '$1 == n { print $3; exit }' /etc/passwd
+}
+
+group_exists () {
+  awk -F: -v n="$1" '$1 == n { f = 1 } END { exit !f }' /etc/group
+}
+
+# ensure_account name hash uid
+ensure_account () {
+  name=$1
+  hash=$2
+  uid=$3
+  home="$HOMES/$name"
+
+  cur=$(passwd_uid "$name")
+  if [ -n "$cur" ] && [ "$cur" != "$uid" ]; then
+    log "account $name has uid $cur, the record says $uid: recreating it"
+    userdel -f "$name" >/dev/null 2>&1
+    groupdel "$name" >/dev/null 2>&1
+    cur=""
+  fi
+
+  if ! group_exists "$name"; then
+    groupadd -g "$uid" "$name" || { log "groupadd $name failed"; return 1; }
+  fi
+  if [ -z "$cur" ]; then
+    useradd -M -u "$uid" -g "$uid" -d "$home" -s "$LOGIN_SHELL" "$name" \
+      || { log "useradd $name failed"; return 1; }
+    log "account $name created (uid $uid)"
+  fi
+
+  if [ ! -d "$home" ]; then
+    mkdir -p "$home" && chmod 0700 "$home"
+  fi
+  chown "$uid:$uid" "$home"
+
+  # -p stores the hash as it is. Home and shell are set again so an
+  # account file edited by hand converges on the record.
+  usermod -d "$home" -s "$LOGIN_SHELL" -p "$hash" "$name" \
+    || log "usermod $name failed"
+}
+
+# Remove every local account in the operator uid range that the record
+# does not name. KEEP holds the record's names, space separated.
+prune () {
+  for name in $(awk -F: -v lo="$UID_LOW" -v hi="$UID_HIGH" \
+                  '$3 + 0 >= lo && $3 + 0 <= hi { print $1 }' /etc/passwd); do
+    [ "$name" = root ] && continue
+    case " $KEEP " in
+      *" $name "*) continue ;;
+    esac
+    log "removing account $name (not in the record)"
+    userdel -f "$name" >/dev/null 2>&1 || log "userdel $name failed"
+    groupdel "$name" >/dev/null 2>&1
+  done
+}
+
+replay () {
+  [ -f "$RECORD" ] || return 0
+  mkdir -p "$HOMES"
+  KEEP=""
+  while IFS=: read -r name hash uid rest; do
+    [ -n "$name" ] || continue
+    case "$name" in '#'*) continue ;; esac
+    if ! valid_name "$name" || ! valid_uid "$uid" || [ -z "$hash" ]; then
+      log "skipping a malformed record line ($name)"
+      continue
+    fi
+    if [ "$name" = root ]; then
+      log "ignoring a root line in the record"
+      continue
+    fi
+    ensure_account "$name" "$hash" "$uid" && KEEP="$KEEP $name"
+  done < "$RECORD"
+  prune
+}
+
+case "$1" in
+  start|reload|restart|force-reload)
+    replay
+    ;;
+  stop)
+    ;;
+  status)
+    awk -F: -v lo="$UID_LOW" -v hi="$UID_HIGH" \
+      '$3 + 0 >= lo && $3 + 0 <= hi { print $1 " (uid " $3 ")" }' /etc/passwd
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|reload|restart|status}"
+    exit 1
+    ;;
+esac
+
+exit 0

@@ -28,7 +28,7 @@ _LOG_COVERS = [("forgectrl", "src/logs.*"), ("forgectrl", "src/fflog.*"), ("forg
       covers=_LOG_COVERS, requires=["forgectrl.auth"],
       description="/logs lists the loggers with their levels and files, /logs/tail returns the "
                   "forgectrl logger's tail, and POST /logs/export streams a sanitized tar.gz "
-                  "bundle that contains no panel token.")
+                  "bundle that contains neither the panel token nor the camera key.")
 def tree_tail_export(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -66,16 +66,21 @@ def tree_tail_export(ctx):
     ctx.log("bundle: %d members, e.g. %s", len(members), members[:5])
     ctx.check(members, "empty bundle")
     ctx.check(any(m.endswith("README.txt") for m in members), "sanitized bundle lacks README.txt")
-    token = fc.token
-    if token:
-        leaked = []
-        for m in tf.getmembers():
-            if m.isfile():
-                content = tf.extractfile(m).read()
-                if token.encode() in content:
-                    leaked.append(m.name)
-        ev["token_leaks"] = leaked
-        ctx.check(not leaked, "the sanitized bundle contains the panel token: %s", leaked)
+    # the two secrets the sanitizer knows by value and a bundle could
+    # carry: the panel token and the camera key (a URL parameter that
+    # lands in sender logs)
+    secrets = {}
+    if fc.token:
+        secrets["panel token"] = fc.token
+    st, body = fc.get("/system/camera-key")
+    if st == 200 and isinstance(body, dict) and body.get("key"):
+        secrets["camera key"] = body["key"]
+    ctx.check("camera key" in secrets, "GET /system/camera-key -> %s: no key to check for", st)
+    contents = [(m.name, tf.extractfile(m).read()) for m in tf.getmembers() if m.isfile()]
+    for what, value in secrets.items():
+        leaked = [name for name, content in contents if value.encode() in content]
+        ev[what.replace(" ", "_") + "_leaks"] = leaked
+        ctx.check(not leaked, "the sanitized bundle contains the %s: %s", what, leaked)
 
 
 # The routing test proves the whole path every logger takes: emitter (or

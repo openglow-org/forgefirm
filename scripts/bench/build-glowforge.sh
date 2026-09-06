@@ -22,7 +22,7 @@ cmake -B build-arm \
   -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=arm \
   -DCMAKE_C_COMPILER=arm-fslc-linux-gnueabi-gcc \
   -DCMAKE_BUILD_TYPE=None \
-  "-DCMAKE_C_FLAGS=--sysroot=$TC/recipe-sysroot -mthumb -mfpu=neon -mfloat-abi=hard -mcpu=cortex-a9 -O1 -g" \
+  "-DCMAKE_C_FLAGS=--sysroot=$TC/recipe-sysroot -mthumb -mfpu=neon -mfloat-abi=hard -mcpu=cortex-a9 -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -O1 -g" \
   "-DCMAKE_EXE_LINKER_FLAGS=--sysroot=$TC/recipe-sysroot" \
   > "$LOG" 2>&1
 cmake --build build-arm -j8 >> "$LOG" 2>&1 || { tail -30 "$LOG"; exit 1; }

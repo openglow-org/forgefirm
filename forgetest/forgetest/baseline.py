@@ -44,12 +44,14 @@ from .log import now_ts
 # GRBL-mode resting values (kernel attribute -> value as read back), as a
 # fresh boot of the dev image leaves them (2026-08-16 bench dump).
 # motor_lock/x_mode/y_mode/x_decay/y_decay and the hold currents are the
-# GRBL controller's init writes (glowforge_io.c), step_freq its default
-# machine tick, ramp_rate the module default; streaming is only ever 1
-# inside a live job; the head white LED is a camera lamp, off at idle; the
-# loop heater and TEC are the diagnostics' tools, off at idle.
+# GRBL controller's init writes (glowforge_io.c): motor_lock 0, every axis
+# in the pulse path (a job's Z moves the lens; the driver's Z soft limit
+# guards it), step_freq its default machine tick, ramp_rate the module
+# default; streaming is only ever 1 inside a live job; the head white LED
+# is a camera lamp, off at idle; the loop heater and TEC are the
+# diagnostics' tools, off at idle.
 FIXED_SYSFS = [
-    ("cnc/motor_lock", "8"),
+    ("cnc/motor_lock", "0"),
     ("cnc/x_mode", "8"),
     ("cnc/y_mode", "8"),
     ("cnc/x_decay", "1"),
@@ -229,8 +231,10 @@ class Baseline:
     def wait_settled(self, timeout=SETTLE_S, unreachable_s=10):
         """Block until forgectrl reports a settled supervisor: motion
         verified (the probe passed), motion-fault (the ladder exhausted),
-        or standby (the manual stop lever). Gives up after unreachable_s
-        without an answer. Returns the last /mode body (None if unreachable)."""
+        standby (the manual stop lever), or gated (the commissioning gate
+        is closed: no controller spawns until it opens). Gives up after
+        unreachable_s without an answer. Returns the last /mode body (None
+        if unreachable)."""
         t0 = time.time()
         deadline = t0 + timeout
         last = seen = heard = None
@@ -252,7 +256,7 @@ class Baseline:
                     seen = key
                     self.log("/mode controller=%s motion=%s" % key)
                 ctl = body.get("controller")
-                if ctl in ("motion-fault", "standby") or (ctl == "running" and body.get("motion") == "verified"):
+                if ctl in ("motion-fault", "standby", "gated") or (ctl == "running" and body.get("motion") == "verified"):
                     if ctl == "motion-fault":
                         self.log("WARNING - motion liveness ladder failed, controllers are "
                                  "down (motion-fault); retry via POST /mode")
@@ -304,6 +308,20 @@ class Baseline:
             return True, "already in %s mode" % want
         self.log("switching to %s mode (found %s, controller %s)"
                  % (want, mode.get("mode"), mode.get("controller")))
+        if want == "cloud":
+            # Cloud mode exists only while cloud_enabled is 1. A test that
+            # needs it gets it turned on here, with a line in the log; it
+            # stays on afterward, as a cloud job the owner ran would leave it.
+            st, settings = self.fc_get("/settings")
+            if st == 200 and isinstance(settings, dict) and settings.get("cloud_enabled") != "1":
+                # the typed phrase the cloud step asks for: the runner
+                # gives it under the operator's rule for cloud tests
+                st, body = self.fc_post("/settings", data={"cloud_enabled": "1",
+                                                            "phrase": "I UNDERSTAND"})
+                if st != 200:
+                    return False, "cloud_enabled=1 for the test -> %s %s" % (st, body)
+                self.log("cloud mode turned on for the test (cloud_enabled was %r)"
+                         % (settings.get("cloud_enabled") or ""))
         self.nohunt_on(want)
         st, body = self.fc_post("/mode", data={"controller": want})
         if st != 200:
@@ -697,19 +715,20 @@ def check_fixed_against(ref, log):
 # The attributes the GRBL controller writes at its own start (its analog
 # config + machine tick): once they read the fixed values the controller
 # has configured the machine. Before that the kernel shows the supervisor's
-# motion-probe leftovers (motor_lock 0, step_freq 10000, y_mode at the
-# module default) - the state /mode already calls "running", because
-# "running" is the spawn, not the config.
-CONFIGURED_MARKERS = [(a, dict(FIXED_SYSFS)[a]) for a in ("cnc/step_freq", "cnc/motor_lock", "cnc/y_mode")]
+# motion-probe leftovers (step_freq 10000, y_mode at the module default) -
+# the state /mode already calls "running", because "running" is the spawn,
+# not the config. motor_lock is no marker: the probe and the controller
+# both leave it 0.
+CONFIGURED_MARKERS = [(a, dict(FIXED_SYSFS)[a]) for a in ("cnc/step_freq", "cnc/y_mode")]
 CONFIGURED_TIMEOUT_S = 20
 CONFIGURED_SETTLE_S = 1.0
 
 
 def reference_preconfig(ref):
     """True when a saved reference shows the pre-controller state: every
-    marker present differs from its fixed value (the probe's step_freq /
-    motor_lock and the module's y_mode together), i.e. it was dumped
-    before the controller's init writes landed."""
+    marker present differs from its fixed value (the probe's step_freq and
+    the module's y_mode together), i.e. it was dumped before the
+    controller's init writes landed."""
     sysfs = (ref or {}).get("sysfs") or {}
     seen = [(sysfs.get(a), want) for a, want in CONFIGURED_MARKERS if sysfs.get(a) is not None]
     return bool(seen) and all(got != want for got, want in seen)

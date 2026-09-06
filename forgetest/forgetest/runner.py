@@ -424,15 +424,17 @@ class Context:
         self.log("ACT %s %s: done after %.1f s", channel, state, dt)
         return dt
 
-    def arm_press(self, text="The button lights white: press it to arm. The machine fires after your press."):
+    def arm_press(self, text="The button lights white: press it to arm. The machine fires after your press.",
+                  lit_timeout=60):
         """The arm cue of a live test. A person's press by default: a
         standing notice until the caller clears it. The fixture presses
         only where the bench opted in (arm_press in its config) and its
-        button channel is enabled: a thread waits for the button to light
-        (the job may still be on its way to the arm wait) and presses
-        once, recorded as the fixture's; if the button never lights or
-        the press fails, the notice goes up for a person. Returns True
-        when the fixture has been asked."""
+        button channel is enabled: a thread waits up to `lit_timeout`
+        seconds for the button to light (the job may still be on its way
+        to the arm wait; a card that settles the coolant first takes
+        minutes) and presses once, recorded as the fixture's; if the
+        button never lights or the press fails, the notice goes up for a
+        person. Returns True when the fixture has been asked."""
         fixture = getattr(self.runner, "fixture", None) if self.runner is not None else None
         rec = {"channel": "button", "state": "arm", "by": "operator", "ts": now_ts()}
         self.evidence.setdefault("actions", []).append(rec)
@@ -452,9 +454,9 @@ class Context:
         self.log("ARM: the fixture presses when the button lights (the bench's arm_press opt-in)")
 
         def press():
-            lit = self.wait_for(hw.button_lit, 60)
+            lit = self.wait_for(hw.button_lit, lit_timeout)
             if lit is None:
-                self.log("ARM: the button never lit within 60 s - asking the operator")
+                self.log("ARM: the button never lit within %d s - asking the operator", lit_timeout)
                 self.notice(text)
                 return
             try:

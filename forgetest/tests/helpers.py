@@ -108,6 +108,7 @@ class FakeForgectrl:
         }
         self.posts = []
         self.on_post = None
+        self.on_get = None          # (path, query) -> (status, body) | (status, bytes, ctype) | None
         fake = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -123,7 +124,18 @@ class FakeForgectrl:
                 self.wfile.write(data)
 
             def do_GET(self):
-                path = self.path.split("?", 1)[0]
+                path, _, query = self.path.partition("?")
+                if fake.on_get:
+                    r = fake.on_get(path, dict(_up.parse_qsl(query, keep_blank_values=True)))
+                    if r is not None:
+                        if isinstance(r[1], (bytes, bytearray)):
+                            self.send_response(r[0])
+                            self.send_header("Content-Type", r[2] if len(r) > 2 else "application/octet-stream")
+                            self.send_header("Content-Length", str(len(r[1])))
+                            self.end_headers()
+                            self.wfile.write(r[1])
+                            return
+                        return self._send(r[0], r[1])
                 key = {"/mode": "mode", "/status": "status", "/cool/status": "cool", "/cam/status": "cam",
                        "/diag/status": "diag", "/settings": "settings",
                        "/logs/tail": "logs_tail"}.get(path)

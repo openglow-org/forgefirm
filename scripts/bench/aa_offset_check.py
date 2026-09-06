@@ -16,7 +16,7 @@ import sys
 import time
 import urllib.request
 
-from live_fire_drills import Grbl, HOST, PORT
+from live_fire_drills import Grbl, HOST, PORT, BASE
 
 
 def raw():
@@ -28,11 +28,11 @@ def raw():
 
 
 def status():
-    with urllib.request.urlopen('http://127.0.0.1:8080/status', timeout=2) as r:
+    with urllib.request.urlopen(BASE + '/status', timeout=2) as r:
         s = json.load(r)
-    with urllib.request.urlopen('http://127.0.0.1:8080/cool/status', timeout=2) as r:
+    with urllib.request.urlopen(BASE + '/cool/status', timeout=2) as r:
         c = json.load(r)
-    with urllib.request.urlopen('http://127.0.0.1:8080/settings', timeout=2) as r:
+    with urllib.request.urlopen(BASE + '/settings', timeout=2) as r:
         st = json.load(r)
     return (s['coolant']['down_c'], s['coolant']['up_c'], c['down_c'], c['up_c'], c['phase'],
             st.get('cool_aa_offset_counts'))
@@ -58,7 +58,7 @@ def post_settings(**kv):
             tok = f.read().strip()
     except OSError:
         tok = ''
-    req = urllib.request.Request('http://127.0.0.1:8080/settings',
+    req = urllib.request.Request(BASE + '/settings',
                                  data=urllib.parse.urlencode(kv).encode(),
                                  headers={'X-ForgeFIRM-Token': tok})
     with urllib.request.urlopen(req, timeout=4) as r:
@@ -76,7 +76,7 @@ def main():
     # A run session starts the flow check, whose heater warms the
     # downstream sensor inside this check's dwell: off for this session,
     # back afterward.
-    with urllib.request.urlopen('http://127.0.0.1:8080/settings', timeout=2) as r:
+    with urllib.request.urlopen(BASE + '/settings', timeout=2) as r:
         was = json.load(r).get('cool_flow_check_s')
     if was in (None, ''):
         was = '50'                        # unset reads as empty: the shipped default
@@ -95,7 +95,7 @@ def main():
         post_settings(cool_flow_check_s=str(was))
     else:
         post_settings(cool_flow_check_s='50')
-    with urllib.request.urlopen('http://127.0.0.1:8080/settings', timeout=2) as r:
+    with urllib.request.urlopen(BASE + '/settings', timeout=2) as r:
         print('flow check restored: cool_flow_check_s = %s' % json.load(r).get('cool_flow_check_s'))
     time.sleep(25.0)                      # the session closes, the fans idle
     r2, s2 = mean_over(8.0)

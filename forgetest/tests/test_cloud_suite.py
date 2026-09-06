@@ -650,11 +650,13 @@ class CloudSuiteTests(unittest.TestCase):
         threading.Thread(target=self.wait_home_command, daemon=True).start()
         self.assertFails(cloud.mode_switch, "no 'homing complete' line", hooks=hooks)
 
-    def test_mode_switch_precheck_needs_gfcloud_homing(self):
-        self.fc.state["settings"]["homing_mode"] = "switches"
-        self.assertIn("needs gfcloud", cloud.homing_mode_is_gfcloud())
-        self.fc.state["settings"]["homing_mode"] = "gfcloud"
-        self.assertIsNone(cloud.homing_mode_is_gfcloud())
+    def test_mode_switch_needs_no_setting_from_the_operator(self):
+        # The test sets the gfcloud homing itself and restores it: no precheck
+        # names a setting the operator should change first.
+        from forgetest import catalog
+        t = catalog.load_suite()["cloud.mode-switch"]
+        self.assertIsNone(getattr(t, "precheck", None))
+        self.assertNotIn("homing_mode_is_gfcloud", dir(cloud))
 
     # -- pause / resume ---------------------------------------------------------
     def replay_print(self, name, at_run, at_end, tail_delay=0.3):

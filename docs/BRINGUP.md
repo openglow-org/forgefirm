@@ -158,9 +158,18 @@ core mutex stands in for interrupt masking. `GFSINK` unset = null-sink mode
    every takeover runs the `rail_settle_s` off-period; under the broker it
    inherits the fd and skips the settle (the rail never dropped). The driver
    applies the full analog machine config at init either way (×8 modes, decay 1,
-   motor_lock 8, laser latched, PIC hold currents) and swaps PIC run/hold
+   motor_lock 0 with every axis in the pulse path and the Z soft limit always
+   on, laser latched, PIC hold currents) and swaps PIC run/hold
    currents around motion. Each motion run logs a producer-stats line
    (callbacks, µs/call, max-behind, clamped) - `clamped` should stay 0.
+   The driver reports Idle when the stream is produced; the kernel plays it
+   a queue depth behind, and a jog sent at Idle while the kernel still drains
+   the last one adds up to a depth of pad slots ahead of its own bytes, so
+   the physical end runs further behind each time (measured 160, 290, 500
+   and 540 ms after Idle across four chained 50 mm jogs). A `cnc/stop` at
+   Idle discards that tail; the position counters stay true to what was
+   played. Anything that must keep position waits for `cnc/state` to read
+   idle before it stops the controller.
 4. Connect LightBurn/UGS to `<machine-ip>:23`, or jog raw: `$J=G91X40F1200`.
    `^X` mid-motion aborts via kernel `cnc/stop` (controlled decel) and raises an
    alarm; TCP disconnects never kill the process (the dead-man fd stays held).
@@ -303,7 +312,10 @@ coolant temperature blocks arming and suppresses fire mid-job with a loud
 warning. While armed, the run fan profile and flow interrogation are forced on
 regardless of the sender's M8/M9; a SUSPECT/FAULT verdict inside an armed
 window takes the safe posture (feed hold + run airflow). SUSPECT auto-resumes
-on a clean re-check; FAULT leaves the hold and the gate for the operator.
+on a clean re-check; FAULT leaves the hold and the gate for the operator. A
+job resumed under a standing hold (the button, `~`, a sender) is held again
+within the client's next poll, dark in between: a verdict with no resume is a
+reset, never a pause (stream rule 24 on the null-sink build).
 
 **The controller publishes its state for the daemon.** forgectrl can
 never open the Grbl socket (a connection displaces the sender), so the
@@ -405,12 +417,28 @@ the lens against the hall for a deterministic Z. **A quiet service without an
 accel-witnessed motion window is a failure, not a homing.**
 
 Position semantics: factory home = machine origin (back-left corner, +Y =
-FRONT, workspace all-positive 0..495 × 0..279); Z top-of-travel = 10.6.
-`gfcloud_home_x/y/z` calibrate the post-home coordinates once measured
-(defaults 0 / 0 / Z max). GRBL mode permits unhomed cutting - position shows
+FRONT, workspace all-positive 0..495 × 0..279); Z = the focal point's height
+above the tray (Z 0 on the bed, +Z = lens up); $102 is the screw's constant
+2.922 half-steps per mm; the one per-head number is `lens_hall_edge_z_mm`,
+the focal height with the lens on the hall's rising edge (3.35 on the bench
+reference machine, Z 3.42 on the step grid), which the focus card measures
+without touching a stop; the card also finds the head's stops by the head
+accelerometer, one half-step at a time and without a slip
+(`lens_stop_below_steps` / `lens_stop_above_steps`, 14 / 20 on the bench
+reference machine; a fallback window of 10 / 12 and a notice when they
+cannot be found), which bounds every lens move; a home leaves the lens on
+the edge, sets Z, and parks the focus at `lens_park_z_mm` (default 3). The
+lens is in the pulse path (motor_lock 0, the drive current during runs), so
+a job's Z moves it; the driver's Z soft limit is always on: Z held where it
+is until referenced (a home, or a card's `M103 Z P Q`), then the free travel
+with a half-step of slack. The gfcloud
+homing session answers the service's hunt as done without moving the lens
+and takes its own hall reference after the service goes quiet.
+`gfcloud_home_x/y` calibrate the post-home XY once measured
+(defaults 0 / 0). GRBL mode permits unhomed cutting - position shows
 counters-only and painted red until anchored.
 
-## The machine-services daemon (forgectrl, port 8080)
+## The machine-services daemon (forgectrl, ports 80 and 443)
 
 Source: the `forgectrl` sibling repo (github.com/openglow-org/forgectrl, branch
 `main`, MIT). It is the ForgeFIRM machine-services daemon: **controller-mode
@@ -432,7 +460,11 @@ Every state-changing endpoint requires the first-boot bearer token in `/data`
 (embedded in the panel), a Host address-literal check, and
 `Sec-Fetch-Site`/`Origin` validation (CSRF and DNS-rebinding refusal).
 `/cool/state` is loopback-only. `/fuse-identity` and unsigned-firmware installs
-additionally require the physical button held.
+additionally require the physical button held. After the setup creates the
+account, every state-changing call needs a login session: HTTPS-only cookie,
+12 h idle expiry, 30 s lockout after five failures. Loopback and a dev image
+write with the token alone; port 80 serves only the read-only routes
+(`panel_open_reads=0` closes them) and redirects writes to HTTPS.
 
 One ulfius daemon serves it all:
 
@@ -461,8 +493,12 @@ One ulfius daemon serves it all:
   `gfcloud_home_timeout_s`, `gf_serial`, `gf_password`, `ui_units`,
   `wifi_country`, the thirty `cool_*` tunables, `laser_button_timeout_s`,
   `laser_disarm_s`, `rail_settle_s`, `lid_lamp_idle`, `lid_policy`,
-  `cloud_pause_backtrack_ticks`, `cloud_resume_lead_ticks`, `cloud_hold_max_s`, the twelve
+  `cloud_pause_backtrack_ticks`, `cloud_resume_lead_ticks`, `cloud_hold_max_s`,
+  `cloud_enabled`, `panel_open_reads`, the twelve
   `log_<logger>_disk|_remote` levels and `syslog_server|port|proto`.
+  `cloud_enabled=1` from 0 takes `phrase=I UNDERSTAND` (400 without it),
+  and `cloud_enabled=0` takes `homing_mode` to `none` and `controller_mode`
+  to `grbl` when they point at the cloud, as the setup's cloud step does.
 - `GET /mode`, `POST /mode?controller=grbl|cloud` - the supervisor: current
   mode, controller state (`running | stopped | standby | motion-fault`), pid,
   and the motion-liveness verdict (`verified | unverified | fault`); the POST is
@@ -495,6 +531,17 @@ One ulfius daemon serves it all:
   (below).
 - `GET /fuse-identity` - serial, derived hostname and the SRK password, behind
   the token AND the physical button; fetched on demand only.
+- `GET /login`, `POST /login|logout`, `GET /setup`, `GET /wiz`, `GET /wiz/record`,
+  `GET /advisories/<id>`, `POST /wiz/advisories/accept|press|press/cancel`,
+  `GET /wiz/advisories/press`, `POST /wiz/account|preferences|machine|cloud|complete`
+  - the login and the first-run setup (served at `/` until complete, `/setup`
+  after; the record is `/data/forgefirm/commissioning.json`; the gate: `GET
+  /mode` reports `gated` with `why` until it completes, and
+  `/run/forgefirm/commissioning-override` lifts the hardware gate until reboot).
+- `GET/POST /system/ssh?enable=0|1` (SSH until the next reboot; off at every
+  boot, a dev image keeps it on) and `POST /restore/factory-return?confirm=1`
+  (the setup's exit: the archived factory image into the other slot, the boot
+  selection moved, reboot).
 
 **Panel conventions:** the header identifies the machine by its **fuse
 identity** (the factory hostname derived from the OCOTP serial), regardless of
@@ -648,7 +695,7 @@ from nothing with the bench actuator in the loop (the record is in
 authorizes a release; it is not one until `releases/v<version>/acceptance.json`
 is committed.
 
-- **Catalog: 54 tests** in `forgetest/forgetest/suite/`, every one a port of a
+- **Catalog: 81 tests** in `forgetest/forgetest/suite/`, every one a port of a
   proven bench drill or a bench-verified check: the always-required core
   (`image.health`, `kernel.latch-locked-idle`, `kernel.k1-k2`,
   `kernel.deadman-close`, `kernel.backtrack-bounds`, `kernel.fire-line`,
@@ -665,8 +712,13 @@ is committed.
   the cloud client driven from a local socket with a synthesized
   laser-free job, no account, no network, nothing on the bed). Tests that
   share a setup are merged; the `auto` tests stay separate for failure
-  isolation. 34 are `auto`, 10 `operator`, 10 `live`; with the bench actuator up,
-  eight of the operator tests run in the unattended queue.
+  isolation. 52 are `auto`, 15 `operator`, 11 `live`; with the bench actuator up,
+  twelve of the operator tests run in the unattended queue. The operator's
+  part is kept minimal by rule: a test that needs a person asks for one
+  thing (a press, a Print in the app, a piece of wood on the bed), and
+  never an errand (a reboot into another image, a return to the factory
+  firmware) or a page to watch; the commissioning sheet is one live run
+  with one press, not a test per card.
 - **The operator's part is asked for by name, not by popup**
   (the site, Developers, "Acceptance", "The operator's part"): a Ready prompt before a
   timed step, a standing notice the test takes down when the machine shows
@@ -675,9 +727,11 @@ is committed.
   emission witness's mark). The head accelerometer, the beam detector, the
   button LEDs, and a lid-lamp toggle between two snapshots replaced the
   other eyeball confirmations; `kernel.fire-line` and `camera.snapshot` are
-  `auto`. With the bench actuator up the attended block is the ten tests
-  that need a person (five laser live, five cloud): 12 minutes on dev image
-  `20260824230512`. A test's implementation hash is its own function plus its
+  `auto`. With the bench actuator up the attended block is the fourteen
+  tests that need a person: the eleven `live` tests (one press each at the
+  ready gate, the actuator arms), the cloud service protocol and the header
+  capture (a Print in the Glowforge app), and the first-run page walk. A
+  test's implementation hash is its own function plus its
   module's shared code, so a fix inside one test re-requires that test
   alone.
 - **Machine identity is content-defined.** Every component recipe contributes
@@ -891,9 +945,36 @@ is committed.
   contradicts this arithmetic.
 - Byte layout and stream rules: see [the pulse feeder contract](https://docs.forgefirm.org/technical/forgefirm/pulse-feeder-contract/)
   (authoritative).
-- **Z**: bit 6 SET = lens UP = +Z (hardware-verified). Home = hall trigger at
-  TOP; usable travel ≈ 30 half-steps ≈ 10.6 mm ≈ 0.417"; 0.3534 mm/half-step.
-  Never blind-drive Z - hall-supervised only.
+- **Z**: bit 6 SET = lens UP = +Z (hardware-verified). The lens is a 2 in
+  lens under a collimated beam (Glowforge's own figure), so it moves with its
+  focal point, 1:1, and its carriage travels 0.485 in (12.32 mm, the head
+  drawing): that travel is the focal range. The bench head's carriage counts
+  36 half-steps stop to stop (37 on a second count), 0.34 mm each, with the
+  hall sensor's edge (the first position reading home going up) 13 above the
+  BOTTOM stop and 23 below the top; the focus card homes the lens on the
+  bottom stop to place the edge (the travel itself is the screw's constant,
+  36) and places the half-step where the lens is 2 in
+  from the bed from the user's pick (`laser_focus_bed_steps`, 3.3 on the
+  bench head, and `laser_focus_steps_per_mm`, 2.92): the tallest material
+  the lens focuses is the travel above that step, 11.2 mm (0.44 in) here. The
+  service's Z commands are full steps (its header's z_mode 0 is full-step
+  mode): 15 for 0.5 in, 4 for 0.1 in, about 2.8 half-steps per mm of material
+  from the bottom stop, and an early community capture of the same law in
+  half-steps (8 at 0.1 in, 28 at 0.4 in, 30 at 0.5 in) shows it saturating
+  at 30, the service's own idea of the usable travel. The factory's hunt
+  drives the lens 4 full steps down from the hall edge: that point is its Z
+  zero (5 half-steps above the bottom stop on the bench head; it moves with
+  the edge from head to head), and its prints move up from it. The pulse path
+  drives Z only with `cnc/motor_lock` bit 3 clear; the driver and the cloud
+  client set the lock at their start (the factory's idle posture) and lift it
+  for a motion. The lens rises only at the head driver's high current
+  (`head/z_current` 0): at the low (hold) current it lifts two steps into
+  the service's ramp and stalls, while lowering works at either (measured
+  with single steps at the ramp's timing); every lens move (the homing
+  sweeps, the focus card, the cloud client's motions) sets the high current
+  first and the low current after. The pick on 0.110 in plywood (lines 8 and 9 of 12, 11.5
+  half-steps above the bottom stop) sits about one line above the service's
+  own law for that height.
 - **XY**: 0.15 mm per full step; DIR bit set = −X / +Y (Y1/Y2 complementary).
   **+Y physically moves the gantry toward the FRONT.** Home corner (convention,
   for the planned limit-switch homing) = back-left (X min, Y min), workspace
@@ -1339,7 +1420,30 @@ feature requests, enhancements) will eventually be tracked as GitHub issues.
     air-assist offset; and if a lit check still trips, the
     void-on-emission design with the tube as its own flow tracer.
 8. **Initial commissioning: measure and set the machine's own numbers
-    methodically.** Every tunable that was measured on the bench machine
+    methodically.** Phase 1 (consent, account, preferences, machine facts,
+    the cloud decision, the gate, HTTPS on 443, the factory return),
+    phase 2 (the setup checks: switches, sensors, airflow, motion, cameras,
+    the coolant offset and the flow calibration as checks, the cloud header
+    capture, the Commissioning tab, the engine-raised flags), and phase 3
+    (the sheet: the stroke font and renderer, the daemon's own sender with
+    the emission witnesses, the placement, the frame, the focus, floor,
+    dose-curve, corner, and flow-load cards, M102 in the driver) are in
+    forgectrl and the driver. Phase 1 passes the
+    first-run walk-through and the commission acceptance set on the bench;
+    phase 2 passes its six automated checks (`commission.check-*`) and the
+    cloud header capture; phase 3 passes `commission.sheet`, one live run
+    over the whole sheet on one piece. Phase 4 (the lifecycle: the
+    what-changed menu, the record as a download and a printable page and
+    inside the log bundle, the button LED choreography, the second-browser
+    mirror) is built in forgectrl with its three unattended cases. The
+    commissioning acceptance set is 23 cases, three of them attended with
+    the bench actuator up (the page walk, one Print in the Glowforge app,
+    and the sheet with one press), and every one has passed on the bench.
+    The usability pass over the cards (every wait named and counted, the
+    press prompted when the button lights, the result as a sentence with
+    the settings written and the numbers under a fold) is bench-proven with
+    the content-sized layout. All of it waits for its push and pin. Every tunable
+    that was measured on the bench machine
     and shipped as a default varies from machine to machine: the flow
     check's bands and `cool_flow_rise`, the tube's heat coefficients
     (`cool_laser_heat_cw`, `cool_laser_heat_density`), the air-assist
@@ -1363,6 +1467,16 @@ feature requests, enhancements) will eventually be tracked as GitHub issues.
     is the proof case (this bench settled at 1.5 and may go lower, so the
     shipped default of 2 is a starting point, not a truth), and the same
     shape fits any by-eye tunable the commissioning flow meets.
+9. **Idle before the kernel drains.** The driver reports Idle when the
+    stream is produced, up to about 550 ms before the pulse engine finishes
+    playing it after chained jogs (the fact under "Running the controller").
+    A sender or a service that stops the controller at Idle loses that tail
+    silently. Decide whether Idle should hold until the kernel drains (the
+    stream engine has `gf_stream_kernel_idle`) or the continuation pads
+    should stop growing the lag; either is a driver change with a
+    `motion.*` catalog case. Until then every forgectrl path that stops
+    the controller after motion waits for `cnc/state` idle first (the
+    motion check does).
 
 **Deliberately not gated:** an armed GRBL job after an underrun cuts at the
 stale origin unless homing is required (GRBL mode permits unhomed cutting; the

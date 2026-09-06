@@ -7894,6 +7894,1192 @@ The audit file is deleted, as the 2026-07-03 and 2026-08-13 audits were before
 it. forgefirm 637fb67 and forgectrl ff89288 are pushed, and the forgectrl pin
 moves to the revision this campaign ran.
 
+## 2026-09-04: commissioning phase 1 on the bench, the first run walked and the commission set passed
+
+Phase 1 of the commissioning work is the consent flow, the operator account,
+the preferences, the machine facts, the cloud decision, the controller gate,
+HTTPS on 443 with the plain listener on 80, and the return to the factory
+firmware. It was written and proven on the host, and nothing of it was pushed.
+Build p39 made both images from the working trees of the layers and the test
+suite, so the image carries the new recipes (the account replay, the sshd
+policy, the console banner, mDNS, the license bundle, the TLS build of the
+HTTP stack) while the daemon and the controller came from their pushed pins.
+The phase 1 daemon and controller were cross-built from the working trees and
+hot-deployed. Both images carry one kernel. The release rootfs uses 92 MiB.
+
+    campaign     c-20260904220822-e8fe
+    image        20260904203403 (dev)
+    manifest     7b867e05f6ef8a3c1e0e19b6ea00d44180d1c4742db36a5f206f58c15e7119ea
+
+The first hot-deploy found five defects that the host could not, and each was
+fixed and redeployed the same evening:
+
+- The bench cross-build scripts compiled with a 32-bit `time_t`. Yocto builds
+  the arm32 image with `-D_TIME_BITS=64`, so every `time_t` argument to GnuTLS
+  arrived in the wrong registers and the certificate was never made. The
+  scripts now pass the time64 and file-offset flags, and `tls.c` names the
+  step that fails and why.
+- The route table was registered as the framework's URL prefix. ulfius fills
+  the `:id` parameters from the URL format only, so `/agreements/:id` matched
+  and answered 404 with no document. The paths are registered as the format.
+- The `/mode` body had a 128-byte buffer. A gate reason that names five
+  wizards is longer, so the JSON was cut mid-string and the harness could not
+  read the mode of a gated machine. The buffer is 512 bytes.
+- Finish lit the button solid green and nothing released it. The light now
+  goes out when the control panel page is first served after Finish.
+- `GET /` over HTTP from the machine itself was sent to HTTPS like a LAN
+  client. A loopback peer now gets the page, as it gets every route.
+
+Two harness cases were written for the old boundary. `forgectrl.auth` posted a
+cooling report from the LAN address over HTTP and expected 403; it now expects
+the 302 to HTTPS and then the 403 over HTTPS, without following the redirect.
+`commission.gate-blocks-controllers` called the settle wait right after it
+created the override; a gated machine counts as settled, so the wait returned
+before the supervisor had spawned. It now waits for the controller first. The
+test-suite init sources the bench env file with allexport.
+
+The operator walked the real first run from a workstation on the same evening:
+the four documents (33 s from the first to the last), the press at the teal
+light, the account, the preferences, the machine facts, cloud mode on with a
+serial the operator typed, Finish. The record shows each step with its time,
+the agreement hashes and methods, and the account's uid. The account was
+replayed into the system files, the home directory made at mode 0700, the
+gate opened and the controller came back with motion verified. One observation
+from the operator, the green light that stayed on, is the fourth fix above.
+
+The automated set then ran one test at a time, each with its prerequisites
+satisfied on this image: `forgectrl.auth`, `forgectrl.panel-serves`,
+`commission.cert-page`, `commission.https-only-writes`,
+`commission.override-until-reboot`, `commission.ssh-until-reboot`,
+`commission.mdns-announce`, `commission.account-login`,
+`commission.agreements-rehash`, `commission.gate-blocks-controllers`,
+`camera.key-read`, and `image.license-bundle`. Twelve PASS. The two takeover
+tests restored the real record and the override under a restart each time.
+
+`commission.wizard-first-run` ran last, with the operator at the workstation
+and the bench fixture on the button: the documents in 33 s, the LEDs read
+breathing teal from sysfs, the fixture's press accepted in 0.7 s, a throwaway
+account in 25 s, Finish, the gate open and the controller back, the operator's
+Yes to the panel opening. PASS in 102 s. The real record and account came back
+under the restart, the throwaway account and its home were removed, and the
+machine read as before.
+
+`commission.cloud-disabled-surface` needs cloud mode off, and the operator
+had chosen it on. There was no way to change that choice from the panel: the
+setup page after the first run showed only its last screen, and its rail was
+not clickable. The rail now opens the preferences, machine, and cloud steps
+again once the setup is complete, and the cloud step starts from the current
+choice. The operator turned cloud mode off through it, and the test ran with
+`forgectrl.settings-bounds` before it: both PASS, the cloud mode and the
+gfcloud homing refused with 409 while cloud is off.
+
+That run broke a rule the operator then stated: every acceptance test runs
+from the page as the machine is, and a queue runs through, so no test asks the
+operator to change a setting first. Two tests had. `commission.account-login`
+read the bench account's password from a file the operator had to write; it
+now moves the account record aside under a takeover, creates a temporary
+account through the account route, runs the login rules against it, and
+restores the real account, the system accounts replayed and the temporary home
+removed. `commission.cloud-disabled-surface` now takes the gfcloud homing and
+the cloud boot mode down itself before it turns cloud mode off, and restores
+the three settings in reverse order. `cloud.mode-switch` lost its homing
+precheck and sets the gfcloud homing for its `$H` leg itself, and the runner
+turns cloud mode on when a test declares cloud mode and it is off. The env
+file, its init sourcing, and its README row are gone. The acceptance contract
+on the docs site states the rule. With the operator's cloud choice back in
+place (cloud on, gfcloud homing), both rewritten tests ran again: PASS, the
+login one in 49 s with its two restarts, the cloud one in 3 s.
+
+The welcome screen of the setup no longer mentions the certificate: whoever
+reads it has accepted the warning already. The fingerprint stays on the
+`/cert` page and the panel's Commissioning card, and the documentation says
+where.
+
+Not run: `commission.factory-return` reboots into the factory firmware, and
+`commission.root-ssh-refused` needs the release image. Both wait for a later
+session. The libmicrohttpd messages that the stderr relay logged as warnings
+during browser page loads now go through the daemon's logger at debug.
+
+Nothing is pushed and no pin moved. The phase 1 change is proven on the bench
+and waits for its commits, in CI order, and then a campaign on an image built
+from the pins.
+
+## 2026-09-05: commissioning phase 2 on the bench, the setup checks proven, two motion truncations found
+
+Phase 2 of the commissioning work is the setup checks (switches, sensors,
+airflow, motion, cameras, the coolant diagnostics as checks, the cloud header
+capture), the Commissioning tab, and the engine-raised flags. It was written
+and proven on the host on 2026-09-04, and the daemon reached the bench by
+hot-deploy on the phase 1 image. Nothing of it is pushed.
+
+    campaigns    c-20260904235822-ffa8, c-20260905000007-3173, c-20260905004142-0de4
+    image        20260904203403 (dev)
+
+The first bench evening (2026-09-04) found three defects the host could not:
+the check's finish handed the result to the record writer and then freed it
+again, so every check that measured well ended with "the record could not be
+written"; the motion check armed the crash watch's abort tier on the jogs,
+which is the head motion that tier is built to catch, so it always fired; and
+the sensors check read raw crash-source bits as accelerometer events and
+judged the tachometers with the fans off. Each was fixed that evening. The
+switches and cameras checks passed with the bench fixture on the lid and the
+button.
+
+On the fixed daemon, one test at a time with the long prerequisites skipped
+for the proof: `commission.check-sensors` (12 s), `check-switches` (5 s),
+`check-cameras` (14 s), `check-airflow` (39 s) and `check-flow-verify` (157 s)
+PASS. `commission.check-motion` FAILED on the -X jog: the witness read a
+peak-to-peak of 331 against a threshold of 400.
+
+**The witness.** The check sampled the head accelerometer through the sysfs
+one-shots, about 150 ms each, so a one-second jog gave four sample pairs and
+the peak-to-peak was luck. Each one-shot also powers the part down, under the
+crash watch that had set it to 800 Hz for the jogs. The witness now reads the
+output registers over the crash watch's own i2c path (800 Hz, +/-4 g, about
+175 samples a second) and judges the peak-to-peak of the signal averaged over
+about 30 ms: the wideband vibration averages out and what stands is the
+commanded acceleration itself, about 500 counts up at the start of a jog and
+down at its end. Bench numbers, at rest with the pump and fans on and over the
+four 50 mm jogs at 3000 mm/min:
+
+    rest         low-passed p2p x 216  y 247     rms x 152  y 102
+    +X           x 1771  y  664                  rms x 812  y 321
+    -X           x 2119  y  722                  rms x 917  y 323
+    +Y           x  726  y 1343                  rms x 241  y 409
+    -Y           x  598  y 1789                  rms x 281  y 456
+
+Moving is the busier axis at 2.5 times its rest reading and 400 counts or
+more; the margins above are 2.2 to 3.4. An RMS rule was tried first and left
+the Y jogs at 1.1 to 1.5 times the threshold: the gantry moves more smoothly
+than the head, and an RMS window that ran only to the driver's Idle missed
+the deceleration ramp altogether.
+
+**Two truncations.** After the first passing motion run the harness's
+baseline found the kernel position counters at Y +1332 steps (25.0 mm, half
+the last jog) and jogged the head back. The kernel counts what the SDMA
+played, so half of the -Y jog never played. A second run with the counters
+polled every 10 ms showed two cuts:
+
+- The liveness probe's return leg ended 186 steps short (22 in an earlier
+  run). The cooling engine's hang dead-man stops motion when the controller's
+  last report is older than 5 s and the kernel is running; the check stops
+  the controller on purpose and runs the probe about two seconds later, so
+  the report went stale mid-probe and the engine wrote `cnc/stop`. The
+  supervisor's stop now forgets the engine's last report
+  (`cool_controller_stopped`): a deliberate stop is a death the supervisor
+  covers, not a hang, and the probe plays with nobody counting.
+- The driver reports Idle when the stream is produced; the kernel plays it a
+  queue depth behind, and a jog sent at Idle while the kernel still drains
+  the last one starts up to a depth of pad slots ahead of its own bytes, so
+  the physical end ran 160, 290, 500 and 540 ms behind Idle across the four
+  chained jogs. The check stopped the controller 16 to 75 ms after the last
+  Idle and `cnc/stop` discarded the half second still queued. Replicas from
+  the Grbl socket measured the pieces: a stop 30 ms after Idle with a 300 ms
+  tail queued loses 229 steps; back-to-back jogs across the drain lose
+  nothing (three reps on X and Y); closing the socket at Idle loses nothing.
+  The check now samples until `cnc/state` reads idle after each jog and
+  judges and stops only then. The driver's Idle-before-drain is BRINGUP
+  "Next work" item 9 and a fact under "Running the controller".
+
+`commission.check-motion` now also requires the position counters to read as
+before the check, within two steps, and names `cool.c` in its coverage. The
+suite's own unit tests, run for the phase 2 tree for the first time, found
+one order defect: `commission.check-flow-verify` names `cooling.flow-verify`
+as a prerequisite, and the queue's dependency sort pulled that heater tool
+ahead of `cooling.aa-offset-calibrate`, which must run before any heater
+trial warms the coolant. The check now names the offset calibration first
+among its prerequisites. On
+the rebuilt daemon it PASSES in 23 s with every move played to its end (the
+kernel idle with every byte done after each jog, the counters back exactly,
+no dead-man line), and `check-sensors`, `check-airflow` and
+`check-flow-verify` PASS again after it (12, 38 and 156 s). The record
+carries switches, sensors, airflow, motion, cameras and cooling.flow-verify at
+version 1. The bench machine's Y counter carries a 229-step residue from the
+replicas, inside the boot baseline the harness restores against.
+
+`commission.cloud-header-capture` was attempted by the operator twice. Its
+steps and notice said "when the page asks", against the rule that an attended
+test names its one action in terms of the thing under test and sends the
+operator nowhere; the harness answers the wizard's print prompt itself, so the
+text was wrong, not the mechanics, and it now reads "once the app shows the
+machine online, press Print". The first attempt ran cloud mode up (the client
+connected, homed, and uploaded the lid image in 40 s) and was aborted from the
+bench page 185 s in with no print request in the client's log; the harness
+left the wizard waiting in the daemon, so the second attempt failed at once
+with 409, "a wizard is already running". The check runner now aborts its
+wizard on every exit, and a start that meets its own check still running from
+an earlier run aborts that one first. The client's log also showed its lid
+snapshot request to the daemon refused on port 8080: the default in
+`ffmachine.py` and the bench's `gfhome.conf` still named the bring-up port
+after the move to 80; both read `http://127.0.0.1` now (the direct capture
+fallback had covered it). The test stays owed: the coolant offset
+and flow calibration checks wrap the diagnostics the cooling catalog proves
+and ran as the flow-verify check does. The head's Y room for the jogs was
+confirmed from a lid snapshot before the first unattended run (+Y moves toward
+the front; the head sat at the back, out of the camera's view).
+
+Nothing is pushed and no pin moved. Phase 2 is proven on the bench apart from
+the operator's header capture and waits, with phase 1, for the commit hold to
+lift.
+
+## 2026-09-05: commissioning phase 3 on the bench, the sheet burned end to end, the lens model rebuilt
+
+Phase 3 of the commissioning work is the sheet: the font, the renderer, the
+daemon's own sender, the nine live cards, and the record burn. It reached the
+bench by hot-deploy on the phase 1 image, one card at a time, the operator at
+the machine, and every card ran to a result by the evening. Nothing of it is
+pushed.
+
+    image        20260904203403 (dev), forgectrl hot-deployed 14 times, the driver twice
+    record       sheet PVHHW-32AQ7, the record burn 7530 lines, 11 cards, completed 18:36Z
+
+**The lens.** The first focus cards taught the model. A full-step sweep up
+and back from the hall edge found 24 half-steps of travel and a slope of
+0.38 mm of lens per mm of material; both were wrong. The operator's facts:
+the lens is a 2 in lens under a collimated beam, so it moves with its focal
+point 1:1, and the carriage travels 0.485 in (12.32 mm, the head drawing).
+A count in half-steps, stop to stop, gave 36 (37 on a second count), the hall
+edge 13 above the bottom stop. The service's Z commands are full steps (its
+header's `ZSmd` 0 is full-step mode): 15 for 0.5 in, 4 for 0.1 in; an early
+community capture of the same law in half-steps (8 at 0.1 in, 28 at 0.4 in,
+30 at 0.5 in) saturates at 30, the service's idea of the usable travel. The
+model is now in the lens's own half-steps from the bottom stop: the focus
+card homes the lens on the stop in agreeing rounds (three within a half-step)
+and counts up to the edge, burns twelve numbered lines over the travel, and
+the pick (two adjacent lines at most, their middle) on the thickness gives
+`laser_focus_bed_steps` (the half-step where the lens is 2 in from the bed:
+3.3 here) and `laser_focus_steps_per_mm` (the count over 12.32 mm: 2.92).
+The travel above the bed step is the tallest material the lens focuses,
+11.2 mm (0.44 in) on this head. The operator's pick, lines 8 and 9 on
+0.110 in plywood, sits about one line above the service's own law. The
+stop-to-stop sweep was retired the same day ("testing the travel? Stop it."):
+the travel is the screw's constant, only the edge's place in it is per head.
+In four cloud prints the lens never moved: the client kept the factory's idle
+Z lock (`cnc/motor_lock` 8) through its motions; fixed in the client, the
+bench proof owed.
+
+**The cards, one press each, what each run found:**
+- `sheet.place`, `sheet.frame`: proven the day before; the frame's mark dose
+  S400 at F3000.
+- `laser.focus`: as above; the pick prompt became a multichoice after two
+  lines looked alike; the prompt timeout went from 180 to 600 s after a
+  careful look timed the card out.
+- `laser.floor`: the faintest continuous rung 10 (2 to 8 blank), the floor
+  12. A re-run after the key switch moved mid-job burned the 2 rung: the
+  driver's M102 reloaded the gamma and the curve but not the floor, so `$35`
+  lifted every S; M102 now runs the arm's spindle configuration (the floor
+  too), proven in the lifecycle harness, and the rungs stayed blank again.
+- `laser.dose-curve`: 10:0.44, 20:2.98, 30:9.31, 45:26.26, 60:45.50,
+  80:57.30, 100:100, within two points of the panel recorder's earlier
+  curve. The first run "did not fit": the card's text, burned before the key
+  switch, was an eighth discharge segment; a `;record` directive starts the
+  witnesses at the first rung.
+- `laser.corner`: gamma 1.50, the same as before; five reloads in order.
+- `motion.scale`: 99.9998 x 35.9918 mm, diagonal 106.2736 (entered in
+  inches), scale 0.00 and -0.02 percent, squareness 0.02 mm per 100, the
+  crosses coincident; nothing to correct.
+- `cooling.flow-load`: the first run failed twice over. The card burned its
+  box, settled inside the job with the laser off, the armed window relocked
+  after 60 s idle (a second press, unprompted), and the second arm's flow
+  check ran its heater under the patch: rise 9.13 C, k 2.7e-4, refused by the
+  validator. Rebuilt: the loop settles before the press (quiet after 60 s),
+  the engine's check is held for the card (`cool_flow_check_hold`, not a
+  gate, self-releasing), one press burns the text and the patch. Result: lit
+  61 s, dose 33557 raw-s, rise 0.72 C with the peak 75 s after the fire began
+  and a 55 s lag, k 2.14e-5 (density) and 2.78e-5 (CW), within 10 percent of
+  the bench defaults from 2026-08-29.
+- `sheet.record`: burned; the layout's text was shortened to its cards first
+  (the renderer clips at the card's edge) and the focus sentence went to the
+  footer.
+
+**What the sheet taught about the plate.** The percent glyph at a 2.5 mm cap
+is smaller than the kerf and blobs; the labels are bare numbers now. The
+ladders used a third of their cards; they span them. The sender kept one
+line in flight and the planner starved on the text's 0.3 mm segments, the
+head stopping at every one; it keeps lines in flight up to half the
+controller's RX ring, with `$`, M102 and M2 alone as barriers. Text under
+the floor-and-curve override came out fainter (with the curve off, M4's
+velocity scaling cuts the density linearly); every card's text burns under
+the machine's keys and the override moves mid-job by directive.
+
+**Also this day:** sessions survive a daemon restart (`/run/forgefirm/
+sessions`, 0600) and the login returns to the page that asked; the setup
+page's address follows the step shown; lengths on the page and the plate
+follow the units preference; every look at the sheet says not to move it;
+the sweep ran on every card through an unzeroed session struct (fixed). The
+operator's verdict on the cards' feedback ("crap"; "it sucks") stands: a
+usability pass leads phase 4.
+
+Nothing is pushed and no pin moved. Phase 3 is proven on the bench and waits,
+with phases 1 and 2, for the commit hold to lift.
+
+## 2026-09-05: the commission acceptance set slimmed to three attended tests, and all twenty proven
+
+**The order.** The operator refused the commission acceptance set as it
+stood: 26 cases, 13 of them attended (seven `operator`, six `live`, one per
+sheet card with a press and a piece of wood each, plus two errands: booting
+the release image to try SSH by hand, and performing the return to the
+factory firmware). The set was rebuilt the same day for minimal operator
+involvement (plan decision 18): 20 cases, three attended with the bench
+actuator up. The sheet is one live case, `commission.sheet` (the placement,
+the frame, and the five cards on one piece, one press at the ready gate,
+the actuator arms the rest); the first run is `first-run-flow` (the page's
+own calls in the page's order, the press the actuator's, unattended) and
+`first-run-page` (the walk, page covers only); `root-ssh-refused` is gone
+(the effective policy from `sshd -T` runs inside `ssh-until-reboot`; the
+release image's policy as built is the release gate's check);
+`factory-return` probes the guards only. Host: the full forgetest unit suite
+(317) and the coverage lint (0 uncovered, 78 tests) in the build VM.
+
+**The unattended set, image 20260904203403, campaign
+`c-20260905204752-2e3a`.** The 17 unattended commission tests and their 11
+auto prerequisites were started one at a time through the API in
+prerequisite order: 22 runs PASS, 0 FAIL. `check-switches`, `check-cameras`,
+and `first-run-flow` ran with nobody in the room, the actuator on the lid
+and the button.
+
+- **Defect 1, in the new flow test:** its first run stalled at the press
+  step with the button breathing teal after the actuator had pressed. Not a
+  race: the daemon records the acceptance only when `GET
+  /wiz/agreements/press` is polled while the button reads pressed
+  (`button_take_pressed` in `cb_wiz_press_status`); the page polls it from
+  its press step, the test did not. Run aborted (the record and the account
+  came back clean under the restart), the test made to poll `press_status`
+  the way the page does, redeployed; the rerun passed in 21 s.
+
+**The attended three.** `first-run-page` PASS (the operator's walk, 85 s;
+the actuator took the press in 0.7 s). `cloud.mode-switch` (a prerequisite
+the campaign lacked) PASS unattended. `cloud-header-capture` PASS on one
+Print from the Glowforge app: 134 tags of job 1582523977, and the client
+log reads capture, cool-down skipped, `:cancelled`, then the capture file:
+the header-capture hang fix of this morning is proven. Then
+`commission.sheet`, campaign `c-20260905213015-6d2f`, on one 8 x 6 in
+piece, 807 s: the placement (thickness 0.125 in), and six burns each seen
+by all three witnesses: frame (tube current max 1023, 144 LASER_ON samples,
+thermopile rise 813, 82 s lit), focus (1264, 48 s), floor (668, 91 s),
+dose curve (2273, 111 s; the fit 10:0.37 to 100:100), corner (795, 31 s),
+flow-load (1243, 90 s; k 2.80e-5 density, 3.64e-5 CW, peak 1.03 C). The
+seven settings the cards wrote were put back as found.
+
+- **Defect 2, in the sheet test:** the first attempt failed in the
+  placement, `thickness 0.0`: the bench is in imperial units, the wizard
+  asked for inches, and the test answered 3.2 (81 mm, over the 30 mm cap).
+  The test now answers in the machine's units (0.125 in or 3.2 mm) and
+  checks the millimeters the record carries. Nothing fired.
+- **Defect 3, in the sheet test:** the second attempt failed before the
+  frame on the test's own program check, which looked for `M3 S`; the
+  frame and the text are `M4 S400`. The check now accepts either laser-on
+  command. Nothing fired.
+- **Defect 4, in the runner:** the flow-load card settles the coolant loop
+  before it lights the button (60 to 240 s), and the actuator's arm press
+  waited only 60 s for the light, so the sixth arm went to the operator
+  (the record shows five presses by the fixture and one by the operator).
+  `arm_press` takes a `lit_timeout` now and the sheet test passes 420 s
+  for that card (host-proven in test_fixture; the bench proof is the next
+  sheet run, whose fingerprint the fix moved).
+
+Nothing is pushed and no pin moved; the commit hold stands. Board at the
+end: GRBL mode, the real record and account, `/tmp` and `/data` clean.
+
+## 2026-09-05: the cloud focus stalls at the lens driver's hold current
+
+The operator printed the same job in cloud mode at 0.1 in and at 0.5 in
+focus on the client with the lens unlock (`motor_lock` 0 for the motion)
+and saw no difference in the cut. The client's log carried the service's Z
+steps counted in full: the hunts -4 of -4, the prints 4 of 4 and 15 of 15,
+the lock lifted before each and set after. The hunt after the 0.5 in print
+told the rest: its first homing sweep took 6 steps down to leave the hall,
+against the 3 every other hunt of the day took, so the lens sat about 3
+steps above the edge where 11 were commanded. The stream moved the lens,
+and not far enough.
+
+Measured on the board with single steps (`cnc/z_step`) at the service's
+own ramp (630, 164, 115 ms, then 77 ms per step), each trial from a fresh
+home and counted back to the hall edge at 180 ms:
+
+| `head/z_current` | move | executed |
+|---|---|---|
+| 1 (low, the hold current) | 5 down | 5 of 5 |
+| 0 (high) | 5 down | 5 of 5 |
+| 1 (low) | 10 up, 77 ms plateau | 2 of 10 |
+| 0 (high) | 10 up, 77 ms plateau | 10 of 10 |
+| 1 (low) | 10 up, 40 ms plateau | 2 of 10 |
+| 0 (high) | 10 up, 40 ms plateau | 10 of 10 |
+
+The lens rises at the high current only; the low current is a hold
+current. The cloud client's homing sweep runs at the high current and
+leaves the driver at the low one, and nothing set it back for the stream:
+the print's focus move rose two steps and stalled. The focus card in
+forgectrl had the same two conditions right from its first bench run (the
+lock cleared and the high current set before its ladder), which is why the
+sheet's focus proved out while the cloud focus did not.
+
+Fix in `python3-gfhardware/gfhardware/machine.py`: the motion path enables
+the Z driver and sets the high current with the unlock, the idle posture
+and the action cleanup set the low current with the lock, and the hunt's
+home-offset steps run at the high current. Host-proven: the lens test in
+`test_machine_lid_button` orders the enable and the current against the
+lock and the feed, and the cleanup test checks the rest posture (92 tests
+pass). Deployed to the board as a hot copy. Bench proof owed: the same
+print pair, 0.1 in against 0.5 in, with a visible difference in the cut.
+The docs carry the fact (motion-hardware, kernel-module `z_current`,
+cloud-mode step 4) and BRINGUP's Z paragraph.
+
+Bench-proven the same evening: the operator printed the same job through
+the Glowforge app at 0.1 in and at 0.5 in focus on the deployed client,
+and the two heights focus correctly. The cloud focus is closed. Nothing
+is pushed and no pin moved; the commit hold stands.
+
+## 2026-09-05: the Z frame corrected to the focal height, installed, proof owed
+
+The operator's definition, restated as the rule: Z is the focal point's
+height above the tray (Z 0 focuses on the bed, Z +1 focuses 1 mm above it),
+never a lens-carriage coordinate. Two frames written earlier had been wrong
+(the hall edge as the top of travel at Z 10.6, then the bottom stop as Z 0)
+and were removed from the driver, the wizard, and the docs the same evening.
+As built: the driver's camera-referenced home sets Z to the hall edge's lens
+half-step above the focus card's bed step, over the lens's half-steps per
+millimeter; `$102` follows `laser_focus_steps_per_mm` when set; the Z
+envelope runs from the bottom stop over the carriage's 12.32 mm; the focus
+card writes the edge's step as `lens_hall_edge_steps`; `gfcloud_home_z` is
+gone. The GRBL homing session answers the service's hunt as done without
+moving the lens and takes its own hall reference after the service goes
+quiet; cloud mode's hunt is the service's, unchanged. Host-proven: the
+client's 93 unit tests (one new: an acknowledged hunt moves nothing),
+forgectrl with -Werror and its sheet, commission, and wizcalc tests, the
+dev-server mock 15 of 15, forgetest's sheet unit test 8 of 8, the driver's
+host build and lifecycle harness.
+
+Installed on the bench by the operator (forgectrl fd86adee, the driver
+a82da585, machine.py, ffmachine.py, gfhome.py, the sheet suite file; all
+hashes verified). The copy left the two binaries without the execute bit:
+forgectrl's init loop respawned every 5 s with "Permission denied" until a
+`chmod 755`; then forgectrl listened on 80 and 443, the GRBL controller
+started, the liveness probe passed. The driver publishes `$102=2.922`, the
+head's count from the config; `$132` still reads 10.6, a persisted value,
+and wants a one-time `$132=12.32`. Board at the end: GRBL mode, idle,
+`/tmp` and `/data` clean (the config still carries the superseded
+`laser_focus_z_bed_mm` key, unread). Nothing is pushed and no pin moved; the
+commit hold stands.
+
+Owed, next session: a GRBL `$H` (gfcloud) that skips the lens hunt and
+reads Z 3.3 on this head; a focus card run writing `lens_hall_edge_steps`;
+the redesigned sheet's bench run (commission.sheet, fingerprint moved).
+
+## 2026-09-06: GRBL $H in gfcloud mode skips the lens hunt, Z lands on the step grid
+
+The first of the owed proofs, on the installed binaries (forgectrl
+fd86adee, the driver a82da585, gfhome.py 2ddefc40): one Grbl connection,
+`$H`, then `?`. The board before the drill: GRBL mode, idle, not homed,
+lid closed, no other port-23 client, forgetest idle, `$102=2.922`,
+`$132=10.6`.
+
+`$H` returned ok in 46.5 s with `H:1`. The homing session's log shows the
+service's hunt answered without motion (the `HUNT-ACK` line at the session
+start, then "hunt acknowledged without motion" at the service's hunt action,
+`hunt:starting` and `hunt:completed` sent 4 ms apart) and the session's own
+hall reference at the end (five `z_axis:home` passes, lens current left
+LOW). Earlier sessions on this head ran 34 to 75 s with six or seven hunt
+lines each, so the wall time is the service's, not the lens's.
+
+Z after the home: the driver's log line says Z 3.32 (the arithmetic:
+edge 13 minus bed 3.3, over 2.922 half-steps per millimeter), the
+controller reports `MPos` Z 3.422. The difference is the step grid: the
+controller's position is a whole step count, the home Z is 9.7 half-steps
+above the bed step and rounds to 10, and 10 over 2.922 is 3.422. A
+half-step is 0.34 mm, so the rounding is a third of one. The log line and
+`sys.home_position` carry the unrounded value while `MPos` carries the
+rounded one; the driver can quantize the home Z to the step grid before it
+stores and logs it so the three agree (decision owed). `$132` still reads
+10.6; the one-time `$132=12.32` is still owed.
+
+The operator took the fix. The driver's home Z is now the edge's height
+above the bed step rounded to a whole step, over the scale, in a pure
+helper (`gfhome_edge_z` in glowforge_homing.h) with a host test
+(tests/lens_home_test.c: the reference head stores ten steps and reports
+Z 3.4223, a whole-step pick is exact, halves round up, and 11935 edge and
+bed pairs over the settings' ranges store the count they were rounded to;
+in the CMake -Werror list and the CI workflow). Host-proven: the -Werror
+host build, the armed-window lifecycle harness, the new test. Cross-built
+and staged (grblHAL_glowforge 0e2c0d6a), installed with the execute bit,
+the controller killed and respawned by the supervisor in one second
+(motion verified). The second `$H` on this binary: ok in 39.1 s, `H:1`,
+the log line `homed - X0.00 Y0.00 Z3.42`, `MPos` Z 3.422: the three agree.
+Then `$132=12.32` was written on the same connection and `$$` reads
+`$132=12.320`, persisted. The docs now carry the rounding (grblhal-driver
+"The lens (Z)", homing "The position after a home", motion-hardware,
+usage/homing, which also lost a stale `gfcloud_home_x/y/z` mention;
+BRINGUP's position paragraph reads Z 3.42 on the bench head; the plan's
+6.15 Z bullet and its `G92 Z<edge>` note). The catalog: the homing files
+are under an existing `src/**` cover, and host test files need none.
+
+Board at the end: GRBL mode, idle, homed at Z 3.42, `$132` 12.32;
+`/data` clean, `/tmp` holds only the previous driver binary as the
+rollback (volatile). Nothing is committed; the hold stands.
+
+The board rebooted at 14:38Z (forgetest's fresh-boot baseline at uptime
+25 s), between the second home and the focus card; the installed driver
+(0e2c0d6a on the rootfs) and `$132` survived it, the `/tmp` rollback copy
+did not.
+
+The focus card, on its own piece (the operator at the machine, the
+prompts relayed from the dev host over the wizard API: POST start, GET
+/wiz/dark polled, POST answer with form fields; the daemon sends LAN HTTP
+to its self-signed HTTPS). `sheet.place`: the lens referenced (two passes,
+0 steps each), the origin set at the head's home position with no jog,
+"One card", 0.110 in (2.794 mm); 68 s. `laser.focus`: the lens homed on
+its bottom stop in three agreeing rounds, the hall edge 18 half-steps
+above it (yesterday's count on this head was 13; the travel is 36 either
+way, so the edge now sits mid-travel), the button lit 41 s in, the press
+by the operator, the ladder streamed as 297 lines with the tube at peak
+1023, 235 LASER_ON samples, thermopile +1354, lit 47 s; the operator
+picked line 7 alone; the thickness kept. Result: the lens at half-step
+16.4 of 36 on the pick, the bed step 8.2, 2.922 half-steps per
+millimeter, material up to 9.5 mm (0.375 in) above the bed. Written and
+verified in the config and `/settings`: `laser_focus_bed_steps` 3.3 to
+8.2, `laser_focus_steps_per_mm` 2.922 unchanged, `lens_hall_edge_steps`
+empty to 18; the record carries both wizards at 14:43Z and 14:46Z. The
+controller the wizard respawned reads `$102=2.922` and `$132=12.320`.
+The edge sits 9.8 half-steps above the bed step (9.7 yesterday from 13
+and 3.3), so the driver's home Z on this head stays ten steps, 3.42 mm.
+Both absolute counts moved by five between the two days with their
+spacing kept; whether the bottom-stop reference moved or the earlier
+count was low is open. The driver's reference-head defaults (13 and 3.3)
+are placeholders and were not changed. 172 s. Board at the end: GRBL
+mode, idle, unhomed after the respawn, the lens at the pick step;
+nothing of the drill on the board.
+
+## 2026-09-06: the lens travel measured, the stall count found unreliable
+
+The operator wanted the 13-to-18 change understood, so a lens travel drill
+(`scripts/bench/lens_travel.py`, run on the board with the controller
+stopped through forgectrl and restarted after; lens motion only) stepped
+the lens over sysfs the way the focus card's lens home does, at the card's
+180 ms cadence and the run current, and counted under each condition for
+three rounds.
+
+The hall's rising edge is exact. A ladder of descents below the point
+where the hall leaves home returned every commanded step until 18
+half-steps below the rising edge: drive 4 came back 10, 8 came back 14, 12
+came back 18 (the 6 to leave home included), in half-step and in full-step
+mode alike. Its hysteresis band is 4 to 6 half-steps: going down, the hall
+stays home that far below the rising edge, and the same count brings it
+home again; a 100 ms rest before every read and a 400 ms cadence changed
+nothing, so the band is the sensor's, not timing.
+
+The bottom stop is 18 half-steps below the rising edge and the top stop 20
+above it (eight measurements, every condition, the band subtracted): 38
+half-steps of travel, not the 36 the card assumes. Every count that ends in
+a stall on a stop is unreliable: past 18 the return count read 18, 16, 14,
+or 12 at random (12 to 18 in the ladder, 16 to 18 in the card's own
+condition), always an even shortfall, in full-step mode as in half-step,
+at any cadence. The rotor slips whole steps against the stop and
+re-engages up to three full steps out of phase with the drive, so the
+first steps of the ascent move nothing. Three agreeing rounds do not
+protect against it: the slip repeats. The focus card's 18, 18, 18 on this
+day was the no-slip case. Yesterday's 13 was the earlier code's short drive
+(fewer than 18 half-steps below the edge), which never touched the stop
+and counted its own descent back, as a 16-step drive does today (13, 13,
+13).
+
+The hold current is unusable for the lens in either direction: with it
+throughout, the lens never came back to the edge (the run current brought
+it back afterward); with it only for the drive down and the run current
+for the count, the carriage stopped following after about 14 half-steps
+and every count read 10. The run current, the factory's own choice for its
+lens home, stays.
+
+What follows for the model: the driver's Z after a home depends only on
+the edge step minus the bed step, and both move together with a slipped
+count, so today's settings (18 and 8.2) place Z as well as an unslipped
+pair would; the absolute counts from the stop and the travel above the bed
+are what a slip shifts. The rising edge is the one exact reference the
+head has. The scale is open: 38 half-steps over the drawing's 12.32 mm is
+3.08 per millimeter, and the service's four full steps for 0.1 in give
+3.15, against the 2.922 the card writes from 36. Decisions owed to the
+operator: whether the card references the edge alone and takes the stops
+as measured constants, and what the millimeter scale rests on. The drill
+is in the repo; the board carries nothing of it. Board at the end: GRBL
+mode, controller running, the lens on the edge, the idle posture (motor
+lock 8, hold current, half-step mode).
+
+The operator's decisions the same afternoon. The lens is never driven into
+its stops on a user's machine (a stripped stepper drive gear is the
+concern); stall drills run on the bench reference machine only, which is
+that machine's official name. Every unit is taken to share the travel in
+steps and the height of a step; what differs per unit is the step along the
+travel at which the hall trips. The focus card's purpose is that one
+number: the focal height when the lens is on the hall's rising edge, read
+off the pick (the picked line is a known number of half-steps from the
+edge, and the material top is at the pick). A home then goes to the edge
+and sets Z to that number. The stops drop out of the model. The travel
+constant stays 36 half-steps, a half-step of leeway at each end for a unit
+a touch out of specification, and Z below the tray stays allowed (the tray
+comes out for tall work; a feature for another day).
+
+The depth gauge, with the drill's park mode holding the lens (the
+controller in standby, the hold current): bottom stop 56.4 mm, top stop
+45.7 mm, the rising edge 52.3 mm, readings the operator calls approximate.
+The stop-to-stop 10.7 mm and the edge's 4.1 below / 6.6 above do not fit
+one step height against the stall counts of 18 and 20, so the stall
+readings carry compression or tilt, or a reading is off by about a
+millimeter; a stall-free pair at ten half-steps below and above the edge
+was parked for the same gauge, and the operator confirmed the documented
+step height (0.342 mm per half-step, 2.922 per millimeter, 36 half-steps
+over the drawing's 12.32 mm) and saw the lens ring on every step: it
+overtravels a touch and returns, which is the hall band's plus or minus one
+that no settle time cured. The lens went back to the edge, the controller
+restarted (motion verified), the drill removed from `/tmp`.
+
+## 2026-09-06: the edge-referenced lens model built, installed, and proven
+
+The operator's order, with one addition: after a home the focus parks at a
+user-settable height, 3 mm by default. As built the same afternoon: the
+driver's `$102` is the screw's constant 2.922; the one per-head setting is
+`lens_hall_edge_z_mm`, the focal height with the lens on the hall's rising
+edge (the default 3.35 is the bench reference machine's); a gfcloud home
+hands the runner the whole half-steps from the edge's grid step to
+`lens_park_z_mm`'s (`GFHOME_PARK_HALF_STEPS`, clamped to the window ten
+half-steps below the edge to twelve above), the runner takes them at the
+run current after its reference (`ffmachine.park_lens`), and Z after a home
+is the park height on the step grid; the Z envelope is the travel around the
+edge on the bench reference machine in the 36 convention. The focus card
+lost its stall home and the bottom-stop frame: it references the lens on
+the edge (the two full-step passes every live session takes), burns twelve
+lines from twelve half-steps above the edge to ten below, two apart, refuses
+a pick on line 1 or 12, and writes the one setting from the pick's offset
+under the thickness. `laser_focus_bed_steps`, `laser_focus_steps_per_mm`,
+and `lens_hall_edge_steps` are gone from the registry, the driver, the
+docs, the plan, the mocks, and the sheet acceptance test, whose expected
+keys and restored settings follow the model. Docs rewritten: the driver's
+"The lens (Z)", homing's "The position after a home", usage homing and
+commissioning, motion-hardware's lens section; BRINGUP's position
+paragraph; the plan's 6.15 and its settings and catalog lines.
+
+Host-proven: the driver's rewritten lens test (grid heights over the
+settings' range store their step; 60551 parks stay inside the window) and
+the armed-window lifecycle harness; forgectrl with -Werror and its sheet,
+commission, wizcalc, and jobstream tests, the dev-server mock 15 of 15; a
+new runner park test (up, down, and a zero park that touches nothing) with
+gfhardware's 132 others (one Windows-only camera test fails with or without
+the change); forgetest's sheet unit test 8 of 8. Cross-built and staged
+(forgectrl bbe99ec0, the driver d53bb933, gfhome.py 3c0c4ff7, ffmachine.py
+551251e9, the sheet suite 868d2086), installed on the board with the
+execute bits, the four old lens keys deleted from the config, forgectrl and
+forgetest restarted (78 tests, queue idle).
+
+Bench, three steps. A `$H` on the defaults: `MPos` Z 3.080, the log
+`homed - X0.00 Y0.00 Z3.08 (the hall edge at Z3.42, the lens parked -1
+half-steps from it)`, the runner's `lens parked -1`. The focus card on a
+fresh piece, 0.110 in, one card (the placement 13 s, the card at its arm in
+8 s with no stop homing; witnessed: tube 1023, 232 LASER_ON samples,
+thermopile +1212, lit 46 s): the operator picked lines 8 and 9 ("a bit less
+separation between the lines than before", the spacing being two half-steps
+now), so line 8.5, three half-steps below the edge, and the card wrote
+`lens_hall_edge_z_mm` 3.82 (the earlier frame's 18 and 8.2 gave 3.35; the
+difference is 1.4 half-steps, inside the old ladder's spacing); the reach
+it reports is Z 0.40 to 7.93 mm, so on this head the bare bed sits 0.4 mm
+under the window's floor. Then a `$H` on the measured edge: `MPos` Z 3.080,
+the log `homed - X0.00 Y0.00 Z3.08 (the hall edge at Z3.76, the lens parked
+-2 half-steps from it)`, the runner's `lens parked -2`. Board at the end:
+GRBL mode, controller running, homed at the park, the idle lens posture,
+`/tmp` and `/data` clean. Nothing is committed; the hold stands.
+
+The operator saw the card's safe reach (Z 0.40 to 7.93 mm) and refused it:
+it should approach the factory's 12 mm. The cause is the window: the bench
+reference machine's stops sit 18 half-steps below the edge and 20 above, the
+36 convention takes one off each end, and a guessed six half-steps of
+head-to-head spread plus one more were taken off both ends again, 4.8 mm of
+the 12.3. The guess had no data behind it. Two facts weigh against it: the
+factory's own law runs 30 half-steps above its zero, 22 above the edge, past
+this head's top stop at 20, so every field machine stalls the top on 0.5 in
+material; and a single touched step is not the 18 to 36 stall steps the old
+homing took. The operator asked the pick to accept a run of adjacent lines
+(five looked alike at the two-half-step spacing); built, host-proven
+(sheet and commission tests), staged as forgectrl 762dd884, the deploy held
+for the window decision.
+
+## 2026-09-06: the head accelerometer finds the lens stops without a slip
+
+The operator asked whether the head accelerometer could detect a stop hit.
+The drill (`scripts/bench/lens_stop_accel.py`) reads the crash watch's chip,
+an ST LIS2HH12 at 0x1e on i2c-3, the way the crash watch does: straight over
+the bus in six-byte bursts with the rate register set to 800 Hz for the run
+(the iio path idles at 10 Hz and waits a period per read, 2 Hz in practice,
+useless here); 670 samples a second, about 115 per 170 ms step window. It
+steps the lens one half-step at a time from the hall's rising edge toward
+each stop and six past it, with the peak-to-peak per axis per step.
+
+The signature is unmistakable. A free step rings on every second half-step
+(the even ones from the edge, on this head): the strong steps sum 14000 to
+21000 across the three axes, the quiet ones 2000 to 8000. At the top stop the
+ringing dies at once: +21 to +24 all under 3300 summed, then a slip burst at
++25 (18000 on z alone, 40000 summed). At the bottom the ringing fades from
+-15 (the carriage loads before the hard stop), and the slip burst comes at
+-19 (23000 on z). The burst is the bang; the dead ring precedes it by two to
+four steps.
+
+A contact rule on that: learn the strong parity from the first two steps,
+call contact when a strong-parity step rings under 9000 summed, or at once
+on a burst over 36000, then back off two. Three rounds per stop: the bottom
+called at -16 every time and the count back to the edge read 14 every time,
+exactly the steps taken, so nothing slipped; the top called at +22 every
+time (the first strong-parity step past the stop at 20), and the count back
+down to leave home read 25 or 26, the stop's 20 plus the hall band, so
+nothing slipped there either. A first form of the rule ("two quiet steps in
+a row") was late at the top, +22 to +24, and its returns showed slips of
+about five; the parity form fixed it.
+
+What it opens: a per-head stop measurement at commissioning with at most two
+touched steps and no slip, which makes the window per head instead of a
+guess, and gives this head 36 half-steps of reach (-15 to +21 around the
+edge, 12.3 mm) instead of 22. The chip's rate register was put back (0x0f),
+the lens left on the edge in the idle posture, the controller restarted
+(motion verified), the drill and its trace removed from `/tmp`.
+
+## 2026-09-06: the stop finding built into the focus card, with its fallback
+
+The operator's order: "Build the stop finding into the focus card. Have a
+fall back in case the stops are not detectable on a particular machine. In
+that case, reduced travel is acceptable, and the user should be notified
+about it and recommend that they open a git issue or post it on the
+community forum." As built: `accel.c` gained `crash_hw_listen` (the run
+rate at the 2 g scale, put back after) and `crash_hw_burst` (the three
+axes in one auto-incremented read on the crash watch's bus handle);
+`wizcalc.c` the pure contact rule, `wizcalc_stop_call` (the strong parity
+learned from the first two steps, contact at the first strong-parity step
+under 9000 summed, or at any burst over 36000 as a slip) and
+`wizcalc_ring_readable` (the strong steps' median at least twice the quiet
+threshold), eleven cases in `wizcalc_test`; `wizlive.c` the finder
+(`z_find_stops`: after the reference, at the run current in half-step mode,
+each leg one half-step at a time listened to through 170 ms of the 180 ms
+cadence, the lens backed off two after whatever was seen, the count back
+to the edge required to match the steps taken within one, the top's count
+down to leave home required to be the steps plus a band of 2 to 9), the
+window (`lens_window`: the session's finding, else the head's settings,
+else the fallback of 10 below and 12 above), the ladder spread over the
+window on whole half-steps, the cards' Z clamp on it, and the card's
+result, settings, and summary: `lens_stop_below_steps` and
+`lens_stop_above_steps` written beside the edge height (the found free
+travel, or the fallback numbers), and when the stops could not be found
+the summary names the reason and asks for an issue at
+github.com/openglow-org/forgefirm or a post on community.openglow.org. The
+driver's park clamp and Z envelope read the two settings (the fallback
+window until then). The settings registry, the dev-server mocks, the
+page's card description, the sheet acceptance test (the `stops` key, the
+two settings restored, the covers widened to `accel.*` and `wizcalc.*`),
+its unit test, the docs (usage commissioning, motion-hardware, the driver
+page), the plan's 6.15 and settings lines, and BRINGUP follow.
+
+Host-proven: forgectrl with -Werror and its sheet, commission, and wizcalc
+tests, the dev-server mock 15 of 15, forgetest's sheet unit test 8 of 8;
+the driver's host build, lens test, and lifecycle harness. Staged and
+installed (forgectrl c7e2ba37, the driver 485e9221, the suite 38079bfe).
+
+Bench, the card run to its arm prompt and aborted before the burn, three
+times. The first found the fallback path working but no accelerometer: the
+finder had not opened the crash watch's bus handle, which the dark checks
+open around their own use; fixed. The second read the ring at half strength
+and called it unreadable: the listener had taken the crash watch's 4 g
+scale where the drill had run at 2 g; fixed to 2 g. The third: "the bottom
+stop: the ring died 16 half-steps below the edge", "the top stop: the ring
+died 22 half-steps above the edge", both legs' counts home exact, 14 s in
+all, and the arm prompt read "Its stops were found by the head
+accelerometer, 14 half-steps below the reference and 20 above, without a
+slip. Twelve 1.772 in lines burn heavy, the lens stepped from 0.269 in
+above the reference to 0.189 in below it." The idle posture and the chip's
+rate register were put back each time; `/tmp` is clean.
+
+The card in full, on a fresh piece, 0.110 in, one card (the placement's
+prompts answered by their live sequence numbers; the daemon's counter runs
+on across wizards): the stops found again at 16 and 22, so 14 below and 20
+above, no slip; the ladder over the whole free travel, 0.269 in above the
+reference to 0.189 in below; the burn witnessed (tube 1023, 234 LASER_ON
+samples, thermopile +1218, lit 47 s); the operator picked line 8 alone,
+"much easier to distinguish this time around", two half-steps below the
+edge, and the card wrote `lens_hall_edge_z_mm` 3.48 (the day's three
+frames, 3.35, 3.82, and 3.48, lie within a half-step of one another),
+`lens_stop_below_steps` 14, `lens_stop_above_steps` 20; the reach it
+reports is Z -1.3 to 10.3 mm, 11.6 mm. Then a `$H`: `MPos` Z 3.080, the log
+`homed - X0.00 Y0.00 Z3.08 (the hall edge at Z3.42, the lens parked -1
+half-steps from it)`, the runner's `lens parked -1`. Board at the end:
+GRBL mode, controller running, homed at the park, the idle lens posture,
+`/tmp` and `/data` clean. Nothing is committed; the hold stands.
+
+## 2026-09-06: commission.sheet passes on the redesigned sheet, and the finder fails inside it
+
+The `commission.sheet` acceptance test on a fresh 8 x 6 in piece, started
+over forgetest's API with its own token (`/data/forgetest/token`, the
+`X-ForgeFIRM-Token` header), the emission-witness prerequisite overridden
+as on 2026-09-05 and the live acknowledgment given on the operator's
+instruction; a new campaign, c-20260906172748-0b36, on image
+20260904203403 with the hot-deployed forgectrl c7e2ba37 and driver
+485e9221. The operator's one presence press came after 44 s and the bench
+actuator made every arm press after it. PASS in 822 s: the placement 16 s,
+the frame 102 s (mark dose 400 at 3000 mm/min), the focus card 69 s, the
+floor 109 s, the dose curve 147 s, the corner 53 s, the flow-load card
+281 s (its coolant settle 60 s); every burn witnessed by the tube current
+at its 1023 clip, LASER_ON samples 136 to 255, and the thermopile +674 to
++2306; the seven settings restored as found (the config reads the
+operator's edge 3.48 and stops 14 and 20 after it). The sheet's status:
+pass, satisfied; 33 of 45 required satisfied in the campaign.
+
+Inside the test the focus card's stop finder took its fallback: "the lens
+steps do not ring clearly enough on this head", the reduced window, the
+notice in the result, the test's pick on the fallback ladder. The card had
+found the stops twice standalone before the test (13:12 and 13:21); it
+failed again standalone after the test (13:43) while the bench drill,
+reading the same chip over the same bus, saw a clean ring (contact 16 and
+22, no slip); it worked again after a daemon restart (13:47) and after a
+dark motion check that arms, polls, and disarms the crash watch the way
+the cooling engine does around a burn (13:50). Two things changed in the
+daemon meanwhile: the finder no longer closes the crash watch's bus handle
+when it did not open it (the first build closed it after every finding,
+which left the cooling engine holding a closed handle with its state
+saying open, so its next arm would have failed and the watch stood down;
+the listener now opens its own handle only when none is open and closes
+only that), and the finder logs its ring per half-step (a healthy leg on
+the bench reference machine: 8616 19780 5766 23541 7855 21106 5387 19954,
+the strong steps even). The failure after a burn is not yet reproduced
+on the new build; a frame burn followed by a dry finding is the check,
+and the sheet test wants a clean re-run for a record with the stops found.
+Board: GRBL mode, controller running, the idle lens posture, `/tmp`
+clean; forgectrl b7bb2638 installed.
+
+Reproduced with one frame burn on the used sheet (the operator's press,
+witnessed: tube 1023, 153 LASER_ON samples, thermopile +954, lit 82 s)
+and a dry finding right after: the fallback again, and this time the ring
+in the log: 7984 15584 7041 21160 7983 15373 7569 17797 on the bottom leg
+before the line ran out (the wizard's log line holds 92 characters). The
+strong steps had come down from about 20000 to 15000 to 18000 and the
+quiet ones up to 7000 to 8000 with the fans at their run duty after the
+burn, so a strong step under the fixed 9000 called contact and the fixed
+readability bar of twice 9000 then failed on a median of 17797. Fixed
+thresholds were the wrong tool for unknown heads anyway. The rule is now
+adaptive (`wizcalc_stop_call`, `wizcalc_ring_readable`, fifteen host
+cases): the strong and quiet levels are the medians of each parity's
+steps before the step judged, nothing is judged before the fifth step,
+contact is a strong-parity step under the midpoint of the two levels, a
+slip is any step over 1.8 times the strong level, and a ring is readable
+when the strong level is at least 6000 summed and 1.8 times the quiet
+level. The ring is logged in hundreds over two short lines per leg. On
+the bench reference machine (forgectrl be3a9ded installed) the finder
+then read the bottom leg as 73 207 60 196 73 167 70 196 66 164 73 192 90
+166 48 40 (times 100) and called contact at 16, the top leg as 53 209 35
+203 47 186 34 187 42 206 27 195 51 206 31 198 33 227 43 236 31 93 and
+called it at 22, no slip. The fans had returned to idle by then; the case
+a minute after a burn is proven by the sheet test itself, where the focus
+card follows the frame, so the sheet's clean re-run is that proof.
+
+The re-run on a third fresh sheet: PASS in 805 s (the presence press after
+18 s, every burn witnessed, the settings restored), and the finder inside
+it called the bottom stop at 4 half-steps below the edge, a false contact:
+its ring, a minute after the frame with the fans at their run duty, read
+98 172 64 198 108 140 (times 100); the strong level was taken as 198 (the
+median of two picked the larger), the quiet level sat at 98 with the fans
+up, and a free step at 140 fell under the midpoint. Two changes to the
+rule (the strong level takes the lower middle of an even count, contact
+needs a strong step under a quarter of the way up from the quiet level)
+and a plausibility floor (a stop called nearer than 8 half-steps to the
+edge is a misread, since the factory's own zero sits 8 below the edge on
+every head), with the two real legs from the logs as host cases.
+
+Then the operator stopped that line of work: "Why would you ever run this
+while fans are running? No, the fans MUST be stopped before you run the
+test. Every time." And on the how: no tach reading ("the user may have an
+external fan running; the fans will still show that they are spinning as
+the airflow moves over them"), a set wait after the fans are commanded
+off, about ten seconds, nothing more complicated. As built: the cooling
+engine gained a quiet hold (`cool_quiet_hold`: every fan and the purge to
+zero, the engine's own fan writes go to zero while it stands, the phase's
+posture and the purge back at the release), the finder takes it, waits ten
+seconds, listens, and hands it back, whatever the outcome. On the bench
+reference machine (forgectrl 167f85c5 installed) the dry finding then
+read the bottom leg as 91 235 62 215 93 162 73 232 95 157 73 213 103 119
+and called it at 14 (the carriage loads from about 14 on this head; 12
+below stays inside the free travel), the top at 22, the fans back in
+their idle posture after. During the hold the exhaust read zero and the
+air assist ran down; the intake tachs kept their idle 725, which they
+also show at the engine's idle posture of intake PWM zero: those fans run
+at a floor with no PWM, or the bench's external airflow spins them. The
+finder had worked at that same intake reading every time. The case a
+minute after a burn is the next sheet run's to prove; the frame card that
+was waiting at its press for an after-burn finding was aborted unburned.
+
+The fourth sheet of the day, and the record: `commission.sheet` PASS in
+827 s in campaign c-20260906172748-0b36 on forgectrl 167f85c5 (the
+presence press after 21 s, every arm press by the bench actuator, every
+burn witnessed: the tube at 1023, LASER_ON samples 145 to 255, the
+thermopile +784 to +2097; the seven settings restored, the config
+reading the operator's 3.48, 14, and 20 after it). Inside it the focus
+card, two minutes after the frame burn, stopped every fan for ten
+seconds and found the stops at 14 below and 20 above the edge, no slip,
+the reach Z 2.1 to 13.8 mm on the test's pick; the card took 96 s with
+the finding. The sheet's status: pass, satisfied; the after-burn case is
+proven the way the operator ordered it. Board at the end: GRBL mode,
+controller running, the exhaust in its cooldown after the flow-load card,
+`/tmp` clean. Nothing is committed; the hold stands.
+
+## 2026-09-06: a job's Z moves the lens, referenced only, inside the reach
+
+The operator asked where a user sees the lens's reach and what happens past
+it, and the answers exposed two things: the panel's Machine tab showed
+none of the lens settings (a wrong claim of mine), and in GRBL mode a
+sender's Z had never moved the lens at all: the driver's posture kept the
+lens locked out of the pulse path (`motor_lock` 8, the factory's idle
+posture, documented as such), so LightBurn's Z was bookkeeping and the
+frame work of 2026-09-05 had been a coordinate frame over an axis that did
+not move. The operator: "fully and completely unacceptable, and I thought
+that was already fixed." As built the same afternoon: the driver puts
+every axis in the pulse path (`motor_lock` 0, half-step mode, the lens's
+drive current with the run currents and its hold current with the hold
+currents); its Z soft limit is always on, whatever `$20` says, with Z
+counted as referenced to where it stands until a reference exists (the
+core checks the limit on homed axes only), so an unreferenced Z move is
+refused (a jog with error 15, a program move with the soft-limit alarm
+before it starts); a gfcloud home opens the envelope to the head's free
+travel with a half-step of slack at each end, and a commissioning card,
+which references the lens itself, tells the driver with `M103 Z<focal
+height at the edge> P<free half-steps below> Q<above>` at the head of
+every program (P and Q optional: the settings, else the fallback). The
+stream harness checks that a 1 mm Z move after `M103` steps the lens three
+up and three back (the fourth session of `laser_stream_test.py`). The
+panel's Machine tab gained a Lens card (the park height, the focus at the
+reference, the free travel counts, the reach in the user's units from
+`/status`'s new `lens` block), the Motion card a "Lens reach" line, and Z
+reads as unreferenced until a home; the status's Z scale is the screw's
+(0.684 mm per full step, not the service's 0.706). The docs (the driver
+page, LightBurn, motion-hardware), BRINGUP, and the plan follow; the sheet
+test's covers gained the driver's homing and posture files.
+
+Host-proven: the driver's build, lens test, lifecycle harness, and the
+stream harness with the Z session (the arm test stubs the reference);
+forgectrl with -Werror and its sheet, status, lid-gate, and wizcalc tests
+(the status tests stub the settings store). Bench, on forgectrl 3aa24d60
+and the driver 0aea0dda over one Grbl connection: an unreferenced
+`$J=G91 Z-1` refused with error 15 and no motion; `$H` in 53 s to Z 3.08
+with the panel homed at 3.08; `$J=G91 Z-2` took the lens off its hall edge
+(the sensor left home) with the panel following to 1.03; `$J=G91 Z2` back
+to 3.08 (the hall reads not-home at the park when reached from below, its
+hysteresis); `Z-5` and `Z8` past the reach refused with error 15 and no
+motion. The first driver build had the hold without the homed bit and
+refused nothing, which the drill showed. Board at the end: GRBL mode,
+homed at the park, `/tmp` clean.
+
+The operator found the Lens card's two length fields showing millimeters
+on a machine set to inches: the panel fills each field by name through
+its unit conversion and the new fields were not in that list. Fixed
+(forgectrl 60f7b92f), the placeholders in the user's units too.
+
+The fifth sheet of the day, on the pair as it stands (forgectrl 60f7b92f,
+the driver 0aea0dda): `commission.sheet` PASS in 818 s in a new campaign,
+c-20260906201504-2a77 (the catalog changed with the covers). The presence
+press, the actuator's arm presses, every burn witnessed (the tube at 997
+to 1023, LASER_ON samples 143 to 255, the thermopile +757 to +2305), the
+settings restored (the operator's 3.48, 14, and 20 stand). Inside it the
+focus card found the stops at 14 and 20 with the fans stopped, and the
+driver's log shows each card's `M103` taken: "lens referenced at Z6.84,
+free 14 half-steps below and 20 above" three times, the test's own pick
+while it ran. Board at the end: GRBL mode, controller running, `/tmp`
+clean. Nothing is committed; the hold stands.
+
+## 2026-09-06: commissioning phase 4, the lifecycle, built and proven
+
+The plan's last phase, as built in forgectrl (plan section 6.16): the
+what-changed menu on the Commissioning tab (a replaced tube, pump,
+coolant, fan, head, or tray, or a service with a cover off, mapped by a
+compiled table to the wizards that measured the old part, required, and
+the ones that only prove it, recommended; `POST /wiz/changed`); the record
+as a download named after the sheet id and as a printable page
+(`recordhtml.c`, no script, every value escaped, the steps in catalog
+order with their sentence, the settings written with the values before,
+and the numbers) and inside the sanitized log bundle as
+`system/commissioning.json`; the button LED choreography (white breathing
+while a wizard holds the machine with the controller stopped, handed back
+dark before any controller start, amber blinking while a check waits for
+the lid to close); and the second-browser mirror (a run belongs to the
+login session that started it; another session follows it, is refused an
+answer or an abort with 409, and can take the run over). On the way:
+`GET /wiz/record` used a 16 KB buffer against a bench record of 18.7 KB
+on disk (11.6 KB compact); the record's routes now hand out a malloc'd
+dump. The docs site (commissioning, control panel, forgectrl, logging),
+the help entries, the dev server's mock, and the plan follow.
+
+Host-proven: forgectrl under -Werror with `commission_test` (the change
+table, the dump), the new `recordhtml_test`, `wizcalc_test` (the
+ownership rule), `sheet_test`, `jobstream_test`, `users_test`; the mock's
+15 (its `/status` gained the `lens` block the daemon has had since the
+Lens card, a pre-existing gap); forgetest's `test_commission_suite` (31,
+the three new cases registered) and `test_baseline` (30).
+
+Bench, forgectrl e6bd6635 and the suite hot-deployed on image
+20260904203403, campaign c-20260906210652-b9a0, every case started over
+the forgetest API with the prerequisites overridden: `commission.what-changed`
+PASS in 7 s (the menu of seven, the tray recommends the focus card, a fan
+requires airflow with the gate held open by the dev image's override, an
+unknown change 400, the record put back under one restart);
+`commission.record-export` PASS in 37 s (the record 11558 bytes with 21
+wizards, the download named `forgefirm-commissioning-<sheet id>.json`, the
+page 16102 bytes with every completed wizard and no script, 403 without a
+login or the token, the 3.0 MB bundle carrying the record at 18519 bytes
+with the same sheet id); `commission.mirror` PASS in 18 s (session A owns
+the sensors check, B mirrors, a tool with the token is never held back,
+B's abort 409, B takes over, A no longer owns it, B's abort ends the
+check aborted; the temporary account and both sessions gone at the end).
+The LED read from sysfs at 2 Hz: through `commission.check-airflow` (PASS,
+40 s) the three channels pulse at 1800 ms from the controller's stop to
+its restart, then read dark; with the lid held open by the fixture and the
+switches check started by hand, the red and green channels pulse at 340 ms
+for the whole "Close the lid to begin" wait and read dark two seconds
+after the abort; the lid was closed again by the fixture and the check
+left no record. The sheet's own record still carries the two wizards
+removed on 2026-09-05 (`motion.scale`, `sheet.record`); the page leaves
+them out, since they are not in the catalog.
+
+Found by the runs' baseline lines: the fixed `motor_lock` value in
+`forgetest/baseline.py` was still 8 from before the Z work of this
+afternoon, so every test since then reported a leftover of 0 and wrote 8
+under the running controller, which locked the lens out of the pulse path
+until the next controller start. The fixed value is 0, `motor_lock` is no
+longer one of the configured markers (the probe and the controller both
+leave it 0), and the motion suite's masked-restart case and the
+acceptance page say 0; the baseline unit tests follow. Board at the end:
+GRBL mode, controller running, lid closed, `/tmp` holds the previous
+forgectrl as a volatile rollback, `/data` as found. Nothing is committed;
+the hold stands until the agreements review.
+
+## 2026-09-06: the web service sees ForgeFIRM/<version>
+
+The User-Agent gfutilities presents to the Glowforge service is a
+configuration key, `SERVICE.USER_AGENT` (`user_agent` under `[SERVICE]`);
+unset, the library keeps its `OpenGlow/<factory firmware version>`
+default. Both ForgeFIRM clients set it after the config is parsed:
+`ffmachine.apply_user_agent()` reads the image stamp
+`/etc/forgefirm-version`, drops a leading `v` before a digit, keeps the
+dev image's `<timestamp> (dev)` form, and gives `ForgeFIRM/unknown` when
+the stamp is unreadable; a non-empty `user_agent` in `gfhome.conf` wins.
+The value carries on the HTTPS session and on the WebSocket handshake.
+Host tests: gfutilities `tests/test_user_agent.py` (default, empty
+value, override, session header; 34 pass with the lifecycle and firmware
+policy modules) and python3-gfhardware `tests/test_ffmachine_agent.py`
+(8 pass).
+
+Bench 2026-09-06 21:33-21:35Z, dev image 20260904203403 hot-deployed
+(the five files staged in `/tmp`, installed, the staging removed): the
+GRBL-to-cloud switch through `POST /mode` came up running in a session
+that logged `user agent: ForgeFIRM/20260904203403 (dev)`, sign-in
+SUCCESS, the firmware check at the tested baseline, `RX-EVENT: ready`,
+the hunt `:completed`, the four head-finding motions and five lid image
+uploads, no error or warning. The service treats the new agent as it
+treated the old one. Board at the end: cloud mode, session live, `/data`
+as found. Nothing is committed; the change rides with the next push of
+Glowforge-Utilities, python3-gfhardware, and the docs site.
+
+## 2026-09-06: the agreements reviewed against the code, and three fixes
+
+The four agreement documents (`forgectrl/docs/agreements/`) were checked
+claim by claim against the code as built through commissioning phase 4.
+Most claims held; the operator revised the texts for the rest. Three
+findings were code, not text, and were fixed the same day, host-proven:
+
+- **A hold verdict could be resumed dark.** The cooling client took the
+  feed hold on AIRFLOW or CRITICAL (no resume for the session) but kept
+  `hold_ours` set, so a button press, a `~`, or a sender's cycle start
+  inside the 60 s disarm grace resumed motion with fire suppressed and
+  the client never held again: the job ran dark to its end. Now the
+  client holds again whenever the core is back in Cycle under a standing
+  hold (fresh or stale), once per resume with "cooling hold stands - job
+  held again; reset the job" (`glowforge_cooling.c`, `hold_take`).
+  Proof: stream rule 24 (`laser_stream_test.py`, the null-sink build):
+  the harness publishes the fail-tier verdict mid-line, the client holds,
+  a `~` moves the head for at most one client poll with zero FIRE ticks,
+  the client holds again and says so, and the clean verdict resumes the
+  hold it took with the rest of the line lit.
+- **The camera key was masked by luck.** The log-export sanitizer knew
+  the panel token by value but the camera key only through the 32-hex
+  pattern, which its length happened to satisfy. The key is now a known
+  value (`logs.c` `load_known`, placeholder `CAMERA_KEY`).
+- **`POST /settings` took `cloud_enabled=1` as a plain switch**, without
+  the cloud step's typed phrase, and `cloud_enabled=0` there left
+  `homing_mode=gfcloud` standing, which the driver's `$H` honors on its
+  own. Now `1` from `0` takes `phrase=I UNDERSTAND` (400 without it;
+  re-sending `1` while it stands asks nothing), and `0` takes
+  `homing_mode` to `none` and `controller_mode` to `grbl` when they point
+  at the cloud, logged, as the step does (`main.c` `cb_settings_post`,
+  `WIZ_CLOUD_PHRASE` in `wiz.h`). The acceptance runner gives the phrase
+  when it turns cloud mode on for a test that declares it (`baseline.py`);
+  `commission.cloud-disabled-surface` turns cloud mode off with the one
+  write, checks the sweep, checks the phrase-less `1` is refused, and
+  restores with the phrase; the fake-daemon unit tests and the dev
+  server's mock carry the same rules.
+
+Proofs: grblHAL host build + the stream and lifecycle harnesses (rule 24
+PASS: resumed dark for 0.60 s, held again, lit after the clear); forgectrl
+host build with `-Werror` + the mock tests (16); forgetest unit tests (the
+commission suite's 31, now green on a Windows host too: the record helper
+writes with `O_BINARY` and the daemon-path helpers join with `posixpath`,
+both no-ops on the board). Docs:
+grblhal-driver (the cooling client), cooling-engine (the verdict), logging
+(the sanitizer's known values), settings, forgectrl, and commissioning
+(`cloud_enabled` through the API). Nothing committed: the commissioning
+hold stands until the agreements are final.
+
+**Bench 2026-09-06 23:17Z (image 20260904203403 dev):** forgectrl
+`42000459` and the driver `8bfbe88b` installed by scp to `/tmp`, hash check,
+`init.d stop`, cp, `chmod 755`, start; the three suite files (`baseline.py`,
+`suite/commission.py`, `suite/logs.py`) installed and forgetest restarted
+with the queue idle; both `.prev` rollbacks kept in `/tmp`, the staging
+copies removed. The new daemon closed the controller gate at once with
+"the agreements are not accepted": all four documents changed bytes, and
+the override file does not lift that, as designed. `logs.tree-tail-export`
+PASS (38 s) on the new daemon with the camera-key leak check.
+The operator's walk to accept the four documents again found two page
+defects on that path, fixed and installed the same hour (forgectrl
+`a23d0a6d`, then `be23dd73`): the setup page counted the agreements step
+done while the recorded press stood, whatever the documents' state, and
+skipped it (`stepDone` now needs `agreements_complete` too); and the rail
+linked only the re-runnable steps, so an open Agreements or Account entry
+was dead and `/setup?step=agreements` was refused (any open step is a link
+and is honored in the address). Then the path proved: the four documents
+accepted at 23:33Z, the press at 23:34:11Z, the gate open, the GRBL
+controller respawned with motion verified. `commission.cloud-disabled-surface`
+PASS at 23:35Z on the new daemon: found `cloud_enabled=1` with
+`homing_mode=gfcloud`; the one write `cloud_enabled=0` swept the homing
+choice to `none` with the "(cloud mode off)" log line; `controller_mode=cloud`
+409, `homing_mode=gfcloud` 409, `cloud_enabled=1` without the phrase 400;
+`POST /mode controller=cloud` 409 naming cloud mode; the restore with the
+phrase put all three settings back as found, the machine in GRBL mode
+throughout. Board at the end: `/tmp` holds the two `.prev` rollbacks,
+`/data` as found.
+
+## 2026-09-06: the consent documents renamed from agreements to advisories
+
+By the operator's order, late on 2026-09-06: the folder
+`forgectrl/docs/agreements/` became `docs/advisories/`, then every route,
+identifier, key, and name followed: `GET /advisories/<id>`,
+`POST /wiz/advisories/accept|press|press/cancel`, `GET /wiz/advisories/press`;
+`src/advisories.c` and `.h` (`advisory_t`, `advisories_find`, the
+`advisories_blob.c` the embed step generates); the wizard step id and title;
+the record's `advisories` block and the `advisories` wizard entry; the
+`advisories_complete` flag in `GET /wiz`; the daemon's log lines; the
+acceptance test `commission.advisories-rehash` with its `covers`; the dev
+server's mock; the docs site (commissioning, control panel, forgectrl,
+usage index, install); BRINGUP; the plan. The four document texts do not
+contain the word, so their hashes and the recorded consent are unchanged.
+Sensor-agreement prose in the cooling code and docs was left as written.
+
+Proofs: forgectrl host build with `-Werror`, `commission_test` and
+`recordhtml_test` PASS, the mock tests 16, the forgetest commission suite 31,
+the catalog loading 81 tests with every prerequisite resolving. Bench: the
+daemon stopped, the record's two keys renamed in place (a copy kept in
+`/tmp/commissioning.json.prev`), forgectrl `25256609` installed with the
+suite files, forgetest restarted with the queue idle: the gate stayed open on
+the migrated consent, `GET /advisories/privacy` 200 with its ETag, the old
+route gone, GRBL running. `commission.advisories-rehash` PASS (7 s) in the
+new campaign c-20260906234523-4987 (the catalog hash moved), the record put
+back, the gate open. Board at the end: `/tmp` holds the record copy and the
+two `.prev` binaries, `/data` as found.
+
 ## Reference notes
 
 ### Head-IRQ source validation — the beam-emission hypothesis

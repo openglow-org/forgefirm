@@ -1,0 +1,12 @@
+#!/bin/sh
+# udhcpc hook: /usr/share/udhcpc/default.script runs every file in
+# /etc/udhcpc.d with the lease event as $1; 50default applies the lease
+# first. Refresh the address block of the console banner on every event.
+
+case "$1" in
+  bound|renew|deconfig|leasefail|nak)
+    /usr/sbin/forgefirm-banner
+    ;;
+esac
+
+exit 0

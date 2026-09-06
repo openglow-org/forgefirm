@@ -22,6 +22,13 @@ case "$1" in
   start)
     echo "Starting forgetest"
     mkdir -p "$DATA"
+    # The bench seed: the commissioning override lifts the wizard part of
+    # the controller gate until the next reboot (/run is tmpfs), so a
+    # campaign runs on a machine whose required wizards are not complete.
+    # Nothing lifts the agreements or the account: the bench accepts them
+    # once, and that stays in /data.
+    mkdir -p /run/forgefirm
+    : > /run/forgefirm/commissioning-override
     start-stop-daemon -S -q -p $PIDFILE -m -b -x /bin/sh -- -c \
       "exec /usr/bin/python3 -m forgetest >> $LOG 2>&1"
     ;;

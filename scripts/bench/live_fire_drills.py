@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live-fire bench drills - Phases 4, 5, 6. Runs on the board (the bench
 page) or from a LAN host, against grblHAL over TCP (port 23) and
-forgectrl over HTTP (:8080); the machine is GF_HOST, default 127.0.0.1.
+forgectrl over HTTP (:80, FORGECTRL_PORT overrides); the machine is GF_HOST, default 127.0.0.1.
 LIVE LASER: the operator must be armed with eye protection, a fire
 watch, an extinguisher, and the exhaust running. Every drill waits for
 the operator to press the physical arm button before the machine fires;
@@ -184,7 +184,8 @@ import urllib.request
 
 HOST = os.environ.get('GF_HOST') or '127.0.0.1'
 PORT = 23
-BASE = 'http://%s:8080' % HOST
+CTRL_PORT = int(os.environ.get('FORGECTRL_PORT') or 80)
+BASE = 'http://%s:%d' % (HOST, CTRL_PORT)
 
 
 def panel_token():
@@ -3021,7 +3022,7 @@ def post_ctrl(action):
     # http.client preserves the header-name case exactly as given.
     import http.client
     tok = panel_token()
-    c = http.client.HTTPConnection(HOST, 8080, timeout=8)
+    c = http.client.HTTPConnection(HOST, CTRL_PORT, timeout=8)
     c.putrequest('POST', '/controller/' + action)
     c.putheader('X-ForgeFIRM-Token', tok)
     c.putheader('Content-Length', '0')

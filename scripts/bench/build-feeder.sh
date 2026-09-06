@@ -15,5 +15,6 @@ TC="$FF_BUILD_TOP/tmp/work/cortexa9t2hf-neon-fslc-linux-gnueabi/ulfius/2.7.15"
 "$TC/recipe-sysroot-native/usr/bin/arm-fslc-linux-gnueabi/arm-fslc-linux-gnueabi-gcc" \
   --sysroot="$TC/recipe-sysroot" \
   -mthumb -mfpu=neon -mfloat-abi=hard -mcpu=cortex-a9 \
+  -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 \
   -O2 -Wall -Wextra -o "$SP/feeder" "$SP/feeder.c"
 echo FEEDER-OK

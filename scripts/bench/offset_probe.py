@@ -32,6 +32,9 @@ import sys
 import threading
 import time
 
+# forgectrl on the board (FORGECTRL_PORT overrides the port)
+BASE = 'http://127.0.0.1:%s' % (os.environ.get('FORGECTRL_PORT') or '80')
+
 SYSFS = '/sys/glowforge/'
 LEDS = '/sys/class/leds/'
 HZ = 25
@@ -225,9 +228,9 @@ def run_armed():
 
     def status():
         try:
-            with urllib.request.urlopen('http://127.0.0.1:8080/status', timeout=2) as r:
+            with urllib.request.urlopen(BASE + '/status', timeout=2) as r:
                 s = _json.load(r)
-            with urllib.request.urlopen('http://127.0.0.1:8080/cool/status', timeout=2) as r:
+            with urllib.request.urlopen(BASE + '/cool/status', timeout=2) as r:
                 c = _json.load(r)
             return {'t': time.time(), 'armed': c.get('armed'), 'phase': c.get('phase'),
                     'hv_enable': (s.get('switches') or {}).get('hv_enable'),

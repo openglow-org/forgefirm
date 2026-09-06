@@ -43,3 +43,13 @@ IMAGE_ROOTFS_EXTRA_SPACE = "262144"
 # Dev builds identify by build timestamp (matches the artifact name),
 # tagged so a bench machine is never mistaken for a release.
 FORGEFIRM_VERSION_STRING = "${DATETIME} (dev)"
+
+# /etc/forgefirm-dev marks a dev image on the rootfs; its content is the
+# version string. The sshd init script starts sshd on a dev image without
+# the panel's enable flag (/run/forgefirm/ssh-enabled), and forgectrl
+# reads the same marker. A release image has no such file.
+write_forgefirm_dev_marker() {
+    echo "${FORGEFIRM_VERSION_STRING}" > ${IMAGE_ROOTFS}${sysconfdir}/forgefirm-dev
+}
+write_forgefirm_dev_marker[vardepsexclude] += "DATETIME"
+ROOTFS_POSTPROCESS_COMMAND += "write_forgefirm_dev_marker;"

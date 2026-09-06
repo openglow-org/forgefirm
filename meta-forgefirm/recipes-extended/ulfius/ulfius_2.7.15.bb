@@ -23,12 +23,14 @@ S = "${WORKDIR}/git"
 inherit cmake pkgconfig
 
 # curl backs the default-ON WITH_CURL client-request API (find_package REQUIRED).
-DEPENDS = "jansson libmicrohttpd curl orcania yder"
+# GnuTLS backs the secure framework: forgectrl serves HTTPS on 443 with
+# a self-signed certificate.
+DEPENDS = "jansson libmicrohttpd curl orcania yder gnutls"
 
-# No systemd journald on the forgefirm image. forgectrl serves plain HTTP
-# and no websockets: no GnuTLS (which keeps nettle, gmp, libunistring and
-# libtasn1 off the rootfs) and no websocket support, which depends on it.
-EXTRA_OECMAKE += "-DWITH_JOURNALD=off -DWITH_GNUTLS=off -DWITH_WEBSOCKET=off"
+# No systemd journald on the forgefirm image. GnuTLS is on for HTTPS
+# (the trimmed GnuTLS build is set in conf/distro/forgefirm.conf); no
+# websocket support, which forgectrl does not use.
+EXTRA_OECMAKE += "-DWITH_JOURNALD=off -DWITH_GNUTLS=on -DWITH_WEBSOCKET=off"
 
 # ulfius builds itself with -Werror -Wconversion; under Yocto's arm32
 # time64 ABI (-D_TIME_BITS=64) a long-long-to-long time conversion in

@@ -586,6 +586,33 @@ class RoutingTests(unittest.TestCase):
         finally:
             runner_mod.hw.button_lit = saved
 
+    def test_the_arm_press_waits_as_long_as_the_card_says_for_the_light(self):
+        """A card that settles the coolant before it lights the button
+        takes minutes; the caller names the wait, and the actuator presses
+        when the light comes instead of handing the press to a person at
+        the default 60 s (found on the bench by the flow-load card)."""
+        run = Run("test", "r.live", "r.live")
+        ctx = Context(run, self.runner, self.reg["r.live"])
+        self.runner.probe_fixture(force=True)
+        run.fixture_takeover = True
+        lit_at = time.time() + 0.6
+        saved = runner_mod.hw.button_lit
+        runner_mod.hw.button_lit = lambda: time.time() >= lit_at
+        seen = []
+        run.set_notice = lambda text: seen.append(text)
+        try:
+            self.assertTrue(ctx.arm_press(lit_timeout=5))
+            deadline = time.time() + 5
+            while ("button", "press") not in self.stub.acts and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertIn(("button", "press"), self.stub.acts)
+            self.assertEqual([n for n in seen if n], [])            # nobody was asked
+            rec = run.evidence["actions"][-1]
+            self.assertEqual(rec["by"], "fixture")
+            self.assertGreaterEqual(rec["took_s"], 0.5)
+        finally:
+            runner_mod.hw.button_lit = saved
+
     def test_an_actuator_lost_after_the_takeover_is_said_out_loud(self):
         """Falling back to the operator without a word is how one dropped
         actuator becomes a press nobody can account for afterwards."""

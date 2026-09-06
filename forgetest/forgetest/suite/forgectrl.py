@@ -6,7 +6,12 @@ import time
 from ..catalog import test
 from .. import hw
 
-_COVERS_AUTH = [("forgectrl", "src/auth.*"), ("forgectrl", "src/peer.*"), ("forgectrl", "src/main.c")]
+# The write guard reads the account and the session store (a machine with
+# an account needs a session from the LAN; this host and the dev image
+# write with the token), so both are the guard's domain.
+_COVERS_AUTH = [("forgectrl", "src/auth.*"), ("forgectrl", "src/peer.*"), ("forgectrl", "src/main.c"),
+                ("forgectrl", "src/session.*"), ("forgectrl", "src/users.*"),
+                ("forgectrl", "src/ui/login.js"), ("forgectrl", "src/ui/wizard.js")]
 
 
 def lan_ip():
@@ -27,12 +32,15 @@ def lan_ip():
 
 @test("forgectrl.auth", title="API access control", subsystem="forgectrl", kind="auto", est_min=1,
       covers=_COVERS_AUTH,
-      description="Every state-changing endpoint refuses an unauthenticated write; a non-literal "
+      description="Every state-changing endpoint refuses an unauthenticated write (the factory "
+                  "return, the SSH switch and the wizard's own routes included); a non-literal "
                   "Host, a non-literal Origin and a cross-site Sec-Fetch-Site are refused; the "
                   "cooling report channel accepts the loopback peer and refuses a non-loopback "
-                  "one; the fuse view is two-factor "
+                  "one (over HTTP the write is sent to HTTPS first, 302; over HTTPS the route "
+                  "answers 403 loopback only); the fuse view is two-factor "
                   "(token and the physical button) and refused without either; "
-                  "the flash and factory-restore chain is refused unauthenticated.")
+                  "the flash and factory-restore chain is refused unauthenticated; a page "
+                  "asked for without a session is sent to the login carrying its path.")
 def auth(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -46,7 +54,10 @@ def auth(ctx):
                          ("/mode", {"controller": "grbl"}), ("/settings", {"ui_units": "mm"}),
                          ("/diag/flow-verify", None), ("/diag/abort", None),
                          ("/update/apply", None), ("/boot", {"target": "a"}),
-                         ("/system/reboot", None), ("/restore/factory", None)):
+                         ("/system/reboot", None), ("/restore/factory", None),
+                         ("/restore/factory-return", {"confirm": "1"}), ("/system/ssh", {"enable": "1"}),
+                         ("/wiz/advisories/accept", None), ("/wiz/account", None),
+                         ("/wiz/complete", None)):
         st, body = fc.post(path, params=params, auth=False)
         ctx.log("POST %s (no token) -> %s %s", path, st, body if isinstance(body, dict) else "")
         ev["noauth " + path] = st
@@ -92,7 +103,7 @@ def auth(ctx):
     ev["sfs_cross"] = st
     ctx.log("GET /status Sec-Fetch-Site=cross-site -> %s", st)
     ctx.check(st == 403, "a cross-site fetch was accepted (%s)", st)
-    st, body = fc.get("/status", headers={"Sec-Fetch-Site": "same-origin", "Origin": "http://127.0.0.1:8080"})
+    st, body = fc.get("/status", headers={"Sec-Fetch-Site": "same-origin", "Origin": "http://127.0.0.1"})
     ctx.check(st == 200, "same-origin literal Origin refused (%s)", st)
 
     # the fuse view is two-factor: the token AND the physical button held.
@@ -122,17 +133,42 @@ def auth(ctx):
     ctx.check(st == 200, "/cool/state refused the loopback peer (%s %r): the controller's "
               "reports never reach the engine", st, body)
 
-    # ...and a non-loopback peer is refused, even with a token
+    # ...and a non-loopback peer is refused, even with a token. Over HTTP
+    # the write is sent to HTTPS first (302, the listener's rule); over
+    # HTTPS the route itself refuses the peer (403 loopback only). Neither
+    # request follows the redirect, and the self-signed certificate is
+    # not verified.
+    from .commission import request, decode
     ip = lan_ip()
     ev["lan_ip"] = ip
     ctx.check(ip, "cannot determine the board's LAN address")
-    port = fc.base.rsplit(":", 1)[-1]
-    lan = hw.Forgectrl("http://%s:%s" % (ip, port), token=fc.token)
-    st, body = lan.post("/cool/state", params={"mode": "idle", "armed": "0"})
+    token = {"X-ForgeFIRM-Token": fc.token}
+    report = {"mode": "idle", "armed": "0"}
+    st, body, hdrs = request("http://%s" % ip, "POST", "/cool/state", data=report, headers=token)
+    loc = hdrs.get("location", "")
+    ev["cool_state_from_lan_http"] = {"status": st, "location": loc}
+    ctx.log("POST http://%s/cool/state -> %s %s", ip, st, loc)
+    ctx.check(st == 302 and loc.startswith("https://"),
+              "a LAN write over HTTP -> %s %r, expected a 302 to HTTPS", st, loc)
+    st, body, hdrs = request("https://%s" % ip, "POST", "/cool/state", data=report, headers=token)
+    b = decode(body)
     ev["cool_state_from_lan"] = st
-    ctx.log("POST /cool/state from %s -> %s %s", ip, st, body if isinstance(body, dict) else "")
-    ctx.check(st == 403 and isinstance(body, dict) and body.get("error") == "loopback only",
-              "/cool/state accepted a non-loopback peer (%s %r)", st, body)
+    ctx.log("POST https://%s/cool/state -> %s %s", ip, st, b if isinstance(b, dict) else "")
+    ctx.check(st == 403 and isinstance(b, dict) and b.get("error") == "loopback only",
+              "/cool/state accepted a non-loopback peer (%s %r)", st, b)
+
+    # the login return path: a page asked for from the LAN without a
+    # session is sent to the login carrying the path it asked for (with
+    # its query), so the login can come back to it. Before the setup has
+    # made the account the page is served instead (200).
+    st, body, hdrs = request("https://%s" % ip, "GET", "/setup?step=laser.focus")
+    loc = hdrs.get("location", "")
+    ev["setup_from_lan"] = {"status": st, "location": loc}
+    ctx.log("GET https://%s/setup?step=laser.focus (no session) -> %s %s", ip, st, loc)
+    ctx.check(st in (200, 302), "the setup page from the LAN -> %s", st)
+    if st == 302:
+        ctx.check(loc == "/login?next=/setup%3Fstep%3Dlaser.focus",
+                  "the login redirect does not carry the path: %r", loc)
 
 
 @test("forgectrl.settings-bounds", title="Settings validation and restore", subsystem="forgectrl",

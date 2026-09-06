@@ -3,7 +3,7 @@ kernel module's sysfs, the init scripts, and the Grbl TCP port.
 
 Everything is reachable through environment overrides so the suite can be
 exercised against a mock on a host:
-  FORGECTRL_URL          default http://127.0.0.1:8080
+  FORGECTRL_URL          default http://127.0.0.1
   FORGECTRL_TOKEN_FILE   default /data/forgefirm/panel.token
   GF_SYSFS_ROOT          default /sys/glowforge/  (must end with '/')
   GRBL_HOST / GRBL_PORT  default 127.0.0.1 / 23
@@ -41,7 +41,7 @@ class Forgectrl:
     """Thin client for the machine-services daemon."""
 
     def __init__(self, base=None, token=None, timeout=10.0, slow_timeout=SLOW_TIMEOUT_S):
-        self.base = (base or os.environ.get("FORGECTRL_URL") or "http://127.0.0.1:8080").rstrip("/")
+        self.base = (base or os.environ.get("FORGECTRL_URL") or "http://127.0.0.1").rstrip("/")
         self.timeout = timeout
         self.slow_timeout = slow_timeout
         self._token = token
