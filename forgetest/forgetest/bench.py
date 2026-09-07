@@ -275,6 +275,11 @@ TOOLS = [
              "feed mid-circle, the fewest free planner blocks, the controller CPU, clamped events, underruns, the "
              "accelerometer's cruise RMS. $12 goes back to what it was; the head returns home. Needs the machine "
              "homed and at home, the lid closed, no other Grbl client."},
+    {"id": "planner-blocks-test", "title": "Planner buffer depth harness", "script": "planner_blocks_test.py",
+     "safety": "dry", "where": "host", "ported": False, "args": [],
+     "desc": "A deep planner buffer starts: the controller restarted at $398=400 and at $398=1000 answers "
+             "on the port, reports the depth in its status report and runs a move. A CI harness (the grblHAL "
+             "repo): needs the host-built null-sink controller, not the machine, so it is not a bench-page tool."},
     {"id": "xy-mode-test", "title": "XY microstep mode harness", "script": "xy_mode_test.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
      "desc": "The XY scale is the microstep mode's, never typed: xy_microsteps sets $100/$101 and the "

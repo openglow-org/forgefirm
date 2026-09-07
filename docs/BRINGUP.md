@@ -1026,8 +1026,10 @@ is committed.
   finer on that radius) the feed sags mid-arc and the circle takes longer,
   with the CPU flat at 33 percent and no underrun, and a deeper planner
   buffer (`$398` 250) changes nothing. Finer chords move the tone up and
-  do not lower the vibration. `$398` at 255 or more spins the controller
-  at start (a core bug, "Next work"); the usable maximum is 254.
+  do not lower the vibration. `$398` runs over its whole range (30 to
+  1000): the core's block-ring index is wide enough for it, and
+  `scripts/bench/planner_blocks_test.py` starts the null-sink build at
+  400 and at 1000 in the grblHAL repo's CI.
 - **Factory analog config** (constant across all captured jobs, 2018→2026):
   PIC currents X 135 run / 33 hold, Y 22 run / 5 hold (axis DAC scales differ by
   design); x/y_decay=1; ×8 microstepping; run currents applied only while
@@ -1483,7 +1485,8 @@ feature requests, enhancements) will eventually be tracked as GitHub issues.
     accelerometer with every fan off (`scripts/bench/xy_pattern_accel.py`
     through the new `POST /cool/quiet`): the vibration at 200 mm/s falls
     with the finer mode, most on a circle (x RMS down 29 percent at 32).
-    Uncommitted. Owed: the commits, pins, image and campaign. 32 is admitted; the
+    Committed, pushed and pinned. Owed: the acceptance campaign on the
+    image that ships it. 32 is admitted; the
     fallbacks, should another machine not hold it, are the 84480 Hz tick
     or the `$110` ceiling the driver holds under a lower tick. Cloud mode
     runs at the service's own 8: the service plans every stream at 8
@@ -1494,16 +1497,6 @@ feature requests, enhancements) will eventually be tracked as GitHub issues.
     cloud mode (a local stream expander in the feeder, or the service
     planning finer) wait for a user's report of such a refusal, by
     decision.
-9. **Planner buffer of 255 blocks or more spins the controller.** The
-    core's `plan_reset_buffer()` links the block ring with a `uint_fast8_t`
-    index, so `$398` at 255 or more never finishes at start: the main
-    thread sits at 100 percent in `plan_reset()`, the Grbl port stops
-    answering, and forgectrl still reports the controller running (the
-    supervisor sees deaths and silent armed reporters, not an idle spin).
-    Reproduced on the host build. Owed in the fork (openglow-org
-    grblHAL-core, branch forgefirm): the index widened to `uint_fast16_t`,
-    or the sanity check capped at 254, and a host test that starts the
-    null-sink build with `$398=400`. Until then the usable maximum is 254.
 
 **Deliberately not gated:** an armed GRBL job after an underrun cuts at the
 stale origin unless homing is required (GRBL mode permits unhomed cutting; the

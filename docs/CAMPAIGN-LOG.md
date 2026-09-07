@@ -9541,6 +9541,54 @@ decision: the service plans every stream at 8 whatever the machine
 reports. Nothing committed at the time of writing: the operator's order is
 no commit until the code is proven, and the commit is the operator's call.
 
+## 2026-09-07: the XY microstep set lands; the planner buffer index
+
+**Commits, pushes, pins and the image, 22:05 to 22:18Z.** On the
+operator's order the set went out in CI order: forgectrl b1eee4d,
+Glowforge-Utilities 428c725, python3-gfhardware d1c47b8, forgefirm-docs
+d91bcf1, forgefirm 8fc5250 (before grblHAL, whose CI fetches the
+harnesses unpinned), grblHAL-glowforge 48d5f1d. The branch pushes carried
+the producer-lead-ceiling commits of the same day with them (grblHAL
+249bcb8, forgefirm bfb5cb2, docs 0b63d50). Pins fetch-verified with
+`bitbake -c fetch` and pushed: forgefirm 0dc8c74 (forgectrl 0.1.6,
+grblhal-glowforge 0.1.5, forgefirm-app 0.1.25+git) and meta-openglow
+c63777e (python3-gfhardware d1c47b8, python3-gfutilities 0.9.16+git).
+Images 20260907221537, release and dev, one kernel
+(6.12.20-fslc-g707c33df2d36), no QA warning, every built-image check
+green, the new ones included: forgectrl carries `xy_microsteps` and
+`/cool/quiet`, the driver carries the tick line and the ceiling warning,
+gfutilities carries the mode refusal, the dev image carries
+`motion.microstep-modes`, the mode-derived baseline and the four bench
+tools on the bench page. Archived under `images/20260907221537/`.
+
+**The planner buffer index, 22:25 to 22:40Z.** The core's
+`plan_reset_buffer()` linked the block ring with a byte-wide index, so
+`$398` at 255 or more never finished at start. The fork (openglow-org
+grblHAL-core, branch forgefirm, 362577d) widens the index to
+`uint_fast16_t`; the driver's submodule follows. The proof is
+`scripts/bench/planner_blocks_test.py`: one settings store across
+restarts, `$398` written to 400 and then to 1000, the controller
+restarted on the store each time and required to answer on the port, to
+report the depth in its status report and to run a move. Against the
+build before the fix it reports "accepts the connection and never answers
+within 5 s: the start spins" (the listener is its own thread, so a
+connect alone proves nothing, and the harness kills the controller it
+started on every exit); against the fixed build it passes at 400 and at
+1000 (`Bf:400` and `Bf:1000`, a G1 move to Idle). The other six host
+tests and the four harnesses pass on the fixed build; the coverage lint
+is clean (82 tests). On the bench the stripped cross-build (md5
+5a0f5a9f) went in through the controller stop and start route, so
+forgectrl kept the pulse device: `$398` 100 as found, then 400 and a
+restart: the controller answers, `Bf:400`, the process at 0.0 percent of
+the core, a jog of +5 mm to MPos 5.006 and back to 0.000; then 1000 and a
+restart: answers, `Bf:1000`, 0.0 percent; then 100 restored and a
+restart: answers, forgectrl idle at (0, 0, 0). The usable range of `$398`
+is the core's own, 30 to 1000. Left: the board at `$398` 100, `/tmp`
+clean, the hot-deployed driver in place until the next flash; the fix
+committed and pushed in the fork and the driver, the harness registered
+in the bench page, the READMEs and the grblHAL CI, and the pin bump and
+the image build to follow.
+
 ## Reference notes
 
 ### Head-IRQ source validation — the beam-emission hypothesis
