@@ -236,7 +236,8 @@ header {
   font-size: 12.5px;
   margin-left: auto;
 }
-#themebtn {
+#themebtn,
+#logoutbtn {
   background: transparent;
   color: rgba(255, 255, 255, 0.75);
   border: 1px solid rgba(255, 255, 255, 0.3);
@@ -246,7 +247,8 @@ header {
   cursor: pointer;
   white-space: nowrap;
 }
-#themebtn:hover {
+#themebtn:hover,
+#logoutbtn:hover {
   color: #fff;
   border-color: rgba(255, 255, 255, 0.6);
 }

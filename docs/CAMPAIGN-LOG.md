@@ -9111,6 +9111,15 @@ stream rule 24. No QA warnings; six do_fetch taint warnings from the
 forced pin-verify fetch. Archived under `images/20260907000214/` with
 sha256sums.
 
+The forgefirm CI on 8795a6d failed one unit test of 322: the bench
+registry wanted the two lens stall drills named. They run from the shell
+on the bench reference machine only, never from the page, so they are
+named in the registry's not-a-tool list (60e06c7, pushed). The pair was
+rebuilt from that head with the taint stamps cleared: stamp
+**20260907001140**, the same kernel, the same checks, no warning of any
+kind. That pair is the one to flash; the 20260907000214 pair, never
+flashed, was removed.
+
 ## Reference notes
 
 ### Head-IRQ source validation — the beam-emission hypothesis
