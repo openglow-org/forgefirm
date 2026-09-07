@@ -9237,6 +9237,55 @@ The item's text as it stood in BRINGUP when it closed:
 >     shipped default of 2 is a starting point, not a truth), and the same
 >     shape fits any by-eye tunable the commissioning flow meets.
 
+## 2026-09-07: the fork rebased onto grblHAL core build 20260905
+
+The fork had stood on merge base `5848a84` (2026-08-05) while upstream ran
+eighteen commits ahead. All three fork commits rebased onto `d67031a` (build
+20260905) with no conflict.
+
+One upstream change broke the build: `351f77a` removes `hal.settings_changed`,
+which the driver used for the Z envelope reassert. The reassert moved to the
+`grbl.on_settings_changed` chain, and now runs the chain first so the envelope
+is the last write of the dispatch.
+
+The settings store was the risk worth measuring before touching the machine.
+Compiled at both revisions, `settings_t` is 420 bytes with version id 23 and
+every field offset identical; only the `reserved` tail moves, from 409 to 411,
+where upstream carved out two MPG bytes it migrates itself on first boot. So a
+stored `EEPROM-glowforge.DAT` carries over with no migration code.
+
+Nothing held the changed behavior, so `scripts/bench/z_envelope_test.py` was
+written for it: the null-sink controller over TCP, the Z envelope against a
+`$20` write and a `$132` write. It was validated in both directions, which is
+the part that makes it worth having. Against the correct build it passes;
+against a build with the subscription removed it fails at boot; against a build
+that applies the envelope at `driver_setup` but not from the settings chain it
+passes at boot and fails on the first settings write. That third variant is the
+regression the port could actually introduce.
+
+On the bench, image 20260907005922 (dev), the controller was hot-deployed
+through `POST /controller/stop` and `/controller/start` so forgectrl kept the
+pulse device and the 40 V rail stayed up. `$I` moved `1.1f.20260803` to
+`1.1f.20260905` and every one of the ~100 `$$` values came back byte-identical:
+the commissioned machine kept its calibration across the core move. The Z
+envelope drill passed 17 of 17 - refused both ways while unreferenced, still
+refused after each settings write, and after `$H` the referenced window refused
+a far move while an in-window move ran. `$H` landed at Z 3.080, the commissioned
+park exactly. A dry 20 mm square returned to the start with dx=dy=dz=0.000, M5
+throughout. No laser at any point.
+
+Upstream `553c501` arrives as a gain: `mc_line` no longer commands the spindle
+on when a buffer synchronize returned false, so an abort during a laser move
+leaves the laser off. Its new `$63` bit 2 defaults off and reaches nothing here
+that the armed window and the motion-only stream do not already gate.
+
+Pushed and pinned: the fork branch force-pushed (the rebase rewrote the
+published `f32d17e`), forgefirm before grblHAL-glowforge so its CI found the new
+harness, then forgectrl at 0.1.5 and grblhal-glowforge at 0.1.4. The first
+forgefirm push went red: a new `scripts/bench` python file must also be entered
+in the bench registry (`forgetest/forgetest/bench.py`), not only in that
+directory's README.
+
 ## Reference notes
 
 ### Head-IRQ source validation — the beam-emission hypothesis

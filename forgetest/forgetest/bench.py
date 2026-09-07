@@ -244,6 +244,11 @@ TOOLS = [
      "safety": "dry", "where": "host", "ported": False, "args": [],
      "desc": "Arm/disarm lifecycle on the null-sink controller. A CI harness (the grblHAL repo): needs the "
              "host-built null-sink controller, not the machine, so it is not a bench-page tool."},
+    {"id": "z-envelope-test", "title": "Z envelope harness", "script": "z_envelope_test.py",
+     "safety": "dry", "where": "host", "ported": False, "args": [],
+     "desc": "The Z soft limit belongs to the driver, not to $20: an unreferenced Z is collapsed to where the "
+             "lens stands, and neither a $20 nor a $132 write frees it. A CI harness (the grblHAL repo): needs "
+             "the host-built null-sink controller, not the machine, so it is not a bench-page tool."},
     {"id": "puls-profile", "title": "Factory .puls profile decoder", "script": "puls_profile.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
      "desc": "Decodes factory pulse streams into velocity/accel profiles. Runs anywhere; needs a .puls file "
