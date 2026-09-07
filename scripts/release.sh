@@ -26,6 +26,17 @@
 #   FORGEFIRM_ACCEPTANCE_SKIP  set to 1 to bypass the acceptance gate
 #                        deliberately (never the default; see the site,
 #                        Developers, "Acceptance")
+#   FORGEFIRM_SOURCE_SKIP  set to 1 to build a release without the source
+#                        bundle. The licenses of the software in the image
+#                        make source necessary, so this is never the
+#                        default.
+#
+# The source bundle: a release build merges kas/source-bundle.yml, so the
+# build writes the source of every recipe of the image beside the image.
+# scripts/source-bundle.py packs that source, the license manifests, the
+# license texts and the ForgeFIRM layers into
+# forgefirm-source-v<version>.tar.gz, and refuses to pack a bundle in which
+# a recipe that needs source has none.
 #
 # Version contract: <version> == FORGEFIRM_RELEASE in forgefirm-image.bb
 # == /etc/forgefirm-version ("v<version>") in the built rootfs == .fw
@@ -34,7 +45,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-DEPLOY="$REPO/build/tmp/deploy/images/glowforge"
+DEPLOY_ROOT="$REPO/build/tmp/deploy"
+DEPLOY="$DEPLOY_ROOT/images/glowforge"
 IMAGE_BB="$REPO/meta-forgefirm/recipes-forgefirm/images/forgefirm-image.bb"
 INSTALLER="$REPO/scripts/install-forgefirm.sh"
 WARN_BYTES=$((170 * 1024 * 1024))
@@ -63,10 +75,30 @@ FWUP="${FWUP:-fwup}"
 command -v "$FWUP" >/dev/null || die "fwup not found (set FWUP=)"
 command -v kas >/dev/null || die "kas not found on PATH"
 
+# The source bundle belongs to a release. A --dev archive goes to one bench
+# and publishes nothing, so it builds without the archiver.
+SOURCE_BUNDLE=0
+if [ "$MODE" = release ] && [ -z "${FORGEFIRM_SOURCE_SKIP:-}" ]; then
+  SOURCE_BUNDLE=1
+fi
+
 build_images () {
-  echo "== building images =="
-  ( cd "$REPO" && kas shell kas/forgefirm-glowforge.yml \
-      -c 'bitbake forgefirm-image forgefirm-image-dev' ) \
+  CFG="kas/forgefirm-glowforge.yml"
+  TARGETS="forgefirm-image forgefirm-image-dev"
+  if [ "$SOURCE_BUNDLE" = 1 ]; then
+    # The archiver rides the release build, so the source that the bundle
+    # publishes is the source that this image is built from. The overlay
+    # adds tasks and nothing else: no file of the root filesystem and no
+    # component changes, so the image manifest and the acceptance result
+    # are the same with it and without it. The boot loader, the kernel and
+    # the kernel module reach the machine outside the root filesystem, so
+    # they are named as targets as well (scripts/source-bundle.py,
+    # BUILD_TARGETS).
+    CFG="$CFG:kas/source-bundle.yml"
+    TARGETS="$TARGETS u-boot virtual/kernel kernel-module-glowforge"
+  fi
+  echo "== building images ($CFG) =="
+  ( cd "$REPO" && kas shell "$CFG" -c "bitbake $TARGETS" ) \
     || die "bitbake failed"
 }
 
@@ -257,6 +289,21 @@ NOTE
   ASSETS="$ASSETS NO-ACCEPTANCE.txt"
   PRERELEASE="--prerelease"
 fi
+# The source bundle. It is packed from the license manifests of THIS
+# rootfs, and source-bundle.py stops the release when a recipe of the image
+# has no source (see the site, Developers, "Release flow").
+rm -f "$STAGE"/forgefirm-source-v*.tar.gz
+if [ "$SOURCE_BUNDLE" = 1 ]; then
+  echo "== source bundle =="
+  python3 "$REPO/scripts/source-bundle.py" "$VERSION" \
+      --deploy "$DEPLOY_ROOT" --image-name "$(basename "$EXT4" .ext4)" \
+      --out "$STAGE" \
+    || die "the source bundle failed"
+  ASSETS="$ASSETS forgefirm-source-v$VERSION.tar.gz"
+else
+  warn "source bundle SKIPPED by FORGEFIRM_SOURCE_SKIP - this release publishes no source"
+fi
+
 # Every attached file is bound to the release by the sums, the artifact
 # included.
 ( cd "$STAGE" && sha256sum $(echo "$ASSETS" | tr ' ' '\n' | grep -v '^sha256sums.txt$') > sha256sums.txt )

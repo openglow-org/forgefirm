@@ -6,6 +6,9 @@
 #    suites replayed on the machine's own log lines, and the check that
 #    every log phrase the cloud suite greps for is one the pinned cloud
 #    app can log (it reads the app sources from the manifest cache)
+#  - the source bundle of a release: which recipe of the image needs
+#    source, which archive answers for it, and the refusal that stops a
+#    release with source missing
 #  - shared UI files: theme.css and the vendored Bootstrap the page
 #    carries are byte-identical to forgectrl's at its pinned revision
 #  - coverage lint: every source path of every component pinned by the
@@ -21,6 +24,8 @@ on:
       - 'forgetest/**'
       - 'scripts/acceptance-gate.py'
       - 'scripts/manifest-from-tree.py'
+      - 'scripts/source-bundle.py'
+      - 'kas/source-bundle.yml'
       - 'meta-forgefirm/recipes-forgefirm/**'
       - '.github/workflows/forgetest-ci.yml'
   pull_request:

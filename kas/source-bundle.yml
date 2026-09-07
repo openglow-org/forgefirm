@@ -1,0 +1,53 @@
+# ============================================================================
+# ForgeFIRM - source-bundle build variant
+# ============================================================================
+# This overlay turns on the Yocto archiver, so the build writes the source of
+# every recipe whose license makes source necessary. The archives go to
+# build/tmp/deploy/sources/<arch>/<recipe>-<version>-<revision>/.
+#
+# The release pipeline (scripts/release.sh) merges this overlay into the
+# release build, then packs the archives with scripts/source-bundle.py into
+# the release asset forgefirm-source-v<version>.tar.gz.
+#
+#   cd forgefirm
+#   kas build kas/source-bundle.yml            # image + source archives
+#
+# The overlay adds tasks. It adds nothing to the root filesystem, and it
+# changes no component, layer or device tree. The image manifest
+# (/etc/forgefirm-manifest.json) is thus the same as without the overlay, and
+# an acceptance result stays applicable
+# (https://docs.forgefirm.org/developers/acceptance/).
+#
+# ARCHIVER_MODE[src] = "original" keeps the upstream archive as upstream
+# publishes it. The patches of the recipe are archived beside it, with the
+# `series` file that gives the order and the strip level, and with the recipe
+# and its includes (ARCHIVER_MODE[recipe]). A recipe that gets its source from
+# git is archived as a tar of the checkout at the pinned revision.
+# ============================================================================
+
+header:
+  version: 14
+  includes:
+    - forgefirm-glowforge.yml
+
+local_conf_header:
+  source-bundle: |
+    INHERIT += "archiver"
+    ARCHIVER_MODE[src] = "original"
+    ARCHIVER_MODE[recipe] = "1"
+    ARCHIVER_MODE[diff] = "0"
+    ARCHIVER_MODE[dumpdata] = "0"
+    ARCHIVER_MODE[srpm] = "0"
+    ARCHIVER_MODE[compression] = "xz"
+    # Only the software that the machine gets. A native, cross or SDK recipe
+    # builds the image but is not part of it.
+    COPYLEFT_RECIPE_TYPES = "target"
+    # The license families that make source necessary. scripts/source-bundle.py
+    # reads these two lines from this file, so the archive and the check of the
+    # bundle use one list. Keep the syntax on one line each.
+    COPYLEFT_LICENSE_INCLUDE = "GPL* LGPL* AGPL* MPL* EPL* CDDL* CPL* OSL* EUPL* Artistic*"
+    COPYLEFT_LICENSE_EXCLUDE = "CLOSED Proprietary"
+    # The ForgeFIRM components are MIT, and the bundle carries their source
+    # too. forgetest is on the dev image only, and the bundle of a release
+    # does not carry it.
+    COPYLEFT_PN_INCLUDE = "forgectrl gfcloud gfhome python3-ffmachine python3-gfhardware python3-gfutilities ffboot slotmigrate forgefirm-users forgefirm-banner forgefirm-logging forgefirm-keys"
