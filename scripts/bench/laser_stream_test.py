@@ -132,6 +132,8 @@ def duty_for(s):
 # = 7.3 ms = ~206 ticks at 28160 Hz. 500 gives >2x margin while staying
 # far below any idle-gap pad run.
 FIRE_GAP_LIMIT_TICKS = 500
+# The machine tick: one stream byte per tick, so byte counts are durations.
+MACHINE_TICK_HZ = 28160.0
 
 WAIT_IDLE = ("wait_idle",)
 
@@ -176,6 +178,13 @@ for _ in range(30):
     JOB_CHURN.append(("sleep", 0.02))
 JOB_CHURN.insert(0, "M4 S0")
 JOB_CHURN.append("M5")
+# Rule 17's budget, derived from the job rather than measured: 60 moves of
+# 0.2 mm at F600 plus the scripted gaps. A stream longer than this is dark
+# pad, and dark pad is time the machine keeps moving after the sender has
+# been told the job is done.
+CHURN_MOTION_S = 60 * (0.2 / (600.0 / 60.0))
+CHURN_GAPS_S = 60 * 0.02
+CHURN_BUDGET_S = (CHURN_MOTION_S + CHURN_GAPS_S) * 1.5 + 0.2
 
 # Session D: a power ladder in the shape the bench threshold drill uses -
 # constant power (M3) so the commanded duty is the tested duty, rungs
@@ -295,7 +304,7 @@ JOB_IDLE_S.append("M5")
 # same case one step further.
 M5_IDLE_MM = 5.0
 M5_IDLE_FEED = 600
-M5_IDLE_TICKS = M5_IDLE_MM / (M5_IDLE_FEED / 60.0) * 28160
+M5_IDLE_TICKS = M5_IDLE_MM / (M5_IDLE_FEED / 60.0) * MACHINE_TICK_HZ
 JOB_M5_IDLE = [
     "G91", "G21",
     "M3 S500",
@@ -806,8 +815,22 @@ def main():
         fail("[churn] no FIRE bits in the stream")
     check_termination("churn", data)
     gap_c = check_fire_gaps("churn", data)
-    print("PASS [churn]: %d bytes, %d fire ticks, max fire gap %d"
-          % (len(data), count_fire(data), gap_c))
+    # Rule 17: the churn stream carries no runaway pad. Bytes are the time
+    # axis, one per machine tick, so the stream's length IS how long the
+    # machine plays it. A cycle that resumes while the kernel still drains
+    # re-bases production onto the wall cursor; if the producer's lead lets
+    # production stay ahead of that cursor across the gap, the re-base is
+    # skipped and the overshoot is inherited by every cycle after it. That
+    # is what GFSINK_LEAD_MS_MAX bounds, and this is what catches it.
+    churn_s = len(data) / MACHINE_TICK_HZ
+    if churn_s > CHURN_BUDGET_S:
+        fail("[churn] stream is %.0f ms of playout, over the %.0f ms budget: "
+             "the cycle re-base is leaving pad behind"
+             % (churn_s * 1e3, CHURN_BUDGET_S * 1e3))
+    print("PASS [churn]: %d bytes, %d fire ticks, max fire gap %d, "
+          "%.0f ms of playout (budget %.0f)"
+          % (len(data), count_fire(data), gap_c, churn_s * 1e3,
+             CHURN_BUDGET_S * 1e3))
 
     # --- session D: power ladder, rule 10 -------------------------------
     data = run_session("ladder", JOB_LADDER, conf=ANALOG_CONF)

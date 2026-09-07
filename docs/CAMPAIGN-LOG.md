@@ -9286,6 +9286,56 @@ forgefirm push went red: a new `scripts/bench` python file must also be entered
 in the bench registry (`forgetest/forgetest/bench.py`), not only in that
 directory's README.
 
+## 2026-09-07: Idle before the kernel drains, measured and closed
+
+The open item asked for a decision: hold Idle until the kernel drains, or
+stop the continuation pads growing the lag. It quoted a tail of up to about
+550 ms that grew with each chained jog (160, 290, 500, 540). The measurement
+came first, and it changed the answer.
+
+On the machine, against `cnc/state` with a poll finer than the tail being
+measured, four chained 50 mm jogs give 171, 175, 177 and 176 ms after Idle.
+The tail is one queue depth and it is flat. The growth is gone. An earlier
+attempt read 0 ms on every jog, which was the drill's own 250 ms status-poll
+window standing in for the answer; a tail cannot be measured with a poll
+coarser than itself.
+
+The host side agrees and says why. Stream bytes are the time axis, one per
+machine tick, so a dumped stream's length is how long the machine plays it.
+Chained jogs produce exactly 35755 bytes each, with no growth, and the churn
+session (30 tiny moves, 20 ms gaps) holds at 64790 bytes at a producer lead
+of 2 or 10 ms. Above that the picture changes: 15 ms inflates the same job to
+5899 ms of playout and 50 ms to 8005 ms, all of it dark pad the machine still
+has to move through. That is the mechanism the item described, and it lives
+entirely above the shipped default.
+
+So neither driver change was made. Holding Idle has no supported lever: the
+status letter comes straight from `state_get()`, and taking it over means a
+third fork patch to the core state machine, against the standing goal of
+repointing the submodule at upstream, for a signal whose authoritative form
+already exists in `cnc/state`. A pacing change was written and measured
+before being dropped: repaying the previous cycle's overshoot as pacing slack
+cured a lead of 15 ms (5899 ms back down to 2496) but not 50 ms, and a
+partial fix in the step generator's own loop, for a regime the shipped
+configuration never enters, is not worth its risk.
+
+What shipped instead is the ceiling the source already described but did not
+enforce: `GFSINK_LEAD_MS_MAX` was 200 while the comment beside it said 10 was
+the limit, so an operator could set 50 and silently triple a job's playout.
+It is now 10, refused with a message and a fall back to the default, and rule
+17 of the laser stream harness holds the churn stream to a budget derived
+from the job rather than a recorded number. The rule was checked both ways:
+it passes at 2301 ms against a 3800 ms budget, and with the ceiling lifted it
+fails at 5899 ms and 8005 ms.
+
+Two corrections to BRINGUP. The tail figure and its growth were stale. And
+the claim that every forgectrl path stopping the controller after motion
+waits for `cnc/state` idle was never true: `super.c` says in as many words
+that `POST /controller/stop` is not idle-gated, because it is also the
+emergency lever, and it safes the machine with `cnc/stop` and the latch
+before the signal instead. The mode switch, the cooling gate and the daemon
+shutdown do gate on `machine_is_idle()`, which reads `cnc/state`.
+
 ## Reference notes
 
 ### Head-IRQ source validation — the beam-emission hypothesis

@@ -163,13 +163,17 @@ core mutex stands in for interrupt masking. `GFSINK` unset = null-sink mode
    currents around motion. Each motion run logs a producer-stats line
    (callbacks, µs/call, max-behind, clamped) - `clamped` should stay 0.
    The driver reports Idle when the stream is produced; the kernel plays it
-   a queue depth behind, and a jog sent at Idle while the kernel still drains
-   the last one adds up to a depth of pad slots ahead of its own bytes, so
-   the physical end runs further behind each time (measured 160, 290, 500
-   and 540 ms after Idle across four chained 50 mm jogs). A `cnc/stop` at
-   Idle discards that tail; the position counters stay true to what was
-   played. Anything that must keep position waits for `cnc/state` to read
-   idle before it stops the controller.
+   a queue depth behind, so the machine still moves for about one depth after
+   Idle. The tail is flat, not cumulative: chaining jogs does not grow it
+   (measured 171, 175, 177 and 176 ms after Idle across four chained 50 mm
+   jogs, against `cnc/state`). A `cnc/stop` at Idle discards that tail; the
+   position counters stay true to what was played. Anything that must keep
+   position waits for `cnc/state` to read idle before it stops the
+   controller: forgectrl's `machine_is_idle()` reads that attribute, and the
+   mode switch, the cooling gate and the daemon shutdown all gate on it.
+   `POST /controller/stop` deliberately does not, because it is also the
+   emergency lever; it safes the machine with `cnc/stop` and the latch
+   before the signal instead.
 4. Connect LightBurn/UGS to `<machine-ip>:23`, or jog raw: `$J=G91X40F1200`.
    `^X` mid-motion aborts via kernel `cnc/stop` (controlled decel) and raises an
    alarm; TCP disconnects never kill the process (the dead-man fd stays held).
@@ -1421,16 +1425,6 @@ feature requests, enhancements) will eventually be tracked as GitHub issues.
     far): re-measure the two heat coefficients and the machine's
     air-assist offset; and if a lit check still trips, the
     void-on-emission design with the tube as its own flow tracer.
-8. **Idle before the kernel drains.** The driver reports Idle when the
-    stream is produced, up to about 550 ms before the pulse engine finishes
-    playing it after chained jogs (the fact under "Running the controller").
-    A sender or a service that stops the controller at Idle loses that tail
-    silently. Decide whether Idle should hold until the kernel drains (the
-    stream engine has `gf_stream_kernel_idle`) or the continuation pads
-    should stop growing the lag; either is a driver change with a
-    `motion.*` catalog case. Until then every forgectrl path that stops
-    the controller after motion waits for `cnc/state` idle first (the
-    motion check does).
 
 **Deliberately not gated:** an armed GRBL job after an underrun cuts at the
 stale origin unless homing is required (GRBL mode permits unhomed cutting; the
