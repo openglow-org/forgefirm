@@ -157,10 +157,18 @@ class CampaignTests(unittest.TestCase):
             self.assertNotEqual(st["tests"][t.id]["status"], "inherited")
         # after the invalidate, a new campaign's passes count and later ones inherit again
         recs.append(rec_campaign("c2", self.man, self.chash, "2026-08-22T10:00:00Z"))
+        st = self.compute(recs)
+        # the campaign that started after it answers the invalidation: the
+        # page no longer announces it, while its epoch still holds
+        self.assertIsNone(st["invalidate"])
+        for t in self.tests:
+            self.assertTrue(st["tests"][t.id]["required"], t.id)
+            self.assertNotEqual(st["tests"][t.id]["status"], "inherited")
         for i, t in enumerate(self.tests):
             recs.append(rec_result("c2", t, self.man, "PASS", "2026-08-22T10:0%d:00Z" % (i + 1)))
         st = self.compute(recs)
         self.assertTrue(st["authorized"])
+        self.assertIsNone(st["invalidate"])
 
     def test_reset_and_catalog_change(self):
         recs = [rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"),

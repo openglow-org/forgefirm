@@ -70,6 +70,18 @@ def compute(records, tests, manifest, catalog_hash, running=None):
     campaign, last, closed_by, invalidate = open_campaign(records, manifest.content_sha, catalog_hash)
     epoch = invalidate.get("ts") if invalidate else None
     open_id = campaign.get("id") if campaign else None
+    # The invalidate record keeps its epoch for good: nothing older than it
+    # inherits. The page and the artifact report it only while it still asks
+    # for something, that is until a campaign has started after it.
+    invalidate_shown = invalidate
+    if invalidate:
+        seen = False
+        for r in records:
+            if r is invalidate:
+                seen = True
+            elif seen and r.get("t") == "campaign":
+                invalidate_shown = None
+                break
 
     by_test = {}
     for r in results:
@@ -151,7 +163,7 @@ def compute(records, tests, manifest, catalog_hash, running=None):
         "campaign": campaign,
         "last_campaign": last,
         "closed_by": closed_by,
-        "invalidate": invalidate,
+        "invalidate": invalidate_shown,
         "authorized": authorized,
         "counts": counts,
         "tests": out_tests,
