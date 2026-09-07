@@ -9080,6 +9080,37 @@ new campaign c-20260906234523-4987 (the catalog hash moved), the record put
 back, the gate open. Board at the end: `/tmp` holds the record copy and the
 two `.prev` binaries, `/data` as found.
 
+## 2026-09-07: the commissioning work committed, pushed, pinned, and built
+
+The operator lifted the hold late on 2026-09-06. One commit per repo, in
+the CI order: forgectrl c895630, Glowforge-Utilities 1784e48,
+python3-gfhardware cff6952, grblHAL-glowforge 99f87fe, meta-openglow
+4e9c03d (the gfhardware and gfutilities pins, 0.9.15+git), forgefirm 97287aa
+(the layer, forgetest, the harness, BRINGUP, this log) with the pin commit
+8795a6d (forgectrl 0.1.3, grblHAL-glowforge 0.1.3, forgefirm-app
+0.1.24+git), forgefirm-docs 75ecc71. Every pin fetch-verified from GitHub
+with the local mirrors dropped; every remote head matched.
+
+CI: forgectrl, python3-gfhardware, Glowforge-Utilities, and the docs site
+green on the first run. The grblHAL run failed its lifecycle harness
+(arm-ack) because it checked out forgefirm's master two minutes before the
+harness push landed; the harness had been rewritten with the driver, and the
+re-run on the current master is the fix the push-order rule describes.
+
+Image build p40 (detached, from the committed layers and the pushed pins,
+the kernel untouched): fetch verify passed, both images from a clean
+sstate, stamp **20260907000214** for the pair, kernel
+6.12.20-fslc-fslc-g707c33df2d36 on both. Release: v0.0.1, 239 packages,
+92.5 MiB used of 127.7, `PermitRootLogin no`, `PermitEmptyPasswords no`,
+root's shadow field empty. Dev: 262 packages, 139.0 MiB of 371.1, the
+debug-tweaks sshd. On both: forgectrl 0.1.3 serving `/advisories/`, the
+driver with the re-hold, the app naming ForgeFIRM, the license bundle,
+the users init, the banner, the avahi service. On the dev image: the three
+commission suites, `commission.advisories-rehash`, the runner's phrase,
+stream rule 24. No QA warnings; six do_fetch taint warnings from the
+forced pin-verify fetch. Archived under `images/20260907000214/` with
+sha256sums.
+
 ## Reference notes
 
 ### Head-IRQ source validation — the beam-emission hypothesis

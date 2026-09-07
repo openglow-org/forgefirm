@@ -256,9 +256,12 @@ TOOLS = [
              "dmesg for lock splats. Cycles the 40 V rail; refuses on a non-debug kernel or a non-idle machine."},
 ]
 
-# Files in scripts/bench that are not tools of their own: the helper module
-# the host/board tools share, and the C feeder + build scripts (not python).
-NOT_TOOLS = ("gfbench.py",)
+# Files in scripts/bench the page never offers: the helper module the
+# host/board tools share (the C feeder and the build scripts are not
+# python), and the two lens stall drills. A stall slips the lens stepper's
+# rotor under full torque, so those run from the shell on the bench
+# reference machine only (scripts/bench/README.md).
+NOT_TOOLS = ("gfbench.py", "lens_travel.py", "lens_stop_accel.py")
 
 
 class Bench:
