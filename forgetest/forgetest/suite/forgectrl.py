@@ -1,5 +1,6 @@
 """forgectrl.* - the machine-services daemon's API, access control, and panel."""
 import json
+import os
 import socket
 import time
 
@@ -283,8 +284,10 @@ def settings_bounds(ctx):
                   "interval since the previous read, memory used percent), and /cam/status "
                   "answers. In GRBL mode with a live controller, /status also echoes the "
                   "controller's published state file as the grbl block (fresh age, machine "
-                  "state, sender session, laser window and dose model, modal report) and "
-                  "GET /grbl/settings serves the published $$ view.")
+                  "state, sender session, laser window and dose model, modal report), "
+                  "GET /grbl/settings serves the published $$ view, and the controller's "
+                  "settings store is /data/forgefirm/EEPROM-glowforge.DAT with nothing of "
+                  "it at the top of /data.")
 def panel_serves(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -350,6 +353,12 @@ def panel_serves(ctx):
         ev["grbl_settings_status"] = st
         ctx.check(st == 200 and b"$35=" in (text or b""),
                   "GET /grbl/settings -> %s without the $$ view", st)
+        # The $-settings persist in the data directory, never loose in /data.
+        nvs = "/data/forgefirm/EEPROM-glowforge.DAT"
+        ev["grbl_nvs"] = os.path.isfile(nvs)
+        ctx.check(os.path.isfile(nvs), "the controller's settings store is not at %s", nvs)
+        ctx.check(not os.path.exists("/data/EEPROM-glowforge.DAT"),
+                  "a settings store remains at the top of /data")
     else:
         ctx.log("no live GRBL controller (%s); grbl block checks skipped", mode)
 

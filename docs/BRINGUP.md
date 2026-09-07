@@ -151,12 +151,12 @@ core mutex stands in for interrupt masking. `GFSINK` unset = null-sink mode
    second.
 3. Standalone start (bench/debug only - requires forgectrl stopped, since the
    broker's exclusive hold on `/dev/glowforge` makes any self-open fail EBUSY):
-   `cd /data && GFSINK=/dev/glowforge grblHAL_glowforge -p 23 -e
-   /data/EEPROM-glowforge.DAT`. Env knobs: `GFSINK_RATE` (machine tick, default
-   28160 Hz = factory travel tick), `GFSINK_DEPTH_MS` (queue depth = feed-hold
-   latency, default 200). Standalone, the driver opens the device itself and
-   every takeover runs the `rail_settle_s` off-period; under the broker it
-   inherits the fd and skips the settle (the rail never dropped). The driver
+   `cd /data/forgefirm && GFSINK=/dev/glowforge grblHAL_glowforge -p 23 -e
+   /data/forgefirm/EEPROM-glowforge.DAT`. Env knobs: `GFSINK_RATE` (machine
+   tick, default 28160 Hz = factory travel tick), `GFSINK_DEPTH_MS` (queue
+   depth = feed-hold latency, default 200). Standalone, the driver opens the
+   device itself and every takeover runs the `rail_settle_s` off-period; under
+   the broker it inherits the fd and skips the settle (the rail never dropped). The driver
    applies the full analog machine config at init either way (×8 modes, decay 1,
    motor_lock 0 with every axis in the pulse path and the Z soft limit always
    on, laser latched, PIC hold currents) and swaps PIC run/hold
@@ -184,7 +184,7 @@ runtime `$35=0` the shipped duties stay floored.
 
 **Stored `$`-settings beat freshly baked defaults** - after changing
 `GLOWFORGE_DEFAULTS` values, run `$RST=$` once on the board (settings persist
-in the eeprom file in `/data`).
+in `/data/forgefirm/EEPROM-glowforge.DAT`).
 
 **Protocol-loop pacing is fd-blocking.** `serial_wait()` drains TX then
 `ppoll()`s the listen/client fds with a state-dependent timeout: idle and alarm
