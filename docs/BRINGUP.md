@@ -142,7 +142,8 @@ core mutex stands in for interrupt masking. `GFSINK` unset = null-sink mode
    environment (on a Windows host, inside the WSL distro). Produces
    `build-arm/grblHAL_glowforge`
    in the checkout (`-O1 -g`; machine constants force-included into the core:
-   53.333 µsteps/mm XY @ ×8, 2.832 half-steps/mm Z, 0.417" Z travel,
+   53.333 µsteps/mm XY at ×8 (106.667 at ×16, 213.333 at ×32, the
+   `xy_microsteps` setting, 8 by default), 2.832 half-steps/mm Z, 0.417" Z travel,
    12000 mm/min max, 700/590 mm/s² accel - factory-derived, see
    `puls_profile.py`).
 2. Deploy: move the new binary over `/usr/bin/grblHAL_glowforge` (mv replaces
@@ -152,12 +153,14 @@ core mutex stands in for interrupt masking. `GFSINK` unset = null-sink mode
 3. Standalone start (bench/debug only - requires forgectrl stopped, since the
    broker's exclusive hold on `/dev/glowforge` makes any self-open fail EBUSY):
    `cd /data/forgefirm && GFSINK=/dev/glowforge grblHAL_glowforge -p 23 -e
-   /data/forgefirm/EEPROM-glowforge.DAT`. Env knobs: `GFSINK_RATE` (machine
-   tick, default 28160 Hz = factory travel tick), `GFSINK_DEPTH_MS` (queue
+   /data/forgefirm/EEPROM-glowforge.DAT`. Env knobs: `GFSINK_RATE` (a machine
+   tick override; the default is the `xy_microsteps` mode's: 28160 Hz at 8, the
+   factory travel tick, 56320 at 16, 112640 at 32), `GFSINK_DEPTH_MS` (queue
    depth = feed-hold latency, default 200). Standalone, the driver opens the
    device itself and every takeover runs the `rail_settle_s` off-period; under
    the broker it inherits the fd and skips the settle (the rail never dropped). The driver
-   applies the full analog machine config at init either way (×8 modes, decay 1,
+   applies the full analog machine config at init either way (the `xy_microsteps`
+   mode on both axes, 8 by default, with the tick and the stop ramp scaled to it; decay 1,
    motor_lock 0 with every axis in the pulse path and the Z soft limit always
    on, laser latched, PIC hold currents) and swaps PIC run/hold
    currents around motion. Each motion run logs a producer-stats line
@@ -991,6 +994,40 @@ is committed.
   Travel moves peak 202 mm/s vector (≈ 8 in/s) at STfr=28160 Hz;
   prints and hunts run STfr=10000. Cut feed in the sample print: 145 mm/s. Z
   cadence ≈ 61–115 ms per half-step (≈ 5.7 mm/s max).
+- **XY microstep modes** (bench, dry, the hot-deployed driver and
+  forgectrl): the machine holds its 200 mm/s top speed at 8, 16 and 32
+  with the tick scaled (28160, 56320, 112640 Hz) and the stop ramp with it
+  (125000, 250000, 500000 Hz/s). A 60-pass raster of 150 mm at F12000 (63 s)
+  returns the kernel counters to dx = dy = 0.000 at every mode, with zero
+  underruns and zero clamped events; the controller takes 25.6, 28.3 and
+  35.0 percent of the core at 8, 16 and 32 during it, and 25.0, 25.6 and
+  26.6 percent in `motion.step-timing-under-load` against the nice-5 hog.
+  Every dry catalog motion test passes at every mode, drift 0.000 mm, the
+  cancel's return exact. A mode change from the panel restarts the idle
+  controller and the kernel reads the new mode about 2 s later. Under the
+  laser (a 152.4 mm circle at S400 under M4 density at F2400, one per
+  mode): the discharge window 12.0 s at every mode against 12.0 s
+  expected, the HV current mean 402, 391 and 398 at 8, 16 and 32, dark
+  after M5, zero underruns; the laser ticks scaled to the tick in force
+  keep the pulse period a time, and the material shows it. By the head
+  accelerometer with the machine silent (the quiet hold: every fan, the
+  pump and the TEC off; a fixed 10 s wait; about 600 Hz over the bus at
+  the crash watch's 4 g scale), over a pattern at F12000 from home (18 by
+  9 in, a 9 in circle): the cruise RMS on the circle 2289, 1939 and 1638
+  counts in X at 8, 16 and 32 (Y 1343, 1192, 1181), overall 1742, 1500 and
+  1369 in X, the single-axis legs alike within a few percent, the rest
+  floor about 50 (about 200 with the pump running: the pump is in the
+  reading); the finer mode is the quieter one, most where both axes move.
+- **Arc chords**: grblHAL traces an arc as chords of sagitta `$12` (0.002 mm
+  default), each a planner block, so a 9 in circle at F12000 is 531 chords
+  of 1.35 mm and 148 block boundaries a second, an audible tone that no
+  microstep mode changes. The protocol loop feeds about 300 chords a second
+  at top speed with the planner kept full; above that (`$12` 0.00025 and
+  finer on that radius) the feed sags mid-arc and the circle takes longer,
+  with the CPU flat at 33 percent and no underrun, and a deeper planner
+  buffer (`$398` 250) changes nothing. Finer chords move the tone up and
+  do not lower the vibration. `$398` at 255 or more spins the controller
+  at start (a core bug, "Next work"); the usable maximum is 254.
 - **Factory analog config** (constant across all captured jobs, 2018→2026):
   PIC currents X 135 run / 33 hold, Y 22 run / 5 hold (axis DAC scales differ by
   design); x/y_decay=1; ×8 microstepping; run currents applied only while
@@ -1425,6 +1462,48 @@ feature requests, enhancements) will eventually be tracked as GitHub issues.
     far): re-measure the two heat coefficients and the machine's
     air-assist offset; and if a lit check still trips, the
     void-on-emission design with the tube as its own flow tracer.
+8. **XY microstep modes (8, 16, 32).** One setting, `xy_microsteps`, is
+    the XY scale: the GRBL controller reads it at its start and derives
+    `$100`/`$101`, its machine tick (28160 Hz at 8, doubled at 16,
+    quadrupled at 32) and the kernel stop ramp from it, forgectrl admits
+    the three values and restarts an idle GRBL controller on a change, and
+    the catalog's `motion.microstep-modes` cycles the modes. Host-proven
+    (the driver's `xy_scale_test` and the `xy_mode_test.py` harness, the
+    forgectrl and forgetest unit tests, the coverage lint) and dry
+    bench-proven at all three modes on the hot-deployed binaries: the
+    catalog test, `motion.step-timing-under-load`, `motion.pacing` and
+    `motion.cancel-abort` at each mode, and a 60-pass top-speed raster
+    (`scripts/bench/raster_dry.py`) at each, every counter back to its
+    start, zero underruns, zero clamped events, the controller at 25 to
+    35 percent of the core, and live under the laser at all three modes
+    (a 152.4 mm circle at S400 F2400 per mode, the HV current at cruise
+    alike across them, the operator's verdict "perfect" on each; the
+    facts bank has the numbers, `scripts/bench/live_fire_drills.py`
+    `xymode` and `xycircle` are the drills), and by the head
+    accelerometer with every fan off (`scripts/bench/xy_pattern_accel.py`
+    through the new `POST /cool/quiet`): the vibration at 200 mm/s falls
+    with the finer mode, most on a circle (x RMS down 29 percent at 32).
+    Uncommitted. Owed: the commits, pins, image and campaign. 32 is admitted; the
+    fallbacks, should another machine not hold it, are the 84480 Hz tick
+    or the `$110` ceiling the driver holds under a lower tick. Cloud mode
+    runs at the service's own 8: the service plans every stream at 8
+    whatever the machine reports (the machine reports 1, as the factory
+    firmware does, and every header comes back 8), and the cloud client
+    now refuses a header at any other mode before a byte reaches the
+    ring, the way it refuses a wrong serial or format. Finer modes in
+    cloud mode (a local stream expander in the feeder, or the service
+    planning finer) wait for a user's report of such a refusal, by
+    decision.
+9. **Planner buffer of 255 blocks or more spins the controller.** The
+    core's `plan_reset_buffer()` links the block ring with a `uint_fast8_t`
+    index, so `$398` at 255 or more never finishes at start: the main
+    thread sits at 100 percent in `plan_reset()`, the Grbl port stops
+    answering, and forgectrl still reports the controller running (the
+    supervisor sees deaths and silent armed reporters, not an idle spin).
+    Reproduced on the host build. Owed in the fork (openglow-org
+    grblHAL-core, branch forgefirm): the index widened to `uint_fast16_t`,
+    or the sanity check capped at 254, and a host test that starts the
+    null-sink build with `$398=400`. Until then the usable maximum is 254.
 
 **Deliberately not gated:** an armed GRBL job after an underrun cuts at the
 stale origin unless homing is required (GRBL mode permits unhomed cutting; the

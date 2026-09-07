@@ -23,7 +23,7 @@ job's length for its progress report.
 import gzip
 import struct
 
-STEPS_PER_MM = 53.333                 # boards/glowforge.h, x8 microstepping
+STEPS_PER_MM = 53.333                 # x8 microstepping: the service's scale, which cloud mode runs at
 
 # The header of a factory print for this machine type, as captured.
 PRINT_HEADER = {

@@ -46,10 +46,11 @@ from .log import now_ts
 # motor_lock/x_mode/y_mode/x_decay/y_decay and the hold currents are the
 # GRBL controller's init writes (glowforge_io.c): motor_lock 0, every axis
 # in the pulse path (a job's Z moves the lens; the driver's Z soft limit
-# guards it), step_freq its default machine tick, ramp_rate the module
-# default; streaming is only ever 1 inside a live job; the head white LED
-# is a camera lamp, off at idle; the loop heater and TEC are the
-# diagnostics' tools, off at idle.
+# guards it), step_freq its machine tick and ramp_rate the kernel stop
+# ramp, both derived from the XY microstep mode (the values here are the
+# x8 default's; fixed_sysfs() gives the mode's); streaming is only ever 1
+# inside a live job; the head white LED is a camera lamp, off at idle; the
+# loop heater and TEC are the diagnostics' tools, off at idle.
 FIXED_SYSFS = [
     ("cnc/motor_lock", "0"),
     ("cnc/x_mode", "8"),
@@ -68,11 +69,12 @@ FIXED_SYSFS = [
 
 # The subset the GRBL controller writes at its start: checked and restored
 # in GRBL mode only. The cloud client sets its own values for these from
-# every pulse header (step_freq 10 kHz, the run currents) and hands the
-# hold currents back at idle; forcing the GRBL values under it would be
-# the baseline configuring another controller's machine.
+# every pulse header (step_freq 10 kHz, the run currents), runs at the
+# service's own x8 with the module's ramp whatever xy_microsteps says, and
+# hands the hold currents back at idle; forcing the GRBL values under it
+# would be the baseline configuring another controller's machine.
 GRBL_CONTROLLER_SYSFS = ("cnc/motor_lock", "cnc/x_mode", "cnc/y_mode", "cnc/x_decay", "cnc/y_decay",
-                         "cnc/step_freq", "pic/x_step_current", "pic/y_step_current")
+                         "cnc/step_freq", "cnc/ramp_rate", "pic/x_step_current", "pic/y_step_current")
 
 # Settings the baseline never hands back as bare settings: controller_mode
 # is the persisted mirror of the live mode (the mode item restores it
@@ -116,6 +118,41 @@ GRBL_PORT_S = 30                    # the Grbl port after the supervisor reports
 
 XY_STEPS_PER_MM = 53.333            # boards/glowforge.h (x8 microstepping)
 RETURN_MAX_MM = 100.0               # a displaced head is jogged back at most this far
+
+# The XY microstep mode (the xy_microsteps setting: 8, 16 or 32; unset =
+# 8). The GRBL controller reads it at its start and derives its scale,
+# its machine tick and the kernel stop ramp from it (boards/glowforge.h):
+# the fixed values of x/y_mode, step_freq and ramp_rate are the mode's.
+XY_MODES = (8, 16, 32)
+XY_MODE_DEFAULT = 8
+XY_STEPS_PER_MM_OF = {8: 53.333, 16: 106.667, 32: 213.333}     # $100/$101 per mode
+XY_TICK_X8_HZ = 28160                                            # the x8 machine tick
+XY_RAMP_X8_HZ_PER_S = 125000                                     # the kernel stop ramp at it
+
+
+def xy_mode_of(settings):
+    """The mode a /settings body names (unset, unreadable, or not a mode
+    reads as the default)."""
+    try:
+        mode = int((settings or {}).get("xy_microsteps") or XY_MODE_DEFAULT)
+    except (TypeError, ValueError, AttributeError):
+        return XY_MODE_DEFAULT
+    return mode if mode in XY_MODES else XY_MODE_DEFAULT
+
+
+def xy_steps_per_mm(mode):
+    return XY_STEPS_PER_MM_OF[mode]
+
+
+def fixed_sysfs(mode=XY_MODE_DEFAULT):
+    """FIXED_SYSFS with the mode's own x/y_mode, step_freq and ramp_rate:
+    the tick and the ramp scale with the mode (x16 doubles both, x32
+    quadruples them)."""
+    k = mode // XY_MODE_DEFAULT
+    own = {"cnc/x_mode": str(mode), "cnc/y_mode": str(mode),
+           "cnc/step_freq": str(XY_TICK_X8_HZ * k),
+           "cnc/ramp_rate": str(XY_RAMP_X8_HZ_PER_S * k)}
+    return [(attr, own.get(attr, val)) for attr, val in FIXED_SYSFS]
 
 
 def leds_root():
@@ -227,6 +264,12 @@ class Baseline:
             return self.fc().post(path, **kw)
         except hw.HwError as e:
             return None, str(e)
+
+    def xy_mode(self):
+        """The XY microstep mode the settings name now (the default when
+        forgectrl does not answer)."""
+        st, body = self.fc_get("/settings")
+        return xy_mode_of(body if st == 200 and isinstance(body, dict) else None)
 
     def wait_settled(self, timeout=SETTLE_S, unreachable_s=10):
         """Block until forgectrl reports a settled supervisor: motion
@@ -510,7 +553,7 @@ class Baseline:
         if residue:
             left.append(Leftover("pulse ring", "%d unplayed bytes" % residue, "0 (nothing queued)",
                                  "unrestorable: the next run would replay them first"))
-        for attr, want in FIXED_SYSFS:
+        for attr, want in fixed_sysfs(self.xy_mode()):
             if self.cloud_mode() and attr in GRBL_CONTROLLER_SYSFS:
                 continue
             got = hw.sysfs_read(attr)
@@ -703,7 +746,7 @@ def check_fixed_against(ref, log):
     machine worth a look, not a leftover."""
     diffs = []
     sysfs = ref.get("sysfs") or {}
-    for attr, want in FIXED_SYSFS + IDLE_READBACKS:
+    for attr, want in fixed_sysfs(ref_xy_mode(ref)) + IDLE_READBACKS:
         got = sysfs.get(attr)
         if got is not None and got != want:
             diffs.append("%s: boot=%s constant=%s" % (attr, got, want))
@@ -719,9 +762,23 @@ def check_fixed_against(ref, log):
 # the state /mode already calls "running", because "running" is the spawn,
 # not the config. motor_lock is no marker: the probe and the controller
 # both leave it 0.
-CONFIGURED_MARKERS = [(a, dict(FIXED_SYSFS)[a]) for a in ("cnc/step_freq", "cnc/y_mode")]
+CONFIGURED_MARKER_ATTRS = ("cnc/step_freq", "cnc/y_mode")
+CONFIGURED_MARKERS = [(a, dict(FIXED_SYSFS)[a]) for a in CONFIGURED_MARKER_ATTRS]
 CONFIGURED_TIMEOUT_S = 20
 CONFIGURED_SETTLE_S = 1.0
+
+
+def configured_markers(mode=XY_MODE_DEFAULT):
+    """The markers with the mode's own values (the tick and the mode both
+    follow the setting)."""
+    return [(a, dict(fixed_sysfs(mode))[a]) for a in CONFIGURED_MARKER_ATTRS]
+
+
+def ref_xy_mode(ref):
+    """The XY microstep mode a saved reference was taken under: its own
+    /settings dump, else the default."""
+    fc = (ref or {}).get("forgectrl") or {}
+    return xy_mode_of(fc.get("/settings") if isinstance(fc, dict) else None)
 
 
 def reference_preconfig(ref):
@@ -730,23 +787,27 @@ def reference_preconfig(ref):
     the module's y_mode together), i.e. it was dumped before the
     controller's init writes landed."""
     sysfs = (ref or {}).get("sysfs") or {}
-    seen = [(sysfs.get(a), want) for a, want in CONFIGURED_MARKERS if sysfs.get(a) is not None]
+    markers = configured_markers(ref_xy_mode(ref))
+    seen = [(sysfs.get(a), want) for a, want in markers if sysfs.get(a) is not None]
     return bool(seen) and all(got != want for got, want in seen)
 
 
-def wait_controller_configured(log, mode_body, timeout=CONFIGURED_TIMEOUT_S, sleep=time.sleep):
+def wait_controller_configured(log, mode_body, timeout=CONFIGURED_TIMEOUT_S, sleep=time.sleep,
+                               xy_mode=XY_MODE_DEFAULT):
     """After the supervisor reports the controller running: block until the
-    GRBL controller's init writes have landed (the CONFIGURED_MARKERS read
-    their fixed values), then a short settle. Only the GRBL controller
-    writes those; in any other mode return at once. Bounded: on timeout
-    the caller proceeds and the reference will say so."""
+    GRBL controller's init writes have landed (the configured markers read
+    the fixed values of the XY microstep mode in force), then a short
+    settle. Only the GRBL controller writes those; in any other mode
+    return at once. Bounded: on timeout the caller proceeds and the
+    reference will say so."""
     if not (isinstance(mode_body, dict) and mode_body.get("controller") == "running"
             and (mode_body.get("mode") or "grbl") == "grbl"):
         return True
+    markers = configured_markers(xy_mode)
     t0 = time.time()
     while time.time() - t0 < timeout:
-        got = [(a, hw.sysfs_read(a)) for a, _ in CONFIGURED_MARKERS]
-        if all(g == want for (a, g), (_, want) in zip(got, CONFIGURED_MARKERS)):
+        got = [(a, hw.sysfs_read(a)) for a, _ in markers]
+        if all(g == want for (a, g), (_, want) in zip(got, markers)):
             sleep(CONFIGURED_SETTLE_S)
             log("baseline: controller configured %.1f s after running" % (time.time() - t0))
             return True
@@ -755,7 +816,7 @@ def wait_controller_configured(log, mode_body, timeout=CONFIGURED_TIMEOUT_S, sle
         sleep(0.25)
     log("baseline: WARNING - controller did not apply its config within %d s (%s); "
         "the reference may show the supervisor's probe values"
-        % (timeout, ", ".join("%s=%s" % (a, hw.sysfs_read(a)) for a, _ in CONFIGURED_MARKERS)))
+        % (timeout, ", ".join("%s=%s" % (a, hw.sysfs_read(a)) for a, _ in markers)))
     return False
 
 
@@ -794,7 +855,7 @@ def boot_reference(log, data_dir):
         return None
     bl = Baseline(log)
     mode = bl.wait_settled()
-    wait_controller_configured(log, mode)
+    wait_controller_configured(log, mode, xy_mode=bl.xy_mode())
     ref = dump_all(bl)
     ref.update({"ts": now_ts(), "boot_id": bid, "uptime_s": uptime_s()})
     try:

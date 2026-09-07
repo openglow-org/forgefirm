@@ -9336,6 +9336,211 @@ emergency lever, and it safes the machine with `cnc/stop` and the latch
 before the signal instead. The mode switch, the cooling gate and the daemon
 shutdown do gate on `machine_is_idle()`, which reads `cnc/state`.
 
+## 2026-09-07: XY microstep modes 8, 16 and 32, dry bench proof
+
+One setting, `xy_microsteps`, became the XY scale in GRBL mode: the driver
+derives `$100`/`$101`, its machine tick (28160 Hz at 8, 56320 at 16,
+112640 at 32) and the kernel stop ramp (125000, 250000, 500000 Hz/s) from
+it, forgectrl admits the three values and restarts an idle GRBL controller
+on a change, and the catalog gained `motion.microstep-modes`. Host proof
+first: the driver's `xy_scale_test` and the `xy_mode_test.py` null-sink
+harness, the forgectrl and forgetest unit tests, and the coverage lint (82
+tests, 0 uncovered). Then the bench, 18:27 to 18:45Z, on image
+20260907005922 (dev) with the cross-built forgectrl (sha256 01ed40d3) and
+driver (83893a00) hot-deployed through `/etc/init.d/forgectrl stop` and
+`start`, and the forgetest files with a forgetest restart (queue idle;
+catalog 82 tests).
+
+- `motion.microstep-modes` PASS in 24 s: at 8, 16 and 32 the kernel read
+  the mode on both axes with the mode's tick and ramp, `$100`/`$101` were
+  the mode's, a typed `$100=53.333` came back as the mode's value on the
+  spot, a 40 mm jog at F12000 measured 39.990, 40.000 and 40.000 mm by the
+  kernel counters, drift 0.000, and the head accelerometer saw the head on
+  every leg. The first attempt failed on the test itself (it read the
+  counters before the kernel had played out the queue behind grblHAL's
+  Idle); the test now waits for the machine to be idle first.
+- `motion.step-timing-under-load`, `motion.pacing` and
+  `motion.cancel-abort` PASS at every mode. The controller under the
+  nice-5 hog: 25.0, 25.6 and 26.6 percent of the core at 8, 16 and 32;
+  zero clamped events; `cnc/underruns` 0 throughout; the pacing move
+  30.000 mm with drift 0.000; the cancel's return exact.
+- The dry raster (`scripts/bench/raster_dry.py`, 60 passes of 150 mm at
+  F12000 with the laser off, 63 s per mode) PASS at every mode: the kernel
+  counters back to dx = dy = 0.000, Grbl drift 0.0, zero underruns, zero
+  clamped events; controller CPU 25.6, 28.3 and 35.0 percent at 8, 16
+  and 32.
+- A mode change from the panel restarts the controller and the kernel
+  reads the new mode about 2 s later; each switch in the drills settled in
+  2 s.
+
+**Live fire, 19:03 to 19:12Z, operator present, one armed run per turn,
+the button pressed by the operator for each.** Two new drills in
+`scripts/bench/live_fire_drills.py`: `xymode` (a 20 mm out-and-back line
+pair per feed, F1200 and F6000, at S400 under M4 density) and `xycircle`
+(a 152.4 mm circle from its top at S400 under M4 density at F2400, the
+operator's request for something the eye can follow), each a dark rapid
++X by an offset first and a rapid back to the origin after. The mode was
+set from the settings before each run (the controller restarted, the
+kernel at the new mode within 2 s each time).
+
+| Run | Mode, tick, ramp | Lit | HV current mean | Thermopile mean |
+|---|---|---|---|---|
+| line pair at offset 0 | x8, 28160 Hz, 125000 Hz/s | 2.1 s (F1200), 0.7 s (F6000) | 385, 382 | 2621, 2197 |
+| circle at 76.2 mm | x8, 28160 Hz, 125000 Hz/s | 12.0 s (12.0 expected) | 402 | 2558 |
+| circle at 101.6 mm | x16, 56320 Hz, 250000 Hz/s | 12.0 s | 391 | 2570 |
+| circle at 127 mm | x32, 112640 Hz, 500000 Hz/s | 12.0 s | 398 | 2507 |
+
+Every run: one discharge window (two for the line pair), dark after M5
+(HV max 0), `cnc/underruns` 0, the machine idle with the latch locked
+after. The HV current at cruise reads alike at the three modes, which is
+what the scaling of the laser ticks to the tick in force was built to
+give; the operator judged each circle "perfect" against the one before.
+No scope check of the FIRE period: the operator ruled the arithmetic
+sufficient (the period is the reference ticks times the tick ratio, a
+whole number at every mode).
+
+**The head accelerometer, every fan off, 19:29 to 19:36Z.** forgectrl
+gained `POST /cool/quiet` (the engine's quiet hold the commissioning finder
+uses, now reachable by the bench tools; taken only from an idle machine,
+released by the engine when a run session opens or after 600 s; `/cool/status`
+shows `quiet_hold`), hot-deployed (sha256 051804c4) and exercised: the air
+assist, exhaust, intake and purge all read 0 while held and came back to the
+idle posture on release. The machine was homed (`$H`, 48 s, `H:1`, Z 3.080)
+and `scripts/bench/xy_pattern_accel.py` ran the operator's pattern at each
+mode: from home to (18, 9) in, to (9, 9) in, a 9 in circle from its
+mid-bottom back to (9, 9), to (9, 0), home, every leg at F12000, the fans
+held quiet with the fixed 10 s wait, the head accelerometer read over the
+bus at about 600 Hz (CTRL4 0x04, the crash watch's 4 g scale) and the
+cruise windows trimmed 0.35 s at each end. Every leg reached 12000 mm/min
+and ended on its waypoint to 0.003 mm; the circle took 3.87 s at every
+mode; the kernel counters came back to dx = dy = 0.000; underruns 0.
+
+| Cruise RMS (raw counts, mean removed) | x8 | x16 | x32 |
+|---|---|---|---|
+| at rest, fans off | x 197, y 123 | x 213, y 129 | x 246, y 138 |
+| the diagonal to (18, 9) | x 1093, y 1100 | x 1083, y 1076 | x 1055, y 1078 |
+| the 9 in circle | x 2210, y 1392 | x 1832, y 1189 | x 1573, y 1166 |
+| the return legs (mean of three) | x 1145, y 1073 | x 1045, y 1076 | x 1005, y 983 |
+| overall | x 1693, y 1231 | x 1458, y 1133 | x 1317, y 1098 |
+
+The vibration at speed falls with the finer mode on every leg that moves
+both axes, most on the circle (x RMS down 17 percent at 16 and 29 percent
+at 32 against 8; the peak-to-peak on the circle 21229, 18141, 12480); the
+single-axis legs sit within a few percent of each other. The records with
+the raw traces are beside the image under `images/20260907005922/bench-data/`.
+
+**The same pattern with the machine silent, 19:45 to 19:49Z.** The operator
+asked for the coolant pump off too, so the modes could be heard: the quiet
+hold now takes every fan, the pump and the TEC (forgectrl sha256 38b79727,
+hot-deployed; the tick leaves the TEC alone while the hold stands and
+rewrites it at the release; the pump comes back at the release). The rest
+floor with the pump off is a quarter of what it was with it on (x RMS 50,
+57 and 52 counts at 8, 16 and 32 against about 200 before: the pump was in
+the reading), and the pattern gave the same picture:
+
+| Cruise RMS (raw counts, mean removed), pump off | x8 | x16 | x32 |
+|---|---|---|---|
+| the diagonal to (18, 9) | x 1111, y 1134 | x 1038, y 1101 | x 1097, y 1110 |
+| the 9 in circle | x 2289, y 1343 | x 1939, y 1192 | x 1638, y 1181 |
+| overall | x 1742, y 1209 | x 1500, y 1110 | x 1369, y 1118 |
+
+Every leg again at 12000 mm/min, ending on its waypoint, the circle 3.88 s
+at every mode, the kernel counters back to zero, underruns 0, and the idle
+posture back after each release (air assist 204, purge on, pump on). The
+machine was homed again first (`$H`, 51 s) because the forgectrl restart
+had dropped the homed flag.
+
+**How fine an arc, 19:55 to 20:40Z.** The circle sounded the same at every
+mode, with the same harmonic through parts of the arc, and the arithmetic
+says why: grblHAL traces an arc as chords whose sagitta is `$12`, every
+chord a planner block, so the 9 in circle at F12000 under the default
+0.002 mm is 531 chords of 1.35 mm and 148 block boundaries a second, a
+148 Hz tone that the planner's geometry makes and the motor's step grid
+cannot change. `scripts/bench/arc_tolerance_sweep.py` ran a `$12` ladder on
+the circle at x16, the machine silent, to see how far down the one core
+takes it:
+
+| `$12` | Chords | Boundaries/s | Circle | Lowest mid feed | Free planner blocks (of 100) | CPU | Circle X RMS |
+|---|---|---|---|---|---|---|---|
+| 0.002 | 531 of 1.35 mm | 148 | 3.86 s | 12000 | 0 to 77 | 32.6 % | 1823 |
+| 0.001 | 751 of 0.96 mm | 209 | 3.85 s | 12000 | 0 to 65 | 33.0 % | 1815 |
+| 0.0005 | 1062 of 0.68 mm | 296 | 3.87 s | 12000 | 0 to 45 | 33.1 % | 1835 |
+| 0.00025 | 1502 of 0.48 mm | 418 | 3.89 s | 10592 | 0 to 23 | 33.2 % | 1911 |
+| 0.0001 | 2374 of 0.30 mm | 661 | 4.13 s | 6220 | 0 to 2 | 33.2 % | 2262 |
+
+No clamped events and no underrun at any rung; the CPU flat at 33 percent
+all the way down, so the core is not what runs out. Above about 300
+chords a second the feed sags mid-circle and the circle takes longer: the
+planner plans to a stop at the end of what it holds, and with 100 blocks of
+0.3 mm it holds 30 mm against a 29 mm stopping distance from 200 mm/s.
+Finer chords did not lower the vibration; the tone moved up (148, 209,
+296 Hz) and the RMS stayed put, then rose where the feed sagged. The same
+ladder with `$398` raised to 250 blocks gave the same numbers (10706 and
+6355 mm/min at the two failing rungs, the buffer never more than about 80
+blocks full, CPU 34 percent): the chord rate the protocol loop feeds is the
+ceiling, not the buffer depth and not the core. The finest `$12` that holds
+top speed on this radius is 0.0005; at a lower feed a finer value holds in
+proportion, and a smaller radius reaches the same chord rate sooner. The
+records (the 100-block ladder) are beside the image under
+`images/20260907005922/bench-data/`.
+
+Two findings on the way. A trial launched with `$398=400` left the
+controller spinning at start: the core's `plan_reset_buffer()` links the
+block ring with a `uint_fast8_t` index, so a buffer of 255 blocks or more
+never finishes (the sanity check allows up to 1000). The main thread sat
+at 100 percent in `plan_reset()`, the port's backlog filled and connects
+timed out, and forgectrl kept reporting the controller running and
+verified. Reproduced on the host null-sink build under gdb. Recovered by
+stopping the controller through forgectrl, rewriting the planner-blocks
+value and the block's Modbus CRC-16 in the settings store, and starting
+it again. The fork owes the one-line fix (`uint_fast16_t`); until then the
+usable maximum is 254, and the deeper-buffer trial ran at 250. And the
+launch that wrote 400 was a remote command the operator had rejected at
+the prompt: the process on the board had already started and ran on as an
+orphan, which is a rule for the bench now (check the board after any
+rejected or interrupted remote command before re-issuing).
+
+**The pre-commit review of the catalog, 20:40 to 20:55Z.** Read against
+every change, it turned up four things, each fixed and proven before any
+commit. The quiet hold had taken the pump for the commissioning finder as
+well, which was proven with the pump running: the hold is now two levels,
+every fan off (`cool_quiet_hold`, the finder's) and the pump and the TEC
+too only on request (`POST /cool/quiet?on=1&pump=1`, the bench tools').
+The engine's release of the hold on a run session had been level-triggered,
+which would have dropped the finder's hold after a burn when the
+controller's report still said run; it now fires on the session's opening
+edge (the flood rising or the armed window opening), verified on the bench
+by taking the pump hold and sending `M8`: the hold released within 3 s
+and the pump came back. The forgetest baseline had kept `cnc/ramp_rate`
+among the values it holds in every mode, while the driver now writes it
+and the cloud client runs at the module's; it is in the GRBL controller's
+set now, skipped in cloud mode. And the forgectrl dev mock is held to the
+daemon's tables by a unit test, so the new setting and the new route
+needed their mock entries, and the bench README lists every tool. Also
+checked: the docs site builds clean under strict mode, the style check is
+clean, the coverage lint is clean, every host test passes (the driver's
+five C tests and four harnesses, forgectrl's eight C tests and the mock
+parity test, forgetest's suite), and the deployed forgectrl (sha256
+323a7d14) shows both hold levels and the release on the bench.
+
+**Cloud mode, decided at 21:05Z.** The captures say the service plans
+every stream at 8 and writes 8 into every header (23 of 23 here, the
+factory captures the same) while the machine reports 1, so the reported
+value is not what it plans with. The operator does not expect the service
+to plan finer, so the cloud client now refuses a header whose `XSmm` or
+`YSmm` is anything but 8, with the serial and format checks, before a byte
+reaches the ring; a header without the tags runs at 8. Host-proven in
+`gfutilities` (`test_puls_header.py`); finer modes in cloud mode wait for a
+user's report of such a refusal.
+
+Left after the session: the board in GRBL mode at 8 with the key cleared,
+`$12` 0.002 and `$398` 100 as found, homed, `/tmp` clean, `/data` holding
+only factory state and ForgeFIRM's own files, the hot-deployed binaries in
+place until the next flash. Cloud mode was left at the service's own 8 by
+decision: the service plans every stream at 8 whatever the machine
+reports. Nothing committed at the time of writing: the operator's order is
+no commit until the code is proven, and the commit is the operator's call.
+
 ## Reference notes
 
 ### Head-IRQ source validation — the beam-emission hypothesis

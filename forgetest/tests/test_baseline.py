@@ -271,6 +271,65 @@ class BaselineTests(unittest.TestCase):
             {"sysfs": {"cnc/motor_lock": "8", "cnc/step_freq": "10000", "cnc/y_mode": "8"}}))
         self.assertFalse(baseline.reference_preconfig({"sysfs": {}}))
 
+    # -- the XY microstep mode drives the fixed values ------------------------
+
+    def test_the_fixed_values_follow_the_microstep_mode(self):
+        x8 = dict(baseline.fixed_sysfs(8))
+        self.assertEqual(x8, dict(baseline.FIXED_SYSFS))
+        x16 = dict(baseline.fixed_sysfs(16))
+        self.assertEqual((x16["cnc/x_mode"], x16["cnc/y_mode"], x16["cnc/step_freq"], x16["cnc/ramp_rate"]),
+                         ("16", "16", "56320", "250000"))
+        x32 = dict(baseline.fixed_sysfs(32))
+        self.assertEqual((x32["cnc/x_mode"], x32["cnc/step_freq"], x32["cnc/ramp_rate"]),
+                         ("32", "112640", "500000"))
+        # everything else is the same list, in the same order
+        self.assertEqual([a for a, _ in baseline.fixed_sysfs(32)], [a for a, _ in baseline.FIXED_SYSFS])
+        self.assertEqual(x32["cnc/x_decay"], x8["cnc/x_decay"])
+
+    def test_the_mode_is_read_from_the_settings_with_a_default(self):
+        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "16"}), 16)
+        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "32"}), 32)
+        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": ""}), 8)
+        self.assertEqual(baseline.xy_mode_of({}), 8)
+        self.assertEqual(baseline.xy_mode_of(None), 8)
+        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "24"}), 8)
+        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "abc"}), 8)
+        self.assertEqual(baseline.ref_xy_mode({"forgectrl": {"/settings": {"xy_microsteps": "16"}}}), 16)
+        self.assertEqual(baseline.ref_xy_mode({"forgectrl": {"/settings": None}}), 8)
+        self.assertEqual(baseline.ref_xy_mode({}), 8)
+
+    def test_fixed_constants_are_checked_at_the_reference_mode(self):
+        ref = {"sysfs": {"cnc/x_mode": "16", "cnc/step_freq": "56320", "cnc/ramp_rate": "250000"},
+               "forgectrl": {"/settings": {"xy_microsteps": "16"}}}
+        self.assertEqual(baseline.check_fixed_against(ref, self.lines.append), [])
+        ref["forgectrl"]["/settings"]["xy_microsteps"] = "8"
+        diffs = baseline.check_fixed_against(ref, self.lines.append)
+        self.assertEqual(diffs, ["cnc/x_mode: boot=16 constant=8",
+                                 "cnc/step_freq: boot=56320 constant=28160",
+                                 "cnc/ramp_rate: boot=250000 constant=125000"])
+
+    def test_wait_configured_watches_the_mode_in_force(self):
+        self._probe_state()
+        calls = {"n": 0}
+
+        def sleep(_s):
+            calls["n"] += 1
+            if calls["n"] == 2:             # an x16 controller's init writes land
+                self._attr("cnc/step_freq", "56320")
+                self._attr("cnc/y_mode", "16")
+        ok = baseline.wait_controller_configured(
+            self.lines.append, {"controller": "running", "mode": "grbl", "motion": "verified"},
+            timeout=5, sleep=sleep, xy_mode=16)
+        self.assertTrue(ok)
+        self.assertTrue(any("controller configured" in l for l in self.lines))
+        # a reference taken under x16 is not pre-config
+        self.assertFalse(baseline.reference_preconfig(
+            {"sysfs": {"cnc/step_freq": "56320", "cnc/y_mode": "16"},
+             "forgectrl": {"/settings": {"xy_microsteps": "16"}}}))
+        self.assertTrue(baseline.reference_preconfig(
+            {"sysfs": {"cnc/step_freq": "10000", "cnc/y_mode": "1"},
+             "forgectrl": {"/settings": {"xy_microsteps": "16"}}}))
+
     def test_stale_preconfig_reference_is_retaken_on_a_fresh_boot(self):
         os.environ["FORGETEST_BOOT_ID"] = "test-boot-2"
         try:

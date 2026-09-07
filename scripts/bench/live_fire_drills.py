@@ -113,6 +113,26 @@ Drills (pass a name):
             the reversal darkness across the two feeds. Requires
             laser_power_model = density.
               m4feeds [S] [F1] [F2]   e.g. m4feeds 600 1000 4000
+  xymode    The XY microstep mode under the laser: one out-and-back
+            20 mm line pair per feed (default 1200 and 6000 mm/min) at
+            the same S under M4 density, passes offset +Y, one armed
+            run, the block shifted +X by an offset so the runs at 8, 16
+            and 32 sit side by side for the operator's eye. Reports the
+            mode, tick and ramp the kernel holds, the discharge window
+            and the HV current per pass: with the laser ticks scaled to
+            the tick in force, the current at cruise should read alike
+            at every mode, and the operator compares the marks. Set the
+            mode from the panel (xy_microsteps) before each run.
+              xymode [S] [F1] [F2] [X offset mm]   e.g. xymode 400 1200 6000 25
+  xycircle  The XY microstep mode under the laser, the operator's eye
+            version: a dark rapid +X by an offset, then one full circle
+            of the given diameter starting at its top (the center below
+            the start in +Y) at S under M4 density, laser off, and a
+            rapid back to the origin. One armed run; the runs at 8, 16
+            and 32 use different offsets so the circles sit side by
+            side. Reports the mode, tick and ramp, the discharge window
+            and the HV current.
+              xycircle [S] [F] [X offset mm] [diameter mm]   e.g. xycircle 400 2400 76.2 152.4
   dpatch    Depth witness for the dose curve of the configured
             laser_power_model: two rows of small engraved patches
             (serpentine G1 fills) on the stock. Row A is CW (S1000) at
@@ -175,6 +195,7 @@ The G-4 arm-refuses-when-a-fire-gate-is-active drill is operator-manual
 (kill the pump during the button wait); this harness prints the cue.
 """
 import json
+import math
 import os
 import re
 import socket
@@ -3018,6 +3039,248 @@ def drill_m4feeds(g):
     return 0 if ok else 1
 
 
+XYM_MM = 20.0
+XYM_LEG_GAP = 0.6
+XYM_ROW_GAP = 5.0
+
+
+def drill_xymode(g):
+    sval = int(sys.argv[2]) if len(sys.argv) > 2 else 400
+    f1 = int(sys.argv[3]) if len(sys.argv) > 3 else 1200
+    f2 = int(sys.argv[4]) if len(sys.argv) > 4 else 6000
+    xoff = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
+    if not 50 <= sval <= 1000 or not 300 <= f1 < f2 <= 12000 or not 0 <= xoff <= 300:
+        print('usage: xymode [S 50..1000] [F1] [F2] [X offset 0..300]  (300 <= F1 < F2 <= 12000)')
+        return 2
+    sampler = Sampler(PCURVE_SAMPLE_HZ)
+    if not sampler.local:
+        print('run this on the board: the witnesses are sysfs at 25 Hz')
+        return 2
+    model = conf_get('laser_power_model') or 'density'
+    if model != 'density':
+        print('PRECONDITION FAILED: laser_power_model is %s' % model)
+        return 2
+
+    def sysfs(attr):
+        with open(SYSFS + '/' + attr) as f:
+            return f.read().strip()
+
+    fails = []
+
+    def check(cond, msg):
+        print('  %s: %s' % ('ok' if cond else 'FAIL', msg))
+        if not cond:
+            fails.append(msg)
+
+    mode, tick, ramp = sysfs('cnc/x_mode'), sysfs('cnc/step_freq'), sysfs('cnc/ramp_rate')
+    print('=== XY microstep mode under the laser: x%s, %s Hz tick, %s Hz/s ramp, S%d under M4 density at F%d and F%d ==='
+          % (mode, tick, ramp, sval, f1, f2))
+    check(sysfs('cnc/y_mode') == mode, 'both axes at x%s' % mode)
+    print('connect: %s' % prepare(g))
+    print('pre-fire: %s' % sample_forgectrl())
+    arm_cue()
+    print('>>> The block: %g mm along +X by %g mm along +Y, starting %g mm in +X from the head.'
+          % (XYM_MM + 2, XYM_ROW_GAP + 4, xoff))
+    print('>>> Pass 1 (F%d) first, pass 2 (F%d) %g mm past it in +Y; each pass an out leg'
+          % (f1, f2, XYM_ROW_GAP))
+    print('>>> and a return leg %g mm apart. The head comes back to where it started.\n' % XYM_LEG_GAP)
+    sampler.start()
+    aborted = False
+    try:
+        for ln in ('G91', 'G21'):
+            g.cmd(ln)
+        if xoff:
+            g.cmd('G0 X%g' % xoff)
+            g.wait_state('Idle', 30)
+        for i, feed in enumerate((f1, f2)):
+            g.s.sendall(b'M4 S%d\n' % sval)
+            g.s.sendall(('G1 X%g F%d\n' % (XYM_MM, feed)).encode())
+            g.s.sendall(('G1 Y%g F%d\n' % (XYM_LEG_GAP, feed)).encode())
+            g.s.sendall(('G1 X%g F%d\n' % (-XYM_MM, feed)).encode())
+            g.s.sendall(b'M5\n')
+            g.s.sendall(('G0 Y%g\n' % -XYM_LEG_GAP).encode())
+            st = g.wait_state('Run', 300 if i == 0 else 60)
+            if not st.startswith('Run'):
+                print('FAIL: pass %d never ran (state=%s)' % (i + 1, st))
+                g.rt(b'\x18')
+                aborted = True
+                return 1
+            g.wait_state('Idle', 120)
+            time.sleep(0.5)
+            g.drain()
+            print('  pass at F%d ran' % feed)
+            if i == 0:
+                g.s.sendall(('G0 Y%g\n' % XYM_ROW_GAP).encode())
+                g.wait_state('Idle', 30)
+        g.s.sendall(('G0 Y%g\n' % -XYM_ROW_GAP).encode())
+        g.wait_state('Idle', 30)
+        if xoff:
+            g.cmd('G0 X%g' % -xoff)
+            g.wait_state('Idle', 30)
+        g.cmd('G90')
+        g.cmd('M2')
+        t0 = time.time()
+        while time.time() - t0 < 90:
+            smp = sample_forgectrl()
+            if smp and not smp['armed']:
+                break
+            time.sleep(0.2)
+        time.sleep(1.5)
+    except Exception as e:
+        aborted = True
+        print('ABORTED: %s' % e)
+        g.rt(b'\x18')
+    finally:
+        sampler.stop()
+    if aborted:
+        return 1
+    tr = sampler.samples
+    segs, cur = [], None
+    for smp in tr:
+        on = smp['hv'] is not None and smp['hv'] > HV_DARK_MAX
+        if on and cur is None:
+            cur = [smp['t'], smp['t']]
+        elif on:
+            cur[1] = smp['t']
+        elif cur is not None and smp['t'] - cur[1] > 1.5:
+            segs.append(cur)
+            cur = None
+    if cur:
+        segs.append(cur)
+    print('\n--- results x%s (%d samples, %.1f Hz) ---' % (mode, len(tr), sampler.rate()))
+    check(len(segs) == 2, '%d discharge window(s), expected 2 (one per feed)' % len(segs))
+    for feed, (a, b) in zip((f1, f2), segs):
+        hv = _stats(_window(tr, a + 0.2, b - 0.1, 'hv'))
+        tp = _stats(_window(tr, a + 0.2, b - 0.1, 'tp'))
+        print('  F%d pass: %.1f s lit, hv mean %.0f, tp mean %.0f' % (feed, b - a, hv['mean'], tp['mean'] or 0))
+    if segs:
+        t_end = segs[-1][1]
+        hv_after = max((smp['hv'] for smp in tr if smp['t'] > t_end + 0.5 and smp['hv'] is not None), default=0)
+        check(hv_after <= HV_DARK_MAX, 'dark after the last M5 (hv max %d)' % hv_after)
+    check(sysfs('cnc/underruns') == '0', 'no underrun (cnc/underruns %s)' % sysfs('cnc/underruns'))
+    print('\n--- the operator reads the material ---')
+    print('Two line pairs, F%d nearest the start, F%d %g mm past it in +Y, this block %g mm in +X.'
+          % (f1, f2, XYM_ROW_GAP, xoff))
+    print('  Compare this block against the other modes: evenness along each line, the')
+    print('  darkness at cruise, the reversal at the far end. The current per pass above')
+    print('  should read alike across the modes: the laser ticks are scaled to the tick.')
+    ok = not fails
+    print('XYMODE x%s %s' % (mode, 'instrument checks PASS - the material verdict is yours'
+                              if ok else 'FAIL: %d check(s) failed' % len(fails)))
+    return 0 if ok else 1
+
+
+def drill_xycircle(g):
+    sval = int(sys.argv[2]) if len(sys.argv) > 2 else 400
+    feed = int(sys.argv[3]) if len(sys.argv) > 3 else 2400
+    xoff = float(sys.argv[4]) if len(sys.argv) > 4 else 76.2
+    dia = float(sys.argv[5]) if len(sys.argv) > 5 else 152.4
+    if not 50 <= sval <= 1000 or not 300 <= feed <= 12000 or not 0 <= xoff <= 300 or not 10 <= dia <= 250:
+        print('usage: xycircle [S 50..1000] [F 300..12000] [X offset 0..300] [diameter 10..250]')
+        return 2
+    sampler = Sampler(PCURVE_SAMPLE_HZ)
+    if not sampler.local:
+        print('run this on the board: the witnesses are sysfs at 25 Hz')
+        return 2
+    model = conf_get('laser_power_model') or 'density'
+    if model != 'density':
+        print('PRECONDITION FAILED: laser_power_model is %s' % model)
+        return 2
+
+    def sysfs(attr):
+        with open(SYSFS + '/' + attr) as f:
+            return f.read().strip()
+
+    fails = []
+
+    def check(cond, msg):
+        print('  %s: %s' % ('ok' if cond else 'FAIL', msg))
+        if not cond:
+            fails.append(msg)
+
+    r = dia / 2.0
+    mode, tick, ramp = sysfs('cnc/x_mode'), sysfs('cnc/step_freq'), sysfs('cnc/ramp_rate')
+    print('=== XY microstep mode under the laser: x%s, %s Hz tick, %s Hz/s ramp, a %g mm circle at S%d under M4 density at F%d ==='
+          % (mode, tick, ramp, dia, sval, feed))
+    check(sysfs('cnc/y_mode') == mode, 'both axes at x%s' % mode)
+    print('connect: %s' % prepare(g))
+    print('pre-fire: %s' % sample_forgectrl())
+    arm_cue()
+    print('>>> A dark rapid %g mm in +X, then the circle from its top: %g mm across, its' % (xoff, dia))
+    print('>>> center %g mm in +Y from the start, so it spans %g mm each side of the start' % (r, r))
+    print('>>> and %g mm in +Y. Laser off, then a rapid back to the origin.\n' % dia)
+    sampler.start()
+    aborted = False
+    try:
+        for ln in ('G91', 'G21'):
+            g.cmd(ln)
+        if xoff:
+            g.cmd('G0 X%g' % xoff)
+            g.wait_state('Idle', 60)
+        g.s.sendall(b'M4 S%d\n' % sval)
+        g.s.sendall(('G2 X0 Y0 I0 J%g F%d\n' % (r, feed)).encode())
+        g.s.sendall(b'M5\n')
+        st = g.wait_state('Run', 300)
+        if not st.startswith('Run'):
+            print('FAIL: the circle never ran (state=%s)' % st)
+            g.rt(b'\x18')
+            aborted = True
+            return 1
+        g.wait_state('Idle', 300)
+        time.sleep(0.5)
+        g.drain()
+        print('  the circle ran')
+        if xoff:
+            g.cmd('G0 X%g' % -xoff)
+            g.wait_state('Idle', 60)
+        g.cmd('G90')
+        g.cmd('M2')
+        t0 = time.time()
+        while time.time() - t0 < 90:
+            smp = sample_forgectrl()
+            if smp and not smp['armed']:
+                break
+            time.sleep(0.2)
+        time.sleep(1.5)
+    except Exception as e:
+        aborted = True
+        print('ABORTED: %s' % e)
+        g.rt(b'\x18')
+    finally:
+        sampler.stop()
+    if aborted:
+        return 1
+    tr = sampler.samples
+    segs, cur = [], None
+    for smp in tr:
+        on = smp['hv'] is not None and smp['hv'] > HV_DARK_MAX
+        if on and cur is None:
+            cur = [smp['t'], smp['t']]
+        elif on:
+            cur[1] = smp['t']
+        elif cur is not None and smp['t'] - cur[1] > 1.5:
+            segs.append(cur)
+            cur = None
+    if cur:
+        segs.append(cur)
+    print('\n--- results x%s (%d samples, %.1f Hz) ---' % (mode, len(tr), sampler.rate()))
+    check(len(segs) == 1, '%d discharge window(s), expected 1' % len(segs))
+    for (a, b) in segs:
+        hv = _stats(_window(tr, a + 0.2, b - 0.1, 'hv'))
+        tp = _stats(_window(tr, a + 0.2, b - 0.1, 'tp'))
+        print('  circle: %.1f s lit (expected about %.1f s at F%d), hv mean %.0f, tp mean %.0f'
+              % (b - a, math.pi * dia * 60.0 / feed, feed, hv['mean'], tp['mean'] or 0))
+    if segs:
+        t_end = segs[-1][1]
+        hv_after = max((smp['hv'] for smp in tr if smp['t'] > t_end + 0.5 and smp['hv'] is not None), default=0)
+        check(hv_after <= HV_DARK_MAX, 'dark after M5 (hv max %d)' % hv_after)
+    check(sysfs('cnc/underruns') == '0', 'no underrun (cnc/underruns %s)' % sysfs('cnc/underruns'))
+    ok = not fails
+    print('XYCIRCLE x%s %s' % (mode, 'instrument checks PASS - the material verdict is yours'
+                                if ok else 'FAIL: %d check(s) failed' % len(fails)))
+    return 0 if ok else 1
+
+
 def post_ctrl(action):
     # http.client preserves the header-name case exactly as given.
     import http.client
@@ -3230,6 +3493,7 @@ def main():
               'pcurve': drill_pcurve, 'm5dark': drill_m5dark,
               'dpatch': drill_dpatch, 'flowload': drill_flowload,
               'm4corner': drill_m4corner, 'm4feeds': drill_m4feeds,
+              'xymode': drill_xymode, 'xycircle': drill_xycircle,
               'senderchg': drill_senderchg, 'overrun': drill_overrun,
               'holdres': drill_holdres,
               'expstop': drill_expstop, 'ctrlstart': drill_ctrlstart}

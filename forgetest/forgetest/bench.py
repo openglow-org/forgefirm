@@ -249,6 +249,38 @@ TOOLS = [
      "desc": "The Z soft limit belongs to the driver, not to $20: an unreferenced Z is collapsed to where the "
              "lens stands, and neither a $20 nor a $132 write frees it. A CI harness (the grblHAL repo): needs "
              "the host-built null-sink controller, not the machine, so it is not a bench-page tool."},
+    {"id": "raster-dry", "title": "Dry top-speed raster per XY microstep mode", "script": "raster_dry.py",
+     "safety": "dry", "where": "board", "ported": True,
+     "args": [_arg("modes", "choice", "8 16 32", "the modes to run, in order", ["8", "16", "32", "8 16 32"])],
+     "desc": "For each mode given: stores xy_microsteps, waits for the restarted controller, streams a 60-pass "
+             "raster of 150 mm at F12000 with the laser off, and reports the peak feed, the controller CPU, the "
+             "kernel counters against the start, underruns and clamped events. Needs the head with 150 mm of "
+             "free +X and 12 mm of free +Y travel, no other Grbl client. Ends at x8."},
+    {"id": "xy-pattern-accel", "title": "XY microstep modes by the head accelerometer, the machine silent",
+     "script": "xy_pattern_accel.py", "safety": "dry", "where": "board", "ported": True,
+     "args": [_arg("modes", "choice", "8 16 32", "the modes to run, in order", ["8", "16", "32", "8 16 32"])],
+     "desc": "From home at F12000: to (18, 9) in, to (9, 9) in, a 9 in circle from its mid-bottom back to "
+             "(9, 9), to (9, 0), home. Per mode: every fan, the coolant pump and the TEC commanded off through "
+             "the engine's quiet hold (the machine silent, the modes audible), the fixed 10 s wait, the head "
+             "accelerometer sampled over the bus at 800 Hz through the pattern; "
+             "cruise-window RMS and peak-to-peak per leg and overall, the kernel counters against home, "
+             "underruns; JSON with the trace to the bench data directory. Needs the machine homed and at home, "
+             "the lid closed, no other Grbl client, the bed clear. Ends at x8."},
+    {"id": "arc-tolerance-sweep", "title": "How fine an arc the controller can plan ($12 ladder)",
+     "script": "arc_tolerance_sweep.py", "safety": "dry", "where": "board", "ported": True,
+     "args": [_arg("mode", "choice", "16", "the XY microstep mode", ["8", "16", "32"], flag="--mode"),
+              _arg("ladder", "str", "0.002 0.001 0.0005 0.00025 0.0001", "the $12 values to try, in order")],
+     "desc": "From home, the machine silent: to (9, 9) in, then the 9 in circle at F12000 once per $12 in the "
+             "ladder. Per rung: the chords and boundaries a second, the circle time against the ideal, the lowest "
+             "feed mid-circle, the fewest free planner blocks, the controller CPU, clamped events, underruns, the "
+             "accelerometer's cruise RMS. $12 goes back to what it was; the head returns home. Needs the machine "
+             "homed and at home, the lid closed, no other Grbl client."},
+    {"id": "xy-mode-test", "title": "XY microstep mode harness", "script": "xy_mode_test.py",
+     "safety": "dry", "where": "host", "ported": False, "args": [],
+     "desc": "The XY scale is the microstep mode's, never typed: xy_microsteps sets $100/$101 and the "
+             "machine tick, a typed $100 is overwritten, and $110/$111 are held under a lowered tick. A CI "
+             "harness (the grblHAL repo): needs the host-built null-sink controller, not the machine, so it "
+             "is not a bench-page tool."},
     {"id": "puls-profile", "title": "Factory .puls profile decoder", "script": "puls_profile.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
      "desc": "Decodes factory pulse streams into velocity/accel profiles. Runs anywhere; needs a .puls file "

@@ -9,6 +9,7 @@ import os
 import time
 
 from ..catalog import test
+from .. import baseline as _baseline
 from .. import hw
 from ..runner import Failed
 
@@ -287,6 +288,145 @@ def jog_roundtrip(ctx):
     ctx.check(drift <= 0.05, "position drift %.3f mm", drift)
     ctx.log("PASS: %d jogs, peak %.0f mm/min, hold parked, drift %.3f mm, accel p2p %d over the jogs, "
             "motion on %d of %d legs", len(moves), maxrate, drift, max(p2px, p2py), len(moving), len(moves))
+
+
+# ---------------------------------------------------------- microstep modes
+
+def grbl_setting(g, key):
+    """One $-setting's value from the controller, or None."""
+    for line in g.command(key):
+        if line.startswith(key + "="):
+            try:
+                return float(line[len(key) + 1:].split()[0])
+            except ValueError:
+                return None
+    return None
+
+
+def set_xy_mode(ctx, fc, value):
+    """Store xy_microsteps (empty = clear it) and wait for the GRBL
+    controller forgectrl restarts for it to come back configured, with
+    the Grbl port answering. Returns the /mode body the machine settled
+    on."""
+    if value:
+        st, body = fc.post("/settings", data={"xy_microsteps": value})
+    else:
+        st, body = fc.post("/settings", params={"xy_microsteps": ""})
+    ctx.check(st == 200, "could not set xy_microsteps=%r (%s: %s)", value or "(clear)", st, body)
+    mode = int(value or _baseline.XY_MODE_DEFAULT)
+    ctx.sleep(2.0)                              # the controller's stop is under way
+    bl = _baseline.Baseline(ctx.log, abort=ctx.run.aborted.is_set)
+    body = bl.wait_settled()
+    ctx.check(isinstance(body, dict) and body.get("controller") == "running",
+              "the controller did not come back after the xy_microsteps write (/mode: %s)", body)
+    ctx.check(_baseline.wait_controller_configured(ctx.log, body, xy_mode=mode),
+              "the controller came back but did not apply its x%d config", mode)
+    end = time.time() + _baseline.GRBL_PORT_S
+    while True:
+        ctx.checkpoint()
+        try:
+            with hw.Grbl():
+                return body
+        except OSError:
+            if time.time() > end:
+                raise Failed("the Grbl port did not answer within %d s of the restart"
+                             % _baseline.GRBL_PORT_S)
+            time.sleep(1.0)
+
+
+@test("motion.microstep-modes",
+      title="XY microstep modes: the setting drives the drivers, the scale and the tick",
+      subsystem="motion", kind="auto", mode="grbl", est_min=5,
+      covers=_MOTION_COVERS + [("forgectrl", "src/main.c"), ("forgectrl", "src/settings.*")],
+      requires=["motion.jog-roundtrip"],
+      steps=["Bed clear, lid closed; the head needs 40 mm of free +X travel."],
+      description="One setting, xy_microsteps, is the XY scale. For each mode it admits (8, 16, "
+                  "32): the save restarts the idle controller; the kernel reads the mode on both "
+                  "axes with the mode's machine tick and stop ramp; $100/$101 are the mode's and a "
+                  "typed $100 is overwritten on the spot; a 40 mm jog out and back at the top speed "
+                  "returns to Idle with the kernel counters, over the mode, agreeing with the "
+                  "commanded travel, no drift, and the head accelerometer seeing the head move. "
+                  "The setting is put back as found, with the controller restarted for it.")
+def microstep_modes(ctx):
+    ev = ctx.evidence
+    fc = ctx.forgectrl
+    ctx.check(hw.AccelSampler().available,
+              "no head accelerometer found (i2c %s): the motion witness is missing", hw.HEAD_ACCEL_I2C)
+    was = (fc.settings() or {}).get("xy_microsteps") or ""
+    ev["xy_microsteps_before"] = was or "(unset)"
+    results = []
+    try:
+        for mode in _baseline.XY_MODES:
+            ctx.checkpoint()
+            ctx.log("--- x%d ---", mode)
+            set_xy_mode(ctx, fc, str(mode))
+            r = {"mode": mode, "sysfs": {}}
+            results.append(r)                   # in the evidence even when a check fails
+            for attr, want in _baseline.fixed_sysfs(mode):
+                if attr not in ("cnc/x_mode", "cnc/y_mode", "cnc/step_freq", "cnc/ramp_rate"):
+                    continue
+                got = hw.sysfs_read(attr)
+                r["sysfs"][attr] = got
+                ctx.check(got == want, "x%d: %s reads %s, want %s", mode, attr, got, want)
+            spm = _baseline.xy_steps_per_mm(mode)
+            accel = hw.AccelSampler()
+            with ctx.grbl() as g, accel:
+                clean_slate(ctx, g)
+                for key in ("$100", "$101"):
+                    v = grbl_setting(g, key)
+                    r[key] = v
+                    ctx.check(v is not None and abs(v - spm) < 0.001,
+                              "x%d: %s=%s, want %.3f", mode, key, v, spm)
+                g.command("$100=53.333")
+                v = grbl_setting(g, "$100")
+                r["typed_100"] = v
+                ctx.check(v is not None and abs(v - spm) < 0.001,
+                          "x%d: a typed $100 stuck at %s (want %.3f: the scale is the mode's)", mode, v, spm)
+
+                start = g.status_report()["MPos"]
+                k0 = kernel_xy_mm(ctx)
+                t0 = time.time()
+                rr = g.command("$J=G91X40F12000")
+                ctx.check(not any(x.startswith("error") for x in rr), "x%d: jog refused: %s", mode, rr)
+                peak, states, _ = wait_idle(ctx, g, 30)
+                ctx.check("TIMEOUT" not in states, "x%d: the jog out did not return to Idle: %s", mode, states)
+                # grblHAL's Idle leads the kernel by the stream depth and
+                # the decel tail: the counters are read once the machine
+                # itself is idle.
+                machine_idle(ctx)
+                out_mm = kernel_xy_mm(ctx)[0] - k0[0]
+                r["kernel_out_mm"] = round(out_mm, 3)
+                r["peak"] = peak
+                ctx.check(abs(out_mm - 40.0) <= 0.2,
+                          "x%d: the kernel counters say %.3f mm for a 40 mm jog: the scale and the "
+                          "drivers' mode disagree", mode, out_mm)
+                rr = g.command("$J=G91X-40F12000")
+                ctx.check(not any(x.startswith("error") for x in rr), "x%d: jog back refused: %s", mode, rr)
+                peak2, states, _ = wait_idle(ctx, g, 30)
+                ctx.check("TIMEOUT" not in states, "x%d: the jog back did not return to Idle: %s", mode, states)
+                machine_idle(ctx)
+                t1 = time.time()
+                final = g.status_report()["MPos"]
+                drift = abs(final[0] - start[0])
+                p2px, p2py, n = accel.p2p(t0, t1)
+                r.update({"drift_mm": round(drift, 3), "accel_p2p": [p2px, p2py], "accel_samples": n})
+                ctx.log("x%d: out %.3f mm by the kernel, peak %.0f/%.0f mm/min, drift %.3f mm, "
+                        "accel p2p x=%d y=%d over %d samples",
+                        mode, out_mm, peak, peak2, drift, p2px, p2py, n)
+                ctx.check(drift <= 0.05, "x%d: position drift %.3f mm", mode, drift)
+                ctx.check(max(peak, peak2) >= 6000, "x%d: the jog peaked at only %.0f mm/min", mode,
+                          max(peak, peak2))
+                ctx.check(max(p2px, p2py) >= hw.ACCEL_P2P_MOVING,
+                          "x%d: the head did not move during the jog (accel p2p x=%d y=%d, below %d): "
+                          "the counters ran without the gantry", mode, p2px, p2py, hw.ACCEL_P2P_MOVING)
+            machine_idle(ctx)
+    finally:
+        ev["modes"] = results
+        set_xy_mode(ctx, fc, was)
+        ev["xy_microsteps_after"] = (fc.settings() or {}).get("xy_microsteps") or "(unset)"
+    ctx.log("PASS: %s", "; ".join("x%d: %.3f mm, drift %.3f, accel %d"
+                                  % (r["mode"], r["kernel_out_mm"], r["drift_mm"], max(r["accel_p2p"]))
+                                  for r in results))
 
 
 # ---------------------------------------------------------------- liveness
