@@ -89,7 +89,7 @@ class RegistrationTests(unittest.TestCase):
         covers = set(self.t.covers)
         for want in (("forgectrl", "src/wizlive.*"), ("forgectrl", "src/sheet.*"), ("forgectrl", "src/jobstream.*"),
                      ("forgectrl", "src/curverec.*"), ("forgectrl", "src/font_hershey.*"),
-                     ("forgectrl", "src/ui/wizard.*"), ("forgectrl", "tools/hershey_gen.py"),
+                     ("forgectrl", "src/ui/wizard.*"), ("forgectrl", "src/wizrun.h"),
                      ("grblhal-glowforge", "src/glowforge_laser.c")):
             self.assertIn(want, covers, "lacks %s" % (want,))
 

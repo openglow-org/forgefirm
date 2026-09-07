@@ -20,12 +20,13 @@ import re
 from ..catalog import test
 from .commission_dark import run_check, Restore
 
-SHEET_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/sheet.*"),
+SHEET_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/wizrun.h"),
+                ("forgectrl", "src/sheet.*"),
                 ("forgectrl", "src/font_hershey.*"), ("forgectrl", "src/jobstream.*"),
                 ("forgectrl", "src/curverec.*"), ("forgectrl", "src/wizdark.*"),
                 ("forgectrl", "src/wiz.*"), ("forgectrl", "src/commission.*"),
                 ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.*"),
-                ("forgectrl", "tools/hershey_gen.py"), ("forgectrl", "src/super.c"),
+                ("forgectrl", "src/super.c"),
                 ("forgectrl", "src/status.c"), ("forgectrl", "src/cool.c"),
                 ("forgectrl", "src/accel.*"), ("forgectrl", "src/wizcalc.*"),
                 ("grblhal-glowforge", "src/glowforge_laser.c"),
