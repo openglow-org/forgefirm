@@ -9120,6 +9120,42 @@ rebuilt from that head with the taint stamps cleared: stamp
 kind. That pair is the one to flash; the 20260907000214 pair, never
 flashed, was removed.
 
+The CI on 60e06c7 then failed the shared-UI check: the acceptance page's
+`theme.css` had not followed forgectrl's (54f6574). The coverage lint, run
+locally on the tree manifest before the next push, found `src/wizrun.h`
+uncovered and the sheet test's entry for the font generator hollow (a
+non-behavioral path), both fixed in the sheet test's `covers` (0df0162).
+Every CI step then passed locally. Both pushed; the pair rebuilt from
+0df0162: stamp **20260907002443**, the same kernel, the same checks, no
+warning. That pair is the one to flash; the 20260907001140 pair, never
+flashed, was removed.
+
+## 2026-09-07: the first campaign on image 20260907002443 finds two defects
+
+The operator flashed the dev image 20260907002443 and power-cycled; forgetest
+took the fresh-boot reference; the unattended batch (67 tests) started at
+00:36Z in campaign c-20260907003616-ba87. 43 tests passed in a row; the
+44th, `motion.liveness-probe`, failed at 00:52Z with "the first probe after
+the restart was not MOTION OK: []" and closed the campaign. The machine was
+fine: forgectrl's log shows the probe after the masked restart reading
+MOTION OK and the supervisor reporting motion verified.
+
+Two causes, one in the daemon and one in the test:
+
+- **The probe's log line was cut to three characters** ("MOTION OK - hea").
+  The commissioning change that made the probe's detail text static for
+  the setup page (`super.c`, `probe_detail[96]`) left the probe call with
+  `sizeof(detail)` on what had become a pointer: four bytes. The image of
+  2026-09-03 logged the whole line ("head accel p2p x=1746 y=1543
+  (moving>=800 dead<=250)"). Fixed: `sizeof(probe_detail)`.
+- **The test read the log once, too early.** It reads the daemon's log for
+  the probe line as soon as `/mode` reports motion verified; the line
+  reaches the file through rsyslog a moment later, and this time the read
+  came first. Fixed: the test waits up to ten seconds for the line.
+
+The fix needs a forgectrl pin bump, so the pair is rebuilt and the
+campaign starts over on the next image.
+
 ## Reference notes
 
 ### Head-IRQ source validation — the beam-emission hypothesis

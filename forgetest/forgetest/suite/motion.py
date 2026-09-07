@@ -383,7 +383,13 @@ def _liveness_masked_restart(ctx, fc, ev):
                                     or m.get("controller") == "motion-fault"):
             break
         ctx.sleep(1)
+    # The probe's own line reaches the file through rsyslog a moment after
+    # the supervisor reports its verdict: wait for it, briefly.
+    t1 = time.time()
     lines = _probe_lines(FORGECTRL_LOG, off)
+    while not lines and time.time() - t1 < 10:
+        ctx.sleep(0.5)
+        lines = _probe_lines(FORGECTRL_LOG, off)
     for ln in lines:
         ctx.log("  %s", ln.split(" INFO ", 1)[-1] if " INFO " in ln else ln[-160:])
     ev["masked_restart"] = {"mode": m, "probe_lines": lines[-4:], "motor_lock_after": ctx.sysfs("cnc/motor_lock")}
