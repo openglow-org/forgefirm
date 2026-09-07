@@ -1376,9 +1376,11 @@ feature requests, enhancements) will eventually be tracked as GitHub issues.
    the headers of kernel patches 0011-0013 (`meta-glowforge-bsp`,
    `recipes-kernel/linux/`).
 3. **Release acceptance follow-through.** The campaign is the release gate
-    and runs as designed: dev image `20260824230512`, 45 of 45 from nothing,
-    36 of them unattended with the bench actuator in the loop, release
-    authorized (the export is on the board at `/data/forgetest/export/`).
+    and runs as designed: dev image `20260907005922`, 81 of 81 (53 run, 28
+    inherited from the campaign before it on the same pins), 67 of them
+    unattended with the bench actuator in the loop, release authorized
+    (the export is on the board at `/data/forgetest/export/` and beside
+    the images under `images/20260907005922/`).
     What is left is small. Two catalog gaps from the tool's own plan,
     `cooling.confirm-escalate` and
     `cooling.fire-gate-blocks-arm`, are not ported (both need the pump
@@ -1419,55 +1421,7 @@ feature requests, enhancements) will eventually be tracked as GitHub issues.
     far): re-measure the two heat coefficients and the machine's
     air-assist offset; and if a lit check still trips, the
     void-on-emission design with the tube as its own flow tracer.
-8. **Initial commissioning: measure and set the machine's own numbers
-    methodically.** Phase 1 (consent, account, preferences, machine facts,
-    the cloud decision, the gate, HTTPS on 443, the factory return),
-    phase 2 (the setup checks: switches, sensors, airflow, motion, cameras,
-    the coolant offset and the flow calibration as checks, the cloud header
-    capture, the Commissioning tab, the engine-raised flags), and phase 3
-    (the sheet: the stroke font and renderer, the daemon's own sender with
-    the emission witnesses, the placement, the frame, the focus, floor,
-    dose-curve, corner, and flow-load cards, M102 in the driver) are in
-    forgectrl and the driver. Phase 1 passes the
-    first-run walk-through and the commission acceptance set on the bench;
-    phase 2 passes its six automated checks (`commission.check-*`) and the
-    cloud header capture; phase 3 passes `commission.sheet`, one live run
-    over the whole sheet on one piece. Phase 4 (the lifecycle: the
-    what-changed menu, the record as a download and a printable page and
-    inside the log bundle, the button LED choreography, the second-browser
-    mirror) is built in forgectrl with its three unattended cases. The
-    commissioning acceptance set is 23 cases, three of them attended with
-    the bench actuator up (the page walk, one Print in the Glowforge app,
-    and the sheet with one press), and every one has passed on the bench.
-    The usability pass over the cards (every wait named and counted, the
-    press prompted when the button lights, the result as a sentence with
-    the settings written and the numbers under a fold) is bench-proven with
-    the content-sized layout. All of it waits for its push and pin. Every tunable
-    that was measured on the bench machine
-    and shipped as a default varies from machine to machine: the flow
-    check's bands and `cool_flow_rise`, the tube's heat coefficients
-    (`cool_laser_heat_cw`, `cool_laser_heat_density`), the air-assist
-    ground offset on the coolant readings, the laser's striking and lasing
-    thresholds and the duty floor, the fan floors, the thermistor curve
-    itself. Owed: one commissioning procedure, run once on a new machine
-    from the panel or the bench page, that measures each of these in
-    order with the tube dark wherever it can be, fires only where it
-    must, and writes the results as that machine's settings with a
-    record; and a reading of what the cloud sets for the same machine,
-    taken from cloud cuts (the pulse header carries the factory's
-    per-machine values), so the commissioning can start from the
-    factory's own numbers where they exist and note where they differ
-    from the measured ones. The dose-curve recorder (the panel's one-press
-    ladder, fit and apply) is the first piece of this tool family and the
-    template for the rest. Next piece, from the corner work: a
-    **side-by-side chooser** - the tool cuts the same corner-heavy pattern
-    at several settings of a knob (the corner rolloff first: a row of
-    passes at, say, 1.0 / 1.25 / 1.5 / 1.75 / 2.0), labels them, and the
-    operator picks the best by eye; Apply writes the winner. The rolloff
-    is the proof case (this bench settled at 1.5 and may go lower, so the
-    shipped default of 2 is a starting point, not a truth), and the same
-    shape fits any by-eye tunable the commissioning flow meets.
-9. **Idle before the kernel drains.** The driver reports Idle when the
+8. **Idle before the kernel drains.** The driver reports Idle when the
     stream is produced, up to about 550 ms before the pulse engine finishes
     playing it after chained jogs (the fact under "Running the controller").
     A sender or a service that stops the controller at Idle loses that tail

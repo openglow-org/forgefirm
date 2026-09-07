@@ -9154,7 +9154,88 @@ Two causes, one in the daemon and one in the test:
   came first. Fixed: the test waits up to ten seconds for the line.
 
 The fix needs a forgectrl pin bump, so the pair is rebuilt and the
-campaign starts over on the next image.
+campaign starts over on the next image: forgectrl 9b178c2 pushed, pinned
+at 0.1.4 (forgefirm 143ef11 with the test's wait), the pair rebuilt from
+those heads, stamp **20260907005922**, the same kernel and checks, forgectrl
+0.1.4 on both images. That pair is the one to flash.
+
+## 2026-09-07: the full campaign passes on image 20260907005922, 81 of 81
+
+The operator flashed the dev image 20260907005922 and power-cycled;
+forgetest took the fresh-boot reference (the probe line whole again: "head
+accel p2p x=3364 y=2018"). Campaign c-20260907010414-d825 started at
+01:04Z. The unattended batch: 39 tests run, 39 PASS, by 01:19Z; 28 tests
+inherited their PASS from the first campaign, their fingerprints not
+naming the daemon. The operator then ran the 14 attended tests from the
+acceptance page, in the prerequisite order: `laser.emission-witness`,
+`commission.first-run-page`, `laser.m5-rapid-dark`, `laser.disarm-in-hold`,
+`laser.armed-kill`, `laser.pause-resume-lid-cancel`, `cooling.flow-under-load`,
+`commission.sheet`, `commission.cloud-header-capture`,
+`cloud.service-protocol`, `cloud.pause-resume`, `cloud.lid-interlock-abort`,
+`cloud.oversize-stream`, `cloud.paused-lid-cancel`: every one PASS. At
+01:56Z the campaign read 81 of 81 satisfied (28 inherited, 53 run), nothing
+required, and the export authorized the image: artifact sha256
+`60d9f7aa9f9b0005f9acffa460f863d4e8f9adc120da43e6b050cea98851a910`, kept
+beside the images under `images/20260907005922/` (not committed under
+`releases/`: the first signed release is the operator's call). The last
+cloud test left the machine in cloud mode; switched back to GRBL. Board at
+the end: `/tmp` empty, `/data` as found.
+
+This closes BRINGUP "Next work" item 8, the first-run commissioning. The
+plan file `COMMISSIONING_PLAN.md` and the review file `AGREEMENTS_REVIEW.md`
+at the tree root are deleted; their decisions live in this log's entries of
+2026-09-04 to 2026-09-07 and on the docs site.
+
+The item's text as it stood in BRINGUP when it closed:
+
+> 8. **Initial commissioning: measure and set the machine's own numbers
+>     methodically.** Phase 1 (consent, account, preferences, machine facts,
+>     the cloud decision, the gate, HTTPS on 443, the factory return),
+>     phase 2 (the setup checks: switches, sensors, airflow, motion, cameras,
+>     the coolant offset and the flow calibration as checks, the cloud header
+>     capture, the Commissioning tab, the engine-raised flags), and phase 3
+>     (the sheet: the stroke font and renderer, the daemon's own sender with
+>     the emission witnesses, the placement, the frame, the focus, floor,
+>     dose-curve, corner, and flow-load cards, M102 in the driver) are in
+>     forgectrl and the driver. Phase 1 passes the
+>     first-run walk-through and the commission acceptance set on the bench;
+>     phase 2 passes its six automated checks (`commission.check-*`) and the
+>     cloud header capture; phase 3 passes `commission.sheet`, one live run
+>     over the whole sheet on one piece. Phase 4 (the lifecycle: the
+>     what-changed menu, the record as a download and a printable page and
+>     inside the log bundle, the button LED choreography, the second-browser
+>     mirror) is built in forgectrl with its three unattended cases. The
+>     commissioning acceptance set is 23 cases, three of them attended with
+>     the bench actuator up (the page walk, one Print in the Glowforge app,
+>     and the sheet with one press), and every one has passed on the bench.
+>     The usability pass over the cards (every wait named and counted, the
+>     press prompted when the button lights, the result as a sentence with
+>     the settings written and the numbers under a fold) is bench-proven with
+>     the content-sized layout. All of it waits for its push and pin. Every tunable
+>     that was measured on the bench machine
+>     and shipped as a default varies from machine to machine: the flow
+>     check's bands and `cool_flow_rise`, the tube's heat coefficients
+>     (`cool_laser_heat_cw`, `cool_laser_heat_density`), the air-assist
+>     ground offset on the coolant readings, the laser's striking and lasing
+>     thresholds and the duty floor, the fan floors, the thermistor curve
+>     itself. Owed: one commissioning procedure, run once on a new machine
+>     from the panel or the bench page, that measures each of these in
+>     order with the tube dark wherever it can be, fires only where it
+>     must, and writes the results as that machine's settings with a
+>     record; and a reading of what the cloud sets for the same machine,
+>     taken from cloud cuts (the pulse header carries the factory's
+>     per-machine values), so the commissioning can start from the
+>     factory's own numbers where they exist and note where they differ
+>     from the measured ones. The dose-curve recorder (the panel's one-press
+>     ladder, fit and apply) is the first piece of this tool family and the
+>     template for the rest. Next piece, from the corner work: a
+>     **side-by-side chooser** - the tool cuts the same corner-heavy pattern
+>     at several settings of a knob (the corner rolloff first: a row of
+>     passes at, say, 1.0 / 1.25 / 1.5 / 1.75 / 2.0), labels them, and the
+>     operator picks the best by eye; Apply writes the winner. The rolloff
+>     is the proof case (this bench settled at 1.5 and may go lower, so the
+>     shipped default of 2 is a starting point, not a truth), and the same
+>     shape fits any by-eye tunable the commissioning flow meets.
 
 ## Reference notes
 
