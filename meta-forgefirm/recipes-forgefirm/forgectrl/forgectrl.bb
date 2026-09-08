@@ -2,7 +2,7 @@ DESCRIPTION = "System Control Daemon for ForgeFIRM powered Glowforge"
 HOMEPAGE = "https://github.com/openglow-org/forgectrl"
 
 LICENSE = "MIT"
-LIC_FILES_CHKSUM = "file://LICENSE;md5=19ed4e3e8c28a4311c16b0b2b91357ec"
+LIC_FILES_CHKSUM = "file://LICENSE;md5=fe9dfc6caad62544b4b1d0fa55c4b92f"
 
 PE = "1"
 
