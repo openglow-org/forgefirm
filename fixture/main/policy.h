@@ -3,8 +3,8 @@
  * so the host test can hold them to account. What a channel is called,
  * what a request may ask of it, and how long a button press may last.
  *
- * (C) Copyright 2026
- * Scott Wiederhold, s.e.wiederhold@gmail.com
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  */
 #pragma once

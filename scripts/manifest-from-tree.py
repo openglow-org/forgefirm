@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# (C) Copyright 2020-2026
-# Scott Wiederhold, s.e.wiederhold@gmail.com
+# Copyright 2020-2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # https://community.openglow.org
 # SPDX-License-Identifier:    MIT
 #

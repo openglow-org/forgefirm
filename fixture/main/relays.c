@@ -8,8 +8,8 @@
  * relays_release(); the button is only ever pulsed, its end set by a
  * one-shot timer that is armed before the line goes high.
  *
- * (C) Copyright 2026
- * Scott Wiederhold, s.e.wiederhold@gmail.com
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  */
 #include "relays.h"

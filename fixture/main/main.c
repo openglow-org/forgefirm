@@ -7,8 +7,8 @@
  * nothing at all otherwise: every line low at boot and after any reset,
  * the button only ever pulsed, every request under a key.
  *
- * (C) Copyright 2026
- * Scott Wiederhold, s.e.wiederhold@gmail.com
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  */
 #include "esp_log.h"
