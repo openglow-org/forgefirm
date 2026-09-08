@@ -970,7 +970,7 @@ def cloud_disabled_surface(ctx):
       covers=[("forgectrl", "src/update.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.js")],
       requires=["update.slots-and-signature"],
       description="The return itself reboots the machine as a Glowforge, so it never runs from the "
-                  "catalog (it is a bench drill, logged once per release in CAMPAIGN-LOG). The "
+                  "catalog; it is a bench drill, run once per release. The "
                   "test probes the guards: POST /restore/factory-return without confirm=1 is "
                   "refused (400) and with confirm=0 too, no update job starts, /slots lists the "
                   "archived factory images, and the setup page carries the footer link's call "

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""De-risk drill for the head-accelerometer crash detector (BRINGUP item 6).
+"""De-risk drill for the head-accelerometer crash detector.
 
 The LIS2HH12 on the head bus (i2c-3 @0x1e) carries an on-chip interrupt
 generator: a per-axis high-event threshold (IG_THS_X1/Y1/Z1), a duration

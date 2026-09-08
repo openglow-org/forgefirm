@@ -30,6 +30,13 @@
 #                        bundle. The licenses of the software in the image
 #                        make source necessary, so this is never the
 #                        default.
+#   FORGEFIRM_DOCS_DIR   the forgefirm-docs checkout to tag with this
+#                        release (default: <repo>/../forgefirm-docs). The
+#                        firmware and the documentation that describes it
+#                        share a tag, so the documentation that agrees with
+#                        a machine can be found from its version.
+#   FORGEFIRM_DOCS_SKIP  set to 1 to release without tagging the
+#                        documentation. Never the default.
 #
 # The source bundle: a release build merges kas/source-bundle.yml, so the
 # build writes the source of every recipe of the image beside the image.
@@ -309,6 +316,32 @@ fi
 ( cd "$STAGE" && sha256sum $(echo "$ASSETS" | tr ' ' '\n' | grep -v '^sha256sums.txt$') > sha256sums.txt )
 ls -la "$STAGE"
 
+# --- the documentation tag ----------------------------------------------------
+#
+# Firmware on a machine needs the documentation that agrees with it, so the
+# docs repository carries the same tag as the release. The tag is made here and
+# pushed with the release, never before: a tag on documentation that never
+# shipped is worse than no tag at all.
+DOCS_TAG_CMD=""
+if [ -n "${FORGEFIRM_DOCS_SKIP:-}" ]; then
+  warn "docs tag SKIPPED by FORGEFIRM_DOCS_SKIP - this release ships no matching documentation tag"
+else
+  DOCS_DIR="${FORGEFIRM_DOCS_DIR:-$REPO/../forgefirm-docs}"
+  [ -d "$DOCS_DIR/.git" ] \
+    || die "no forgefirm-docs checkout at $DOCS_DIR (set FORGEFIRM_DOCS_DIR, or FORGEFIRM_DOCS_SKIP=1 to release without one)"
+  [ -z "$(git -C "$DOCS_DIR" status --porcelain)" ] \
+    || die "forgefirm-docs has uncommitted changes; commit them before a release"
+  if git -C "$DOCS_DIR" rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null 2>&1; then
+    echo "docs: tag v$VERSION already exists in $DOCS_DIR"
+  else
+    git -C "$DOCS_DIR" tag -a "v$VERSION" -m "ForgeFIRM v$VERSION" \
+      || die "cannot tag forgefirm-docs"
+    echo "docs: tagged $DOCS_DIR at v$VERSION"
+  fi
+  echo "docs: v$VERSION -> $(git -C "$DOCS_DIR" rev-parse --short HEAD)"
+  DOCS_TAG_CMD="git -C $DOCS_DIR push origin v$VERSION"
+fi
+
 cat <<EOF
 
 == release v$VERSION staged ==
@@ -317,12 +350,16 @@ Pre-publish checklist (docs.forgefirm.org, Developers, "Release flow"):
   - meta-openglow pushed; kas config flipped to the pinned-remote block
   - kas lock refreshed
   - self-containment proven from a fresh clone
+  - forgefirm-docs current for this release (the currency rule) and pushed
 
 Publish (from a directory with an authenticated gh):
   cd "$STAGE"
   gh release create "v$VERSION" --repo openglow-org/forgefirm \\
     --title "ForgeFIRM v$VERSION" --generate-notes $PRERELEASE \\
     $ASSETS
+
+Push the documentation tag with it:
+  $DOCS_TAG_CMD
 EOF
 
 if [ "$PUBLISH" = "1" ]; then
