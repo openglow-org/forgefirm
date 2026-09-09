@@ -1,0 +1,5 @@
+# /etc/default/urandom - ForgeFIRM
+# The random seed the urandom init script carries from shutdown to the
+# next boot. The rootfs is read-only, so the file lives with the machine
+# state on /data.
+RANDOM_SEED_FILE=/data/forgefirm/random-seed

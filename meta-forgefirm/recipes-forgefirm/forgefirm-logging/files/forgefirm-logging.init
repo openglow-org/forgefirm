@@ -22,6 +22,12 @@ CONF=/etc/logrotate.conf
 PIDFILE=/var/run/forgefirm-logging.pid
 LEGACY=/data/forgefirm/legacy-logs
 
+# logrotate's state file (the last rotation of each file). The rootfs is
+# read-only, so its default under /var/lib is not used; the rules are
+# size-capped, so a state that starts fresh at every boot loses nothing.
+# logrotate refuses to run at all when it cannot create the file.
+STATE=/var/run/forgefirm-logrotate.status
+
 RULES=/data/forgefirm/rsyslog-forgefirm.conf
 
 # The daemons log to /dev/log with non-blocking datagrams and drop what
@@ -78,10 +84,10 @@ case "$1" in
     render
     sweep_legacy
     [ -x "$LOGROTATE" ] || exit 0
-    "$LOGROTATE" "$CONF" 2>/dev/null
+    "$LOGROTATE" -s "$STATE" "$CONF" 2>/dev/null
     ( while :; do
         sleep 3600
-        "$LOGROTATE" "$CONF" 2>/dev/null
+        "$LOGROTATE" -s "$STATE" "$CONF" 2>/dev/null
       done ) &
     echo $! > "$PIDFILE"
     ;;

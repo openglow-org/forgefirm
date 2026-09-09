@@ -43,6 +43,10 @@ IMAGE_ROOTFS_EXTRA_SPACE = "262144"
 # Dev builds identify by build timestamp (matches the artifact name),
 # tagged so a bench machine is never mistaken for a release.
 FORGEFIRM_VERSION_STRING = "${DATETIME} (dev)"
+# The rootfs functions that write the string are in the do_rootfs
+# signature; DATETIME must not be, or the basehash changes at every parse
+# and bitbake refuses the build as non-deterministic.
+FORGEFIRM_VERSION_STRING[vardepsexclude] += "DATETIME"
 
 # /etc/forgefirm-dev marks a dev image on the rootfs; its content is the
 # version string. The sshd init script starts sshd on a dev image without
@@ -52,4 +56,20 @@ write_forgefirm_dev_marker() {
     echo "${FORGEFIRM_VERSION_STRING}" > ${IMAGE_ROOTFS}${sysconfdir}/forgefirm-dev
 }
 write_forgefirm_dev_marker[vardepsexclude] += "DATETIME"
-ROOTFS_POSTPROCESS_COMMAND += "write_forgefirm_dev_marker;"
+ROOTFS_POSTPROCESS_COMMAND += "write_forgefirm_dev_marker "
+
+# The two factory rootfs slots, read-only under /factory/img1 and
+# /factory/img2: a bench convenience for reading a factory image in place
+# (the ffboot inventory reuses the mounts). The release image mounts no
+# factory slot; it reads one through a temporary read-only mount when it
+# needs to (ffboot -l). No nofail: busybox mount hands it to the kernel
+# as a filesystem parameter, which the kernel rejects (the mount fails
+# with EINVAL); mount -a goes on past a slot that does not mount anyway.
+add_factory_slot_mounts() {
+    install -d ${IMAGE_ROOTFS}/factory/img1 ${IMAGE_ROOTFS}/factory/img2
+    printf '%s\n' \
+        '/dev/mmcblk2p1       /factory/img1        auto       ro,noatime            0  0' \
+        '/dev/mmcblk2p2       /factory/img2        auto       ro,noatime            0  0' \
+        >> ${IMAGE_ROOTFS}${sysconfdir}/fstab
+}
+ROOTFS_POSTPROCESS_COMMAND += "add_factory_slot_mounts "

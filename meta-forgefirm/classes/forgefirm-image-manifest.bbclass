@@ -47,7 +47,11 @@ FORGEFIRM_MANIFEST_PIN_SUFFIX ?= "-pin.inc"
 
 do_rootfs[depends] += "virtual/kernel:do_deploy kernel-module-glowforge:do_deploy"
 
-ROOTFS_POSTPROCESS_COMMAND += "forgefirm_manifest_assemble;"
+# No semicolon after the function name: image.bbclass makes the value of
+# ROOTFS_POSTPROCESS_COMMAND the vardeps of do_rootfs, split on whitespace,
+# so "name;" names nothing and a change to the function body would not
+# make the rootfs again (execute_pre_post_process itself accepts both).
+ROOTFS_POSTPROCESS_COMMAND += "forgefirm_manifest_assemble "
 forgefirm_manifest_assemble[vardepsexclude] += "DATETIME"
 
 def forgefirm_manifest_layer_content(path, skip_suffixes=('.md',)):

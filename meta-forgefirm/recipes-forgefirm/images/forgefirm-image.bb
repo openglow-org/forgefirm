@@ -45,17 +45,35 @@ IMAGE_INSTALL:remove = "python3 ${FORGEFIRM_RELEASE_TRIM}"
 # VIRTUAL-RUNTIME_base-utils-syslog (conf/distro/forgefirm.conf).
 IMAGE_INSTALL:append = " grblhal-glowforge forgectrl gfhome gfcloud v4l-utils fwup ffboot slotmigrate forgefirm-logging"
 
-# forgefirm-users: replays the operator account record
+# forgefirm-users: renders the operator account record
 # (/data/forgefirm/users, written by forgectrl) into the system account
 # files at boot, before sshd, and on reload; also installs the warning an
 # interactive root shell prints. forgefirm-banner: keeps the control
 # panel addresses in the serial-console banner (/etc/issue).
+# forgefirm-persist: the boot timestamp and the random seed on /data.
 # avahi-daemon: mDNS, so the panel answers at https://forgefirm.local/
 # and shows up in service browsers. The daemon is installed by name (the
 # zeroconf distro feature stays off: it would bring libnss-mdns); the
 # build options and the configuration are in conf/distro/forgefirm.conf
 # and recipes-connectivity/avahi.
-IMAGE_INSTALL:append = " forgefirm-users forgefirm-banner avahi-daemon"
+IMAGE_INSTALL:append = " forgefirm-users forgefirm-banner forgefirm-persist avahi-daemon"
+
+# The rootfs mounts read-only on both images; /data (p3) is the writable
+# partition. read-only-rootfs is poky's feature for it: the root line of
+# /etc/fstab (the BSP's, already ro) and ROOTFS_READ_ONLY in
+# /etc/default/rcS, the volatile links made at rootfs time
+# (populate-volatile.sh: /etc/resolv.conf, /tmp), a writable copy of
+# /var/lib at boot (read-only-rootfs-hook.sh), a build failure for a
+# package whose post-install must run on the machine, and the removal of
+# the packages a read-only rootfs cannot use (shadow, base-passwd,
+# update-rc.d, update-alternatives; the account files stay). What must
+# last or change at run time is handled file by file: the account files
+# and /etc/issue (forgefirm-users, forgefirm-banner), the sshd host keys
+# (recipes-connectivity/openssh), the timestamp and the random seed
+# (forgefirm-persist). The facts are on the docs site,
+# technical/forgefirm/image-and-bsp; scripts/release.sh checks the built
+# rootfs for this state.
+IMAGE_FEATURES += "read-only-rootfs"
 
 # Root policy. root has no password and logs in at the serial console
 # only: that is the recovery path when the network, the panel or an
@@ -105,7 +123,9 @@ write_forgefirm_version() {
     echo "ForgeFIRM ${FORGEFIRM_VERSION_STRING}" > ${IMAGE_ROOTFS}${sysconfdir}/motd
 }
 write_forgefirm_version[vardepsexclude] += "DATETIME"
-ROOTFS_POSTPROCESS_COMMAND += "write_forgefirm_version;"
+# No semicolon after a function name here or below (the vardeps rule in
+# classes/forgefirm-image-manifest.bbclass).
+ROOTFS_POSTPROCESS_COMMAND += "write_forgefirm_version "
 
 # The license texts ride with the software. The license class writes
 # the image's license manifest (every installed package with its
@@ -132,4 +152,4 @@ pack_licenses() {
         > "${IMAGE_ROOTFS}${datadir}/forgefirm/licenses.tar.gz"
     rm -rf "$d"
 }
-ROOTFS_POSTPROCESS_COMMAND += "pack_licenses;"
+ROOTFS_POSTPROCESS_COMMAND += "pack_licenses "

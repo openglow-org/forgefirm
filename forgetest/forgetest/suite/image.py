@@ -106,7 +106,9 @@ def fds_of(pid):
       description="The image that is running is the image the manifest describes, with the "
                   "kernel options, the module, the pulse ring it maps and the SDMA clocks it holds, "
                   "the daemon ownership, "
-                  "the init ordering, and the file modes the release depends on.")
+                  "the init ordering, the file modes the release depends on, and the mounts: the "
+                  "rootfs read-only, /data writable, the account files and the banner rendered "
+                  "into tmpfs, the sshd host keys on /data, the factory slots on the dev image only.")
 def image_health(ctx):
     ev = ctx.evidence
     manifest = ctx.runner.manifest
@@ -247,7 +249,55 @@ def image_health(ctx):
         ctx.log("/data free: %d MiB", free_mb)
         ctx.check(free_mb >= 20, "/data has only %d MiB free", free_mb)
 
-    # 8. the manifest itself is coherent
+    # 8. the mounts: the rootfs read-only, /data the writable partition,
+    # the state a read-only rootfs hands off (the read-only-rootfs image
+    # feature, forgefirm-users, forgefirm-banner, the sshd host keys). The
+    # dev image alone mounts the factory slots under /factory.
+    mounts = {}
+    for line in (_read("/proc/mounts", "") or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            mounts[parts[1]] = {"source": parts[0], "type": parts[2], "opts": parts[3].split(",")}
+
+    def mount_opts(path):
+        return (mounts.get(path) or {}).get("opts") or []
+
+    ev["mounts"] = {p: mounts[p] for p in ("/", "/data", "/var/lib", "/etc/passwd", "/etc/issue") if p in mounts}
+    ctx.log("/ mounted %s; /data %s; /var/lib %s", ",".join(mount_opts("/")) or "(absent)",
+            ",".join(mount_opts("/data")) or "(absent)", ",".join(mount_opts("/var/lib")) or "(absent)")
+    ctx.check("ro" in mount_opts("/"), "the rootfs is not mounted read-only: %s", mounts.get("/"))
+    ctx.check("rw" in mount_opts("/data"), "/data is not mounted read-write: %s", mounts.get("/data"))
+    ctx.check("rw" in mount_opts("/var/lib"),
+              "/var/lib is not a writable copy (read-only-rootfs-hook.sh): %s", mounts.get("/var/lib"))
+    rcs = _read("/etc/default/rcS", "") or ""
+    ctx.check("ROOTFS_READ_ONLY=yes" in rcs.splitlines(), "/etc/default/rcS lacks ROOTFS_READ_ONLY=yes")
+    factory = sorted(p for p in mounts if p.startswith("/factory/"))
+    ev["factory_mounts"] = factory
+    dev_image = os.path.exists("/etc/forgefirm-dev")
+    ev["dev_image"] = dev_image
+    ctx.log("dev image %s; /factory mounts: %s", dev_image, factory or "none")
+    if dev_image:
+        for n in (1, 2):
+            if os.path.exists("/dev/mmcblk2p%d" % n):
+                p = "/factory/img%d" % n
+                ctx.check("ro" in mount_opts(p), "%s is not mounted read-only on the dev image: %s", p, mounts.get(p))
+    else:
+        ctx.check(not factory, "a release image mounts the factory slots: %s", factory)
+    if os.path.isfile("/data/forgefirm/users"):
+        names = [l.split(":")[0] for l in (_read("/data/forgefirm/users", "") or "").splitlines()
+                 if l.strip() and not l.startswith("#")]
+        passwd_names = {l.split(":")[0] for l in (_read("/etc/passwd", "") or "").splitlines()}
+        ev["record_accounts"] = names
+        for f in ("/etc/passwd", "/etc/shadow", "/etc/group"):
+            ctx.check(f in mounts, "%s is not the tmpfs render of the account record", f)
+        for n in names:
+            ctx.check(n in passwd_names, "record account %r is missing from /etc/passwd", n)
+    ctx.check("/etc/issue" in mounts, "/etc/issue is not the bind-mounted banner copy")
+    if hw.pidof("sshd"):
+        key = "/data/forgefirm/ssh/ssh_host_ed25519_key"
+        ctx.check(os.path.isfile(key), "sshd runs but %s is missing", key)
+
+    # 9. the manifest itself is coherent
     ctx.check(manifest.content_sha and len(manifest.content_sha) == 64, "manifest content_sha256 missing")
     ctx.check("kernel-module-glowforge" in manifest.components, "manifest lacks kernel-module-glowforge")
     ctx.check("linux-fslc" in manifest.components, "manifest lacks the kernel entry")

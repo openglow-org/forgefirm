@@ -241,6 +241,26 @@ ROOT_PW=$(printf '%s\n' "$ROOT_SHADOW" | awk -F: '{print $2}')
   || die "release rootfs has a non-empty root password field: the policy is an empty field (empty-root-password in forgefirm-image.bb); a build drift"
 echo "root policy gate OK (root field empty; sshd refuses root and empty passwords)"
 
+# Read-only rootfs gate. The release rootfs mounts read-only: the root
+# line of the built fstab carries ro, the rcS default agrees (the
+# read-only-rootfs image feature), no factory-slot mount is in the
+# release fstab (those belong to the dev image), and sshd keeps its host
+# keys on /data, where the read-only rootfs cannot hold them.
+FSTAB=$(debugfs -R "cat /etc/fstab" "$EXT4" 2>/dev/null)
+[ -n "$FSTAB" ] \
+  || die "release rootfs carries no /etc/fstab"
+printf '%s\n' "$FSTAB" | awk '$1 == "/dev/root" && $2 == "/" { print $4 }' \
+  | grep -Eq '(^|,)ro(,|$)' \
+  || die "release fstab does not mount / read-only (base-files fstab or read-only-rootfs drift?)"
+printf '%s\n' "$FSTAB" | grep -Eq '^[^#]*[[:space:]]/factory/' \
+  && die "release fstab mounts a factory slot under /factory (dev image only)"
+RCS=$(debugfs -R "cat /etc/default/rcS" "$EXT4" 2>/dev/null)
+printf '%s\n' "$RCS" | grep -q '^ROOTFS_READ_ONLY=yes$' \
+  || die "release rcS has no ROOTFS_READ_ONLY=yes (read-only-rootfs image feature drift?)"
+[ "$(printf '%s\n' "$SSHD_CONFIG" | grep -c '^HostKey /data/forgefirm/ssh/')" = 3 ] \
+  || die "release sshd_config does not keep the host keys under /data/forgefirm/ssh (recipes-connectivity/openssh drift?)"
+echo "read-only rootfs gate OK (/ ro, no /factory mounts, host keys on /data)"
+
 # Config-level guard: debug-tweaks must not sit in the shared kas config,
 # where it would apply to every target including the release image.
 if ( cd "$REPO" && kas dump kas/forgefirm-glowforge.yml 2>/dev/null ) \

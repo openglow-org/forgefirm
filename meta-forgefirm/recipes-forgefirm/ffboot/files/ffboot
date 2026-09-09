@@ -55,8 +55,8 @@ probe_part () {
   if [ "$1" = "$BOOTED_ROOT" ]; then
     ROOT_DIR=""
   else
-    # Reuse an existing mount (the image keeps the factory slots mounted
-    # under /factory); a fresh mount is explicit -t ext4 - letting mount
+    # Reuse an existing mount (the dev image keeps the factory slots
+    # mounted under /factory); a fresh mount is explicit -t ext4 - letting mount
     # iterate types provokes a cosmetic kernel "Can't open blockdev" for
     # each foreign-type claim against an already-mounted device.
     ROOT_DIR=$(sed -n "s|^$1 \([^ ]*\).*|\1|p" /proc/mounts | head -n 1)

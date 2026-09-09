@@ -5,13 +5,23 @@
 # Required-Stop:
 # Default-Start:     2 3 4 5
 # Default-Stop:
-# Short-Description: ForgeFIRM accounts: replay the record into the system files
+# Short-Description: ForgeFIRM accounts: render the record into the system files
 ### END INIT INFO
 
 # The account record is the source of truth for the operator accounts;
-# the account files on the rootfs are rebuilt from it. forgectrl writes
-# the record and runs "reload" here. At boot this runs at S05: /data is
+# the system account files are rendered from it. forgectrl writes the
+# record and runs "reload" here. At boot this runs at S05: /data is
 # mounted (mountall, rcS) and sshd (S09) is not up yet.
+#
+# The rootfs is read-only, so the four account files are not written in
+# place. Each shows a copy of itself under /run/forgefirm/accounts
+# (tmpfs), bind-mounted at the first render after boot: the image's own
+# accounts (root and the system accounts) plus the record's. A render
+# writes through the mount, so a login that arrives mid-write reads an
+# empty file and is refused, never given a stale account. Until the
+# first render the rootfs files are in effect: root at the console works
+# from the first second of the boot. The shadow tools (useradd and the
+# rest) are not on a read-only image; the lines are written here.
 #
 # Record: /data/forgefirm/users, one line per account
 #   name:hash:uid
@@ -23,13 +33,17 @@
 #   - no record: nothing happens (a machine before the first-run wizard,
 #     or a bench image without /data);
 #   - every local account with a uid from 1000 to 65533 that the record
-#     does not name is removed, so an account reset removes the old
-#     account; root and the system accounts are never touched.
+#     does not name is left out of the render, so an account reset
+#     removes the old account; root and the system accounts are never
+#     touched.
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
+umask 077
 
 RECORD=/data/forgefirm/users
 HOMES=/data/forgefirm/home
+STATE=/run/forgefirm/accounts
+ACCOUNT_FILES="passwd shadow group gshadow"
 LOGIN_SHELL=/bin/sh
 UID_LOW=1000
 UID_HIGH=65533
@@ -55,67 +69,74 @@ valid_uid () {
   [ "$1" -ge "$UID_LOW" ] && [ "$1" -le "$UID_HIGH" ]
 }
 
-passwd_uid () {
-  awk -F: -v n="$1" '$1 == n { print $3; exit }' /etc/passwd
+# is_mounted <path>: a mount (a file bind mount included) sits at path.
+# Read from /proc/mounts: mountpoint(1) judges a file by its device
+# numbers alone.
+is_mounted () {
+  awk -v t="$1" '$2 == t { f = 1 } END { exit !f }' /proc/mounts
 }
 
-group_exists () {
-  awk -F: -v n="$1" '$1 == n { f = 1 } END { exit !f }' /etc/group
+# The operator accounts the current files hold: every name in the
+# operator uid range. A render replaces exactly these.
+operator_names () {
+  awk -F: -v lo="$UID_LOW" -v hi="$UID_HIGH" \
+    '$3 + 0 >= lo && $3 + 0 <= hi && $1 != "root" { print $1 }' /etc/passwd
 }
 
-# ensure_account name hash uid
-ensure_account () {
-  name=$1
-  hash=$2
-  uid=$3
-  home="$HOMES/$name"
+# Each account file shows a tmpfs copy of itself. The copy keeps the
+# file's mode and owner (cp -p); a file the image does not carry is
+# skipped.
+bind_files () {
+  mkdir -p "$STATE" || { log "cannot create $STATE"; return 1; }
+  for f in $ACCOUNT_FILES; do
+    [ -f "/etc/$f" ] || continue
+    is_mounted "/etc/$f" && continue
+    cp -p "/etc/$f" "$STATE/$f" || { log "cannot copy /etc/$f"; return 1; }
+    mount --bind "$STATE/$f" "/etc/$f" || { log "cannot bind /etc/$f"; return 1; }
+  done
+  return 0
+}
 
-  cur=$(passwd_uid "$name")
-  if [ -n "$cur" ] && [ "$cur" != "$uid" ]; then
-    log "account $name has uid $cur, the record says $uid: recreating it"
-    userdel -f "$name" >/dev/null 2>&1
-    groupdel "$name" >/dev/null 2>&1
-    cur=""
-  fi
+# render_file <name>: the file less the operator accounts (DROP), plus
+# one line per record account (ACCOUNTS: "name:hash:uid" lines). Written
+# through the bind mount; a file the image does not carry is skipped.
+render_file () {
+  f=$1
+  [ -f "/etc/$f" ] || return 0
+  is_mounted "/etc/$f" || { log "/etc/$f is not the tmpfs copy; not written"; return 1; }
+  tmp="$STATE/$f.new"
+  {
+    awk -F: -v drop=" $DROP " 'index(drop, " " $1 " ") == 0' "/etc/$f"
+    printf '%s\n' "$ACCOUNTS" | while IFS=: read -r name hash uid; do
+      [ -n "$name" ] || continue
+      case "$f" in
+        passwd)  printf '%s:x:%s:%s::%s/%s:%s\n' "$name" "$uid" "$uid" "$HOMES" "$name" "$LOGIN_SHELL" ;;
+        shadow)  printf '%s:%s:%s:0:99999:7:::\n' "$name" "$hash" "$DAY" ;;
+        group)   printf '%s:x:%s:\n' "$name" "$uid" ;;
+        gshadow) printf '%s:!::\n' "$name" ;;
+      esac
+    done
+  } > "$tmp" || { rm -f "$tmp"; log "render of $f failed"; return 1; }
+  cat "$tmp" > "/etc/$f" || { rm -f "$tmp"; log "write of /etc/$f failed"; return 1; }
+  rm -f "$tmp"
+  return 0
+}
 
-  if ! group_exists "$name"; then
-    groupadd -g "$uid" "$name" || { log "groupadd $name failed"; return 1; }
-  fi
-  if [ -z "$cur" ]; then
-    useradd -M -u "$uid" -g "$uid" -d "$home" -s "$LOGIN_SHELL" "$name" \
-      || { log "useradd $name failed"; return 1; }
-    log "account $name created (uid $uid)"
-  fi
-
+# ensure_home <name> <uid>
+ensure_home () {
+  home="$HOMES/$1"
   if [ ! -d "$home" ]; then
     mkdir -p "$home" && chmod 0700 "$home"
   fi
-  chown "$uid:$uid" "$home"
-
-  # -p stores the hash as it is. Home and shell are set again so an
-  # account file edited by hand converges on the record.
-  usermod -d "$home" -s "$LOGIN_SHELL" -p "$hash" "$name" \
-    || log "usermod $name failed"
-}
-
-# Remove every local account in the operator uid range that the record
-# does not name. KEEP holds the record's names, space separated.
-prune () {
-  for name in $(awk -F: -v lo="$UID_LOW" -v hi="$UID_HIGH" \
-                  '$3 + 0 >= lo && $3 + 0 <= hi { print $1 }' /etc/passwd); do
-    [ "$name" = root ] && continue
-    case " $KEEP " in
-      *" $name "*) continue ;;
-    esac
-    log "removing account $name (not in the record)"
-    userdel -f "$name" >/dev/null 2>&1 || log "userdel $name failed"
-    groupdel "$name" >/dev/null 2>&1
-  done
+  chown "$2:$2" "$home"
 }
 
 replay () {
   [ -f "$RECORD" ] || return 0
-  mkdir -p "$HOMES"
+  # 0755: a login traverses it to reach its home (the umask above is for
+  # the tmpfs state).
+  [ -d "$HOMES" ] || { mkdir -p "$HOMES" && chmod 0755 "$HOMES"; }
+  ACCOUNTS=""
   KEEP=""
   while IFS=: read -r name hash uid rest; do
     [ -n "$name" ] || continue
@@ -128,9 +149,37 @@ replay () {
       log "ignoring a root line in the record"
       continue
     fi
-    ensure_account "$name" "$hash" "$uid" && KEEP="$KEEP $name"
+    case " $KEEP " in
+      *" $name "*) log "skipping a second line for $name"; continue ;;
+    esac
+    ACCOUNTS="$ACCOUNTS$name:$hash:$uid
+"
+    KEEP="$KEEP $name"
   done < "$RECORD"
-  prune
+
+  bind_files || return 1
+  BEFORE=$(operator_names)
+  DROP=$(printf '%s' "$BEFORE" | tr '\n' ' ')
+  DAY=$(( $(date +%s) / 86400 ))
+  for f in $ACCOUNT_FILES; do
+    render_file "$f" || return 1
+  done
+
+  for name in $KEEP; do
+    case " $DROP " in
+      *" $name "*) ;;
+      *) log "account $name created" ;;
+    esac
+    uid=$(awk -F: -v n="$name" '$1 == n { print $3; exit }' /etc/passwd)
+    [ -n "$uid" ] && ensure_home "$name" "$uid"
+  done
+  for name in $BEFORE; do
+    case " $KEEP " in
+      *" $name "*) ;;
+      *) log "removing account $name (not in the record)" ;;
+    esac
+  done
+  return 0
 }
 
 case "$1" in

@@ -7,10 +7,15 @@
 # is appended when absent. Called by the init script at boot and by the
 # udhcpc hook on every lease event. Idempotent: the file is written only
 # when the block changes.
+#
+# The rootfs is read-only: at the first change after boot the file is
+# bind-mounted from a copy under /run/forgefirm (tmpfs) and the block is
+# written through the mount. Before that the image's own file shows.
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 
 ISSUE=/etc/issue
+STATE=/run/forgefirm/issue
 MARK_BEGIN='# ForgeFIRM addresses'
 MARK_END='# end'
 PANEL='Control panel: https://forgefirm.local/'
@@ -51,13 +56,21 @@ old=$(awk -v b="$MARK_BEGIN" -v e="$MARK_END" \
         '$0 == b { p = 1 } p { print } $0 == e { p = 0 }' "$ISSUE")
 [ "$new" = "$old" ] && exit 0
 
-tmp="$ISSUE.tmp.$$"
+# A mount at the file, read from /proc/mounts (mountpoint(1) judges a
+# file by its device numbers alone).
+if ! awk -v t="$ISSUE" '$2 == t { f = 1 } END { exit !f }' /proc/mounts; then
+  mkdir -p "${STATE%/*}" \
+    && cp -p "$ISSUE" "$STATE" \
+    && mount --bind "$STATE" "$ISSUE" || exit 1
+fi
+
+tmp="$STATE.tmp.$$"
 awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v blk="$new" '
   $0 == b { print blk; seen = 1; skip = 1; next }
   $0 == e && skip { skip = 0; next }
   !skip { print }
   END { if (!seen) print blk }
 ' "$ISSUE" > "$tmp" || { rm -f "$tmp"; exit 1; }
-chmod 0644 "$tmp"
-mv -f "$tmp" "$ISSUE"
+cat "$tmp" > "$ISSUE"
+rm -f "$tmp"
 exit 0

@@ -1,0 +1,6 @@
+# /etc/default/timestamp - ForgeFIRM
+# The last-known time: save-rtc.sh writes it at shutdown, bootmisc.sh
+# sets the clock from it at boot when it is later than the clock (the
+# board has no battery-backed RTC). The rootfs is read-only, so the file
+# lives with the machine state on /data.
+TIMESTAMP_FILE=/data/forgefirm/timestamp
