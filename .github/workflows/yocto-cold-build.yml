@@ -52,6 +52,12 @@ jobs:
           sudo locale-gen en_US.UTF-8
           pip3 install kas
 
+      # BitBake isolates the network of its tasks with a user namespace;
+      # the ubuntu-24.04 runner's AppArmor profile refuses that to an
+      # unprivileged process, so the build would stop before its first task.
+      - name: Allow unprivileged user namespaces (BitBake network isolation)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Build (rm_work, release image only)
         working-directory: forgefirm
         run: kas build kas/forgefirm-glowforge.yml:kas/ci.yml
