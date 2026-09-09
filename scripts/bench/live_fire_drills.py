@@ -657,7 +657,7 @@ DLADDER_LEN = 25.0                      # mm of burn per rung
 DLADDER_PITCH = 3.0                     # mm between rungs
 STREAM_RATE_HZ = 28160                  # machine tick (GFSINK_RATE default)
 PWM_PERIOD = 127                        # 7-bit power byte against PWMSAR
-CONF = os.environ.get('GFHOME_CONF') or '/data/forgefirm.conf'
+CONF = os.environ.get('GFHOME_CONF') or '/data/forgefirm/forgefirm.conf'
 PULSE_MIN_KEY = 'laser_pulse_min_ticks'
 PULSE_MIN_DEFAULT = 3                   # glowforge_laser.c PULSE_MIN_TICKS_DEFAULT
 

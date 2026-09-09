@@ -144,7 +144,7 @@ def forgectrl_post(path, **kw):
     return forgectrl_request("POST", path, **kw)
 
 
-SETTINGS_FILE = "/data/forgefirm.conf"
+SETTINGS_FILE = "/data/forgefirm/forgefirm.conf"
 
 
 def setting(key, default=None):

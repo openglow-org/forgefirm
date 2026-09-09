@@ -236,7 +236,7 @@ def image_health(ctx):
     ctx.check(not user_wd, "a userspace watchdog daemon is running: %s", user_wd)
 
     # 7. file modes and space
-    for path in ("/data/forgefirm/panel.token", "/data/forgefirm.conf"):
+    for path in ("/data/forgefirm/panel.token", "/data/forgefirm/forgefirm.conf"):
         if os.path.exists(path):
             m = stat.S_IMODE(os.stat(path).st_mode)
             ev[path] = "%o" % m

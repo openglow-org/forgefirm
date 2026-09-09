@@ -28,7 +28,7 @@ IMAGE_INSTALL:remove = "python3 ${FORGEFIRM_RELEASE_TRIM}"
 # broker, cooling engine, cameras, telemetry, settings, diagnostics, web
 # control panel, and A/B updates.
 # gfhome: one-shot Glowforge web-service homing, invoked by the controller
-# for $H when homing_mode = gfcloud (/data/forgefirm.conf).
+# for $H when homing_mode = gfcloud (/data/forgefirm/forgefirm.conf).
 # gfcloud: full Glowforge web-service controller daemon (the factory cloud
 # experience), started when controller_mode = cloud - mutually exclusive with
 # grblHAL. Pulls python3-ffmachine (shared web-service machine glue).
