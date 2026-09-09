@@ -44,6 +44,13 @@
 FORGEFIRM_MANIFEST_DIR ?= "${sysconfdir}/forgefirm-manifest.d"
 FORGEFIRM_MANIFEST_CONTENT_LAYERS ?= "meta-forgefirm meta-glowforge-bsp meta-openglow-core"
 FORGEFIRM_MANIFEST_PIN_SUFFIX ?= "-pin.inc"
+# The release version file. Like a pin file it is metadata, not platform
+# content: it carries FORGEFIRM_RELEASE and nothing else, the version
+# string is already outside the identity hash (below), and the release
+# gate proves the number against the rootfs stamp, the .fw meta-version
+# and the tag. Hashing it would make every version bump a platform
+# change and invalidate the campaign that authorizes the release.
+FORGEFIRM_MANIFEST_VERSION_SUFFIX ?= "forgefirm-release.inc"
 
 do_rootfs[depends] += "virtual/kernel:do_deploy kernel-module-glowforge:do_deploy"
 
@@ -88,7 +95,8 @@ def forgefirm_manifest_layers(d):
     and dirty flag of every layer checkout (informational)."""
     import os, subprocess
     content_layers = (d.getVar('FORGEFIRM_MANIFEST_CONTENT_LAYERS') or '').split()
-    skip = ('.md',) + tuple((d.getVar('FORGEFIRM_MANIFEST_PIN_SUFFIX') or '').split())
+    skip = (('.md',) + tuple((d.getVar('FORGEFIRM_MANIFEST_PIN_SUFFIX') or '').split())
+            + tuple((d.getVar('FORGEFIRM_MANIFEST_VERSION_SUFFIX') or '').split()))
     identity, build = {}, {}
     for layer in (d.getVar('BBLAYERS') or '').split():
         name = os.path.basename(layer.rstrip('/'))

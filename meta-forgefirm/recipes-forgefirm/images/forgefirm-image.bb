@@ -113,7 +113,12 @@ IMAGE_ROOTFS_MAXSIZE = "204800"
 # Release images carry the release version; the dev image overrides the
 # string with the build timestamp (the same DATETIME as the artifact
 # name) plus a dev tag.
-FORGEFIRM_RELEASE ?= "0.0.1"
+#
+# FORGEFIRM_RELEASE lives in its own file, which the manifest leaves out
+# of the layer content hash: the version is metadata, and a bump must not
+# read as a platform change and invalidate a campaign
+# (forgefirm-release.inc).
+require forgefirm-release.inc
 FORGEFIRM_VERSION_STRING ?= "v${FORGEFIRM_RELEASE}"
 
 write_forgefirm_version() {

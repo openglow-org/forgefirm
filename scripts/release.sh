@@ -45,7 +45,7 @@
 # forgefirm-source-v<version>.tar.gz, and refuses to pack a bundle in which
 # a recipe that needs source has none.
 #
-# Version contract: <version> == FORGEFIRM_RELEASE in forgefirm-image.bb
+# Version contract: <version> == FORGEFIRM_RELEASE in forgefirm-release.inc
 # == /etc/forgefirm-version ("v<version>") in the built rootfs == .fw
 # meta-version ("v<version>") == release tag ("v<version>").
 
@@ -55,6 +55,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DEPLOY_ROOT="$REPO/build/tmp/deploy"
 DEPLOY="$DEPLOY_ROOT/images/glowforge"
 IMAGE_BB="$REPO/meta-forgefirm/recipes-forgefirm/images/forgefirm-image.bb"
+# The release version, in its own file so a bump is not a platform change
+# (the manifest leaves it out of the layer content hash).
+RELEASE_INC="$REPO/meta-forgefirm/recipes-forgefirm/images/forgefirm-release.inc"
 INSTALLER="$REPO/scripts/install-forgefirm.sh"
 WARN_BYTES=$((170 * 1024 * 1024))
 FAIL_BYTES=$((195 * 1024 * 1024))
@@ -134,7 +137,7 @@ if [ "$MODE" = "dev" ]; then
   EXT4="${EXT4/forgefirm-image-glowforge/forgefirm-image-dev-glowforge}"
   [ -f "$EXT4" ] || die "dev rootfs not found: $EXT4"
   check_size
-  REL=$(sed -n 's/^FORGEFIRM_RELEASE ?= "\(.*\)"/\1/p' "$IMAGE_BB")
+  REL=$(sed -n 's/^FORGEFIRM_RELEASE ?= "\(.*\)"/\1/p' "$RELEASE_INC")
   DEVVER="v${REL}-dev-$(date +%Y%m%d%H%M%S)"
   OUT="$DEPLOY/forgefirm-dev.fw"
   "$REPO/scripts/mkfw.sh" "$EXT4" "$DEVVER" "$OUT" "$KEY"
@@ -163,9 +166,9 @@ else
 fi
 
 # Version single-source check.
-BB_REL=$(sed -n 's/^FORGEFIRM_RELEASE ?= "\(.*\)"/\1/p' "$IMAGE_BB")
+BB_REL=$(sed -n 's/^FORGEFIRM_RELEASE ?= "\(.*\)"/\1/p' "$RELEASE_INC")
 [ "$BB_REL" = "$VERSION" ] \
-  || die "FORGEFIRM_RELEASE in forgefirm-image.bb is '$BB_REL', not '$VERSION'"
+  || die "FORGEFIRM_RELEASE in forgefirm-release.inc is '$BB_REL', not '$VERSION'"
 
 # The beta rule: every release below 0.1.0 is a beta, and 0.1.0 is the
 # first release that is not. While the README carries the beta banner, a

@@ -52,8 +52,11 @@ CONTENT_LAYERS = {"meta-forgefirm": ("forgefirm", "meta-forgefirm"),
                   "meta-glowforge-bsp": ("meta-openglow", "meta-glowforge-bsp"),
                   "meta-openglow-core": ("meta-openglow", "meta-openglow-core")}
 # Left out of a layer's content, as in forgefirm-image-manifest.bbclass
-# (FORGEFIRM_MANIFEST_PIN_SUFFIX): documentation and the component pin files.
-LAYER_SKIP_SUFFIXES = (".md", "-pin.inc")
+# (FORGEFIRM_MANIFEST_PIN_SUFFIX, FORGEFIRM_MANIFEST_VERSION_SUFFIX):
+# documentation, the component pin files, and the release version file.
+# All three are metadata; hashing them would turn a pin bump or a version
+# bump into a platform change and invalidate every acceptance result.
+LAYER_SKIP_SUFFIXES = (".md", "-pin.inc", "forgefirm-release.inc")
 
 
 def git(args, cwd=None, input=None):
