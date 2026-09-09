@@ -146,12 +146,11 @@ JOB_M4 = [
     "M5",
 ]
 
-# Session Z: the lens is in the stream. The sender references the lens
-# (M103, as a commissioning card does), then a 1 mm move up and back at
-# the screw's 2.922 half-steps per millimeter: three Z steps with the
-# direction bit set, three with it clear.
+# Session Z: the lens is in the stream. The lens is referenced on its hall
+# edge at the controller's start, so Z is already open here: a 1 mm move up
+# and back at the screw's 2.922 half-steps per millimeter, three Z steps
+# with the direction bit set, three with it clear.
 JOB_Z = [
-    "M103 Z3 P14 Q20",
     "G0 Z4",
     "G0 Z3",
 ]

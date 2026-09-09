@@ -228,9 +228,12 @@ def check_cameras(ctx):
 @test("commission.check-motion", title="The motion check proves the rail, the lens reference, and the jogs",
       subsystem="commission", kind="auto", hardware="takeover", est_min=5,
       covers=DARK_COVERS + [("forgectrl", "src/super.c"), ("forgectrl", "src/liveness.c"),
+                            ("forgectrl", "src/lenshome.c"),
                             ("forgectrl", "src/accel.c"), ("forgectrl", "src/cool.c")],
       requires=["forgectrl.auth", "motion.pacing"],
-      description="POST /wiz/motion/start: the controller stops, the liveness probe runs, the lens "
+      description="POST /wiz/motion/start: the controller stops, the liveness probe runs and the "
+                  "lens takes its hall-edge reference behind it (a lens that cannot reach its "
+                  "edge is a motion fault, and no controller starts), the lens "
                   "finds the hall reference in five agreeing passes, the controller comes back in "
                   "loopback posture, and the head jogs 50 mm each way on X and Y with the "
                   "accelerometer as the witness. The one prompt (the jogs are about to move) is "

@@ -281,7 +281,9 @@ def settings_bounds(ctx):
               ("forgectrl", "src/curverec.*")],
       description="The panel page is served, /status carries the machine telemetry the panel and "
                   "the acceptance tool read (including the sys block: CPU busy percent over the "
-                  "interval since the previous read, memory used percent), and /cam/status "
+                  "interval since the previous read, memory used percent; and homed_axes, "
+                  "the axes that carry a reference, Z alone once the lens has taken its "
+                  "own at the controller's start), and /cam/status "
                   "answers. In GRBL mode with a live controller, /status also echoes the "
                   "controller's published state file as the grbl block (fresh age, machine "
                   "state, sender session, laser window and dose model, modal report), "
@@ -327,6 +329,32 @@ def panel_serves(ctx):
               "/status sys.cpu_pct is not a percent: %s", sys_)
     ctx.check(isinstance(sys_.get("mem_pct"), (int, float)) and 0.0 < sys_["mem_pct"] < 100.0,
               "/status sys.mem_pct is not a percent: %s", sys_)
+
+    # The lens takes its own reference on the hall edge at every
+    # controller start, so with a controller running Z is referenced on
+    # its own while X and Y wait for a home: homed_axes names the axes
+    # that carry one, and Z reads inside the lens reach rather than the
+    # zero an unreferenced axis would show.
+    axes = s.get("homed_axes")
+    ev["homed_axes"] = axes
+    ctx.check(isinstance(axes, int) and 0 <= axes <= 7,
+              "/status homed_axes is not an axis mask: %s", axes)
+    ctx.check(bool(s.get("homed")) == (axes == 7),
+              "/status homed (%s) disagrees with homed_axes (%s)",
+              s.get("homed"), axes)
+    st, mode0 = fc.get("/mode")
+    if isinstance(mode0, dict) and mode0.get("controller") == "running":
+        lens = s.get("lens") or {}
+        pos = s.get("pos") or {}
+        ctx.log("/status homed_axes=%s pos.z=%s reach=%s..%s", axes,
+                pos.get("z"), lens.get("reach_min"), lens.get("reach_max"))
+        ctx.check(axes is not None and axes & 4,
+                  "Z is not referenced with a controller running: %s", axes)
+        ctx.check(isinstance(pos.get("z"), (int, float))
+                  and lens.get("reach_min") is not None
+                  and lens["reach_min"] <= pos["z"] <= lens["reach_max"],
+                  "Z %s is outside the lens reach %s..%s", pos.get("z"),
+                  lens.get("reach_min"), lens.get("reach_max"))
 
     st, cam = fc.get("/cam/status")
     ev["cam_status"] = st
