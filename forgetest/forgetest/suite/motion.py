@@ -546,6 +546,120 @@ def _liveness_masked_restart(ctx, fc, ev):
     ctx.log("PASS: masked restart probed MOTION OK on the first try, mask cleared, controller up")
 
 
+# ------------------------------------------------- the gate and the lid
+
+def _wait_controller(ctx, fc, states, timeout, motion=None):
+    """GET /mode until the controller state is one of `states` (and, for a
+    running one, the motion verdict is `motion` when given). Tolerates a
+    daemon that is still coming up. Returns the last document read."""
+    m = {}
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        ctx.checkpoint()
+        try:
+            st, m = fc.get("/mode")
+        except hw.HwError:
+            m = None
+        if isinstance(m, dict) and m.get("controller") in states:
+            if motion is None or m.get("controller") != "running" or m.get("motion") == motion:
+                return m
+        ctx.sleep(1)
+    return m if isinstance(m, dict) else {}
+
+
+def _button_led(ctx, window_s=1.2):
+    """The commanded level of the button's red, green, and blue channels
+    (ledtrig_smooth's target), sampled over a blink period or two and
+    reduced to the maximum per channel: with a pulse set, target reads 0
+    through the off half of every blink. None when the LEDs are not
+    readable."""
+    best = None
+    t0 = time.time()
+    while time.time() - t0 < window_s:
+        out = []
+        for ch in (1, 2, 3):
+            try:
+                with open("/sys/class/leds/button_led_%d/target" % ch, "r", encoding="utf-8") as f:
+                    out.append(int(f.read().strip()))
+            except (OSError, ValueError):
+                return None
+        best = out if best is None else [max(a, b) for a, b in zip(best, out)]
+        ctx.sleep(0.1)
+    return best
+
+
+@test("motion.gate-waits-for-lid", title="The motion gate waits for the lid", subsystem="motion",
+      kind="operator", est_min=2,
+      covers=[("forgectrl", "src/super.*"), ("forgectrl", "src/liveness.*"), ("forgectrl", "src/led.*"),
+              ("forgectrl", "src/ui/panel.js")],
+      requires=["motion.liveness-probe"], actions=["lid"],
+      steps=["The lid opens, forgectrl is restarted (the gate runs at the first spawn of a "
+             "session: power-on, a daemon restart), the lid closes: the head does not move "
+             "while the lid is open, then makes the 15 mm probe move (+X first)."],
+      description="With the lid open when forgectrl starts (power-on with the lid up, or a "
+                  "daemon restart) the supervisor starts nothing: GET /mode reports controller "
+                  "waiting with why naming the lid, motion unverified, no pid, the button blinks "
+                  "amber, and no probe line reaches the log. When the lid closes the probe runs "
+                  "(MOTION OK), the lens takes its reference, and the controller comes up "
+                  "verified with the button handed back.")
+def gate_waits_for_lid(ctx):
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle at the start")
+    try:
+        ctx.act("lid", "open")
+        off = _log_offset(FORGECTRL_LOG)
+        rc, out = hw.initd("forgectrl", "restart")
+        ctx.check(rc == 0, "forgectrl restart -> rc %s", rc)
+        m = _wait_controller(ctx, fc, ("waiting", "running", "motion-fault"), 60)
+        ev["waiting"] = m
+        ctx.log("mode with the lid open: %s", m)
+        ctx.check(m.get("controller") == "waiting",
+                  "controller is %r with the lid open, expected waiting", m.get("controller"))
+        ctx.check("lid" in (m.get("why") or ""), "why does not name the lid: %r", m.get("why"))
+        ctx.check(m.get("motion") == "unverified", "motion reads %r while waiting", m.get("motion"))
+        ctx.check(not m.get("pid"), "a controller (pid %s) runs while the gate waits", m.get("pid"))
+        led = _button_led(ctx)
+        ev["led_waiting"] = led
+        ctx.log("button LED targets while waiting (r, g, b): %s", led)
+        ctx.check(led is not None and led[0] > 0 and led[1] > 0 and led[2] == 0,
+                  "the button does not blink amber while the gate waits: %s", led)
+        ctx.sleep(3)
+        st, m2 = fc.get("/mode")
+        ctx.check(isinstance(m2, dict) and m2.get("controller") == "waiting", "the wait did not hold: %s", m2)
+        lines = _probe_lines(FORGECTRL_LOG, off)
+        ctx.check(not lines, "the probe ran with the lid open: %s", lines[:1])
+
+        t_close = time.time()
+        ctx.act("lid", "close")
+        m = _wait_controller(ctx, fc, ("running", "motion-fault"), 150, motion="verified")
+        ev["after_close"] = m
+        ev["close_to_running_s"] = round(time.time() - t_close, 1)
+        ctx.log("mode %.1f s after the lid closed: %s", time.time() - t_close, m)
+        ctx.check(m.get("controller") == "running" and m.get("motion") == "verified",
+                  "the controller did not come up verified after the lid closed: %s", m)
+        t1 = time.time()
+        lines = _probe_lines(FORGECTRL_LOG, off)
+        while not lines and time.time() - t1 < 10:
+            ctx.sleep(0.5)
+            lines = _probe_lines(FORGECTRL_LOG, off)
+        ev["probe_lines"] = lines[-3:]
+        ctx.check(lines and "MOTION OK" in lines[0],
+                  "the probe after the lid closed was not MOTION OK: %s", lines[:1])
+        led = _button_led(ctx)
+        ev["led_running"] = led
+        ctx.check(led is None or led[0] == 0 or led[2] > 0,
+                  "the amber wait pattern is still on the button after the start: %s", led)
+    finally:
+        if ctx.switch("lid") is False:
+            ctx.act("lid", "close", fail=False)
+        m = _wait_controller(ctx, fc, ("running", "motion-fault"), 150)
+        if m.get("controller") != "running":
+            fc.post("/controller/start")
+            _wait_controller(ctx, fc, ("running", "motion-fault"), 150)
+    ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle after the drill")
+
+
 # ---------------------------------------------------------------- cancel / abort
 
 @test("motion.cancel-abort", title="Jog cancel and controlled abort recover cleanly", subsystem="motion",
