@@ -94,13 +94,28 @@ class TreeManifestTests(unittest.TestCase):
         self.assertNotEqual(self.mod.layer_content(self.layer), base)
 
     def test_layer_hash_matches_the_bbclass_rule(self):
-        # The same skip list as FORGEFIRM_MANIFEST_PIN_SUFFIX + *.md in
-        # forgefirm-image-manifest.bbclass.
+        # The same skip list as *.md plus FORGEFIRM_MANIFEST_PIN_SUFFIX and
+        # FORGEFIRM_MANIFEST_VERSION_SUFFIX in
+        # forgefirm-image-manifest.bbclass. The two implementations compute
+        # the same identity - one on the build host, one on a workstation -
+        # so a suffix added to either without the other is the failure this
+        # guards.
         bbclass = os.path.join(REPO, "meta-forgefirm", "classes", "forgefirm-image-manifest.bbclass")
         with open(bbclass, encoding="utf-8") as f:
             text = f.read()
         self.assertIn('FORGEFIRM_MANIFEST_PIN_SUFFIX ?= "-pin.inc"', text)
-        self.assertEqual(self.mod.LAYER_SKIP_SUFFIXES, (".md", "-pin.inc"))
+        self.assertIn('FORGEFIRM_MANIFEST_VERSION_SUFFIX ?= "forgefirm-release.inc"', text)
+        self.assertEqual(self.mod.LAYER_SKIP_SUFFIXES,
+                         (".md", "-pin.inc", "forgefirm-release.inc"))
+
+    def test_layer_hash_ignores_the_release_version(self):
+        # The version is metadata: setting the release number must not move
+        # the layer hash, or the bump would invalidate the campaign that
+        # authorizes the release.
+        self.write("forgefirm-release.inc",'FORGEFIRM_RELEASE ?= "0.0.1"\n')
+        base = self.mod.layer_content(self.layer)
+        self.write("forgefirm-release.inc",'FORGEFIRM_RELEASE ?= "0.0.2"\n')
+        self.assertEqual(self.mod.layer_content(self.layer), base)
 
 
 if __name__ == "__main__":
