@@ -167,7 +167,8 @@ def check_sensors(ctx):
                   "for 35 s, the purge is measured on and off, and five settings are written: the "
                   "four floors at 55 percent of steady and the grace from the slowest spin-up. Each "
                   "fan must read at least 1000 rpm. The five settings are put back as found at the "
-                  "end and the controller must be running again.")
+                  "end, the purge fan is on again and drawing over the floor the check just wrote, "
+                  "and the controller must be running again.")
 def check_airflow(ctx):
     keys = ["cool_tach_exhaust_min_rpm", "cool_tach_intake_min_rpm", "cool_tach_air_assist_min_rpm",
             "cool_purge_min_current", "cool_fan_grace_s"]
@@ -186,6 +187,20 @@ def check_airflow(ctx):
         for k in keys:
             ctx.check(s.get(k) == floors.get(k), "%s reads %r, the check wrote %r", k, s.get(k), floors.get(k))
         ctx.log("floors: %s", json.dumps(floors))
+        # The check switches purge air off to read its off current. Leaving
+        # it off costs the next job an airflow hold mid-cut, judged against
+        # the very floor written above, and nothing puts it back until the
+        # daemon restarts: the engine's idle phase never re-applies its own
+        # duties. Prove the machine is whole, not just measured.
+        purge_on = ctx.sysfs("head/purge_air")
+        ctx.check(purge_on == "1", "purge air reads %r after the check, expected 1 (on)", purge_on)
+        gate = ((ctx.forgectrl.get("/cool/status")[1] or {}).get("fan_gates") or {}).get("purge") or {}
+        ctx.evidence["purge_after"] = {"purge_air": purge_on, "gate": gate}
+        ctx.log("purge after the check: commanded %s, drawing %s against the %s floor",
+                purge_on, gate.get("reading"), gate.get("floor"))
+        ctx.check((gate.get("reading") or 0) >= (gate.get("floor") or 0),
+                  "purge draws %s, under the %s floor the check just wrote: the next job would be held",
+                  gate.get("reading"), gate.get("floor"))
     ok = ctx.wait_for(lambda: (ctx.forgectrl.get("/mode")[1] or {}).get("controller") == "running", 60)
     ctx.check(ok is not None, "the controller did not come back after the check")
 

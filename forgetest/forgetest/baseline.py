@@ -65,6 +65,21 @@ FIXED_SYSFS = [
     ("head/white_led", "0"),
     ("thermal/heater_pwm", "0"),
     ("thermal/tec_on", "0"),
+    # Purge air runs continuously, as on the factory machine: the engine
+    # turns it on at start and only a listening (the quiet hold) switches
+    # it off, which puts it back on release. A check that switches it off
+    # to measure it and forgets leaves the machine one job away from an
+    # airflow hold mid-cut, judged against the floor that same check just
+    # wrote, and nothing notices until the daemon restarts: the engine's
+    # idle phase never re-applies its own duties. The airflow check did
+    # exactly that, and it reached an operator's first fire.
+    ("head/purge_air", "1"),
+    # The lens motor at rest: hold current, half step. The lens checks and
+    # the sheet cards take it to the run current in full or half step and
+    # must hand it back, or the motor sits hot and the next reference
+    # starts from a state nobody chose.
+    ("head/z_current", "1"),
+    ("head/z_mode", "1"),
 ]
 
 # The subset the GRBL controller writes at its start: checked and restored

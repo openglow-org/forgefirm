@@ -994,7 +994,21 @@ class Runner:
             run.log(traceback.format_exc().rstrip())
         self.fixture_release(run)
         try:
-            self._baseline_post(run, captured)
+            left = self._baseline_post(run, captured)
+            # A test hands the machine back as it found it. Anything left
+            # behind was recorded here and nothing more, so a check that
+            # measured correctly and walked away with the machine in a
+            # state nobody chose still passed: that is how the airflow
+            # check came to leave the purge fan off, and an operator met
+            # it at their first fire instead of the bench meeting it here.
+            # The pass is now conditional on the machine being whole. A
+            # leftover the baseline put back still fails: the restore is
+            # the bench cleaning up after a defect, not the defect's
+            # absence.
+            if left and result == _campaign.PASS:
+                result = _campaign.FAIL
+                message = ("the machine was not handed back as found: %s"
+                           % "; ".join(str(x) for x in left))
         except Exception as e:  # noqa: BLE001 - never lose the result over the cleanup
             run.log("baseline: post pass errored: %s: %s" % (type(e).__name__, e))
         duration = int(time.time() - run.started)
