@@ -369,7 +369,6 @@ cat <<EOF
 Pre-publish checklist (docs.forgefirm.org, Developers, "Release flow"):
   - meta-openglow pushed; kas config flipped to the pinned-remote block
   - kas lock refreshed
-  - self-containment proven from a fresh clone
   - forgefirm-docs current for this release (the currency rule) and pushed
 
 Publish (from a directory with an authenticated gh):
