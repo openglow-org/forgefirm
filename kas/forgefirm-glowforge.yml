@@ -77,21 +77,22 @@ repos:
   # so in-place BSP edits are what gets built). The kernel-module-glowforge
   # sources are NOT a layer; the kernel-module-glowforge.bb recipe fetches them
   # by pinned SRCREV, so kas does not manage them here.
-  meta-openglow:
-    path: ../meta-openglow
-    layers:
-      meta-openglow-core:
-      meta-glowforge-bsp:
-  #
-  # Pinned-remote alternative for a fully self-contained clone (see the site,
-  # Developers, "Release flow"):
+  # Release: the pinned-remote block, the commit in the lock file
+  # (kas/forgefirm-glowforge.lock.yml). The local-sibling alternative for
+  # development (no url => kas performs no git ops, so in-place BSP edits
+  # are what gets built; see the site, Developers, "Release flow"):
   #   meta-openglow:
-  #     url: https://github.com/openglow-org/meta-openglow.git
-  #     branch: scarthgap          # pin via kas lock / a tag at release
-  #     path: layers/meta-openglow
+  #     path: ../meta-openglow
   #     layers:
   #       meta-openglow-core:
   #       meta-glowforge-bsp:
+  meta-openglow:
+    url: https://github.com/openglow-org/meta-openglow.git
+    branch: scarthgap
+    path: layers/meta-openglow
+    layers:
+      meta-openglow-core:
+      meta-glowforge-bsp:
 
 # ----------------------------------------------------------------------------
 # local.conf additions
