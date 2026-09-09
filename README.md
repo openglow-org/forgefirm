@@ -35,23 +35,6 @@ truth for every fact about the machine and the firmware.
 | Downloads | [Releases](https://github.com/openglow-org/forgefirm/releases) |
 | Questions | [Community forum](https://community.openglow.org) |
 
-## What it does
-
-Two controller modes, selected in the web panel and switchable while the
-machine is idle. **GRBL mode** runs grblHAL on the machine, speaking Grbl 1.1
-over TCP port 23, so LightBurn, UGS and cncjs drive the laser directly; motion
-runs on the board's own hardware step engine, fed live by a local planner.
-**Cloud mode** signs in to the Glowforge web service as itself, so the phone
-and web apps work as they always did; it is optional and off by default.
-Around both sits a local web control panel: status and position, coolant and
-fan telemetry, safety-switch states, a live camera stream, settings, hardware
-diagnostics, firmware updates and boot-slot management.
-
-The control board is common to the Basic, the Plus and the Pro, and one image
-covers every model. The 5 MP camera is hardware validated; the 8 MP camera of
-an "HD" machine has a complete path that has never run on one
-([Cameras](https://docs.forgefirm.org/technical/machine/cameras/)).
-
 ## Build
 
 ```sh
