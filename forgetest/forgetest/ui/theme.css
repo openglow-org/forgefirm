@@ -238,6 +238,7 @@ header {
   margin-left: auto;
 }
 #themebtn,
+#logsbtn,
 #logoutbtn {
   background: transparent;
   color: rgba(255, 255, 255, 0.75);
@@ -249,6 +250,7 @@ header {
   white-space: nowrap;
 }
 #themebtn:hover,
+#logsbtn:hover,
 #logoutbtn:hover {
   color: #fff;
   border-color: rgba(255, 255, 255, 0.6);
@@ -691,4 +693,14 @@ footer a {
     padding-left: 12px;
     padding-right: 12px;
   }
+}
+
+/* The setup's log-bundle line, under the header: the result of the
+   header's Download logs, or why the machine refused it. */
+.wz-logs-msg {
+  max-width: 1100px;
+  margin: 6px auto 0;
+  padding: 0 16px;
+  min-height: 16px;
+  text-align: right;
 }
