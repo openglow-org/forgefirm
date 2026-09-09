@@ -146,14 +146,19 @@ JOB_M4 = [
     "M5",
 ]
 
-# Session Z: the lens is in the stream. The lens is referenced on its hall
-# edge at the controller's start, so Z is already open here: a 1 mm move up
-# and back at the screw's 2.922 half-steps per millimeter, three Z steps
-# with the direction bit set, three with it clear.
+# Session Z: the lens is in the stream. The controller takes the lens
+# reference the daemon left (staged by the runner below), so Z is open
+# here: a 1 mm move up and back at the screw's 2.922 half-steps per
+# millimeter, three Z steps with the direction bit set, three with it
+# clear.
 JOB_Z = [
     "G0 Z4",
     "G0 Z3",
 ]
+
+# The session opens at the hall edge, so the edge is pinned to the height
+# the moves are counted from: Z3 is 9 half-steps on the screw, Z4 is 12.
+LENS_CONF = "lens_hall_edge_z_mm = 3\n"
 
 # Session B: M3 constant power to the end of the stream. The core never
 # issues a laser-off update for M3, so the stream engine itself must
@@ -439,6 +444,16 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
     verdict = os.path.join(workdir, "cooling.state")
     env = dict(os.environ, GFSINK_DUMP=dump, GF_VERDICT_FILE=verdict,
                FFLOG_STDERR="1")
+    # The lens reference the daemon leaves before a controller starts:
+    # forgectrl sweeps the carriage onto the hall edge and marks it, and
+    # the controller opens the Z envelope on that mark. Without one Z
+    # stays pinned and every Z move is refused, so a session with the
+    # lens in it has to stage the mark the way the daemon writes it.
+    state_dir = os.path.join(workdir, "state")
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, "lens.home"), "w") as f:
+        f.write("edge 0 3 3\n")
+    env["GF_STATE_DIR"] = state_dir
     env.pop("GFSINK", None)
     if conf is not None:
         conf_path = os.path.join(workdir, "forgefirm.conf")
@@ -791,7 +806,7 @@ def main():
     check_termination("m4", data)
 
     # --- session Z: the lens in the stream --------------------------------
-    zdata = run_session("z", JOB_Z, arm_required=False)
+    zdata = run_session("z", JOB_Z, conf=LENS_CONF, arm_required=False)
     check_z_move("z", zdata)
     gap_a = check_fire_gaps("m4", data)
     print("PASS [m4]: %d bytes, %d power bytes, %d fire ticks, powers %s, "
