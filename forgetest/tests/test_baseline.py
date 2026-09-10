@@ -52,6 +52,13 @@ class BaselineTests(unittest.TestCase):
         # the class interface writes 'target'; the fake mirrors it into brightness
         # only when the test asks (see _sync_leds)
 
+    def _led2(self, name, target, brightness):
+        """Both attributes of one button LED: the trigger's commanded
+        level and the fade that follows it."""
+        for a, v in (("target", target), ("brightness", brightness)):
+            with open(self.leds + name + "/" + a, "w") as f:
+                f.write(v)
+
     def _sync_leds(self):
         for name in baseline.BUTTON_LEDS:
             p = self.leds + name + "/target"
@@ -368,6 +375,29 @@ class BaselineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TransientNotLeftoverTests(BaselineTests):
+    """A leftover is what a run left behind, not the machine part-way
+    through its own work. Found on the bench reference, where
+    laser.arm-wait-lid passed every check it makes and failed its
+    hand-back on the post-job smoke clear."""
+
+    def test_a_fading_button_led_is_not_a_leftover(self):
+        # the trigger fades brightness toward target: target 0 with
+        # brightness still high is the fade from a level the machine ended
+        for name in baseline.BUTTON_LEDS:
+            self._led2(name, target="0", brightness="900")
+        left = self.bl().enforce("post", captured=None)
+        self.assertEqual([x for x in left if x.item.startswith("leds/")], [])
+
+    def test_a_lit_button_led_is_a_leftover(self):
+        # a target the run left standing is dirt, whatever the fade reads
+        self._led2(baseline.BUTTON_LEDS[0], target="1014", brightness="0")
+        left = self.bl().enforce("post", captured=None)
+        items = [x for x in left if x.item.startswith("leds/")]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].found, "1014")
 
 
 class PositionDeadbandTests(unittest.TestCase):

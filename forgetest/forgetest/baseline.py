@@ -182,12 +182,19 @@ def leds_root():
     return r if r.endswith("/") else r + "/"
 
 
-def read_led(name):
-    try:
-        with open(leds_root() + name + "/brightness") as f:
-            return f.read().strip()
-    except OSError:
-        return None
+def read_led(name, attr="target"):
+    """A button LED's commanded level. The trigger fades brightness toward
+    target, so brightness is where the fade has reached and target is what
+    the machine was told: a run that left the button lit left a target, and
+    a run that ended a moment ago may still be fading from one. Falls back
+    to brightness where no target exists."""
+    for a in (attr, "brightness"):
+        try:
+            with open(leds_root() + name + "/" + a) as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    return None
 
 
 def write_led(name, value):
@@ -545,7 +552,14 @@ class Baseline:
             before = (mode.get("controller"), mode.get("motion"))
             mode = self.wait_settled() or mode
             if mode.get("controller") == "running" and mode.get("motion") == "verified":
-                left.append(Leftover("controller", "%s/%s" % before, "running/verified", "waited"))
+                # The supervisor's own work: a takeover ends by starting
+                # forgectrl again, and the respawn runs the liveness probe
+                # and the lens reference before the controller is up and
+                # motion is verified. Waiting for that is right; calling
+                # it a leftover is not, because the run did put it back -
+                # the machine was still doing what it was asked.
+                self.log("controller: %s/%s settled to running/verified on its own; "
+                         "the supervisor's own start, not a leftover" % before)
             else:
                 left.append(Leftover("controller", "%s/%s" % before, "running/verified",
                                      "failed: %s/%s" % (mode.get("controller"), mode.get("motion"))))
@@ -553,14 +567,23 @@ class Baseline:
         st, s = self.fc_get("/status")
         if st == 200 and isinstance(s, dict):
             if s.get("state") != "idle":
-                if s.get("state") == "underrun":
+                # An underrun is the run's: the engine ran out of bytes and
+                # the fault is acknowledged here. Any other state is the
+                # machine finishing what it was given - the ring draining
+                # to the end of a job - and it reaches idle on its own.
+                underrun = s.get("state") == "underrun"
+                if underrun:
                     try:
                         hw.sysfs_write("cnc/stop", "1")     # ack
                     except OSError:
                         pass
                 w = self._wait("idle", lambda: (self.fc_get("/status")[1] or {}).get("state") == "idle", IDLE_S)
-                left.append(Leftover("state", s.get("state"), "idle",
-                                     "waited" if w is not None else "failed: not idle"))
+                if w is not None and not underrun:
+                    self.log("state: %s reached idle on its own after %.0f s; the machine "
+                             "finishing, not a leftover" % (s.get("state"), w))
+                else:
+                    left.append(Leftover("state", s.get("state"), "idle",
+                                         "waited" if w is not None else "failed: not idle"))
             if s.get("laser_locked") is False:
                 try:
                     hw.sysfs_write("cnc/laser_latch", "1")
@@ -575,18 +598,29 @@ class Baseline:
                 found = "%s/armed=%s/hold=%s" % (c.get("phase"), c.get("armed"), c.get("hold"))
                 idle = lambda: (lambda x: x.get("phase") == "idle" and not x.get("armed")     # noqa: E731
                                 and not x.get("hold"))(self.fc_get("/cool/status")[1] or {})
+                # Armed, or holding, is the run's doing. A phase alone is
+                # not: the engine clears smoke at run duty after an armed
+                # session and cools down after a hot one, both timed and
+                # both ending on their own. Waiting for that is right;
+                # calling it a leftover is not, because nothing was left -
+                # the machine was still finishing.
+                dirt = bool(c.get("armed") or c.get("hold"))
                 w = self._wait("cool idle", idle, COOL_IDLE_S)
-                # The engine holds for a job. A run that ended without
-                # ending its job leaves one alive, and no amount of
-                # waiting ends it: stand the machine down and let the
-                # supervisor bring the controller back clean.
-                act = "waited"
-                if w is None:
-                    self.stand_down("the cooling engine is still %s" % found)
-                    w = self._wait("cool idle", idle, COOL_IDLE_S)
-                    act = "restored (stood the machine down)"
-                left.append(Leftover("cool", found, "idle/unarmed/no hold",
-                                     act if w is not None else "failed: still %s" % found))
+                if w is not None and not dirt:
+                    self.log("cool: %s ended on its own after %.0f s; the engine's own post-job "
+                             "work, not a leftover" % (found, w))
+                else:
+                    # The engine holds for a job. A run that ended without
+                    # ending its job leaves one alive, and no amount of
+                    # waiting ends it: stand the machine down and let the
+                    # supervisor bring the controller back clean.
+                    act = "waited"
+                    if w is None:
+                        self.stand_down("the cooling engine is still %s" % found)
+                        w = self._wait("cool idle", idle, COOL_IDLE_S)
+                        act = "restored (stood the machine down)"
+                    left.append(Leftover("cool", found, "idle/unarmed/no hold",
+                                         act if w is not None else "failed: still %s" % found))
 
     def _lamp_side(self, left):
         """The lid lamp at forgectrl's idle level (the lid_lamp_idle setting).
@@ -650,6 +684,9 @@ class Baseline:
                 except OSError as e:
                     act = "failed: %s" % e
                 left.append(Leftover("leds/" + name, got, "0", act))
+            elif (read_led(name, "brightness") or "0") != "0":
+                self.log("leds/%s: target 0, brightness %s; the fade from a level the machine "
+                         "itself ended, not a leftover" % (name, read_led(name, "brightness")))
 
     def _return_head(self, was, now):
         """Jog the head back along its own path by the kernel-measured X/Y
