@@ -1285,8 +1285,13 @@ def interlock_cancel_home(ctx):
 def lid_policy_hold(ctx):
     ev = ctx.evidence
     fc = ctx.forgectrl
-    was = (fc.settings() or {}).get("lid_policy") or "cancel"
+    # What the machine had, exactly: an unset lid_policy reads as the empty
+    # string and behaves as cancel, and writing the word back where the
+    # machine had nothing is a leftover the hand-back reports. The default
+    # is for reading the value, never for restoring it.
+    was = (fc.settings() or {}).get("lid_policy", "")
     ev["lid_policy_before"] = was
+    ev["lid_policy_in_force"] = was or "cancel"
     st, _b = fc.post("/settings", data={"lid_policy": "hold"})
     ctx.check(st == 200, "could not set lid_policy=hold (%s)", st)
     ctx.check(((fc.settings() or {}).get("lid_policy")) == "hold", "lid_policy did not take")
@@ -1333,7 +1338,7 @@ def lid_policy_hold(ctx):
         machine_idle(ctx)
     finally:
         st, _b = fc.post("/settings", data={"lid_policy": was})
-        ev["lid_policy_restored"] = (fc.settings() or {}).get("lid_policy")
+        ev["lid_policy_restored"] = (fc.settings() or {}).get("lid_policy", "")
         ctx.log("lid_policy restored to %s", ev["lid_policy_restored"])
     ctx.check(ev["lid_policy_restored"] == was, "lid_policy was not restored to %r", was)
     ctx.log("PASS: lid_policy=hold parked the job in Door and the cycle start finished it (%.3f mm)",
