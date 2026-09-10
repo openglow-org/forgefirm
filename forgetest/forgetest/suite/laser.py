@@ -566,11 +566,19 @@ def m5_rapid_dark(ctx):
         ctx.check(base, "forgectrl /status or /cool/status unavailable")
         ctx.check(not base["emission"], "emission_samples nonzero before the job (%s)", base["emission"])
         ctx.ready(ARM_CUE % "20 mm +X")
+        # +20 out on the cut, then the two rapids the test is about, then
+        # a third that puts the head back where the job found it: the
+        # first two net to +20 and a job that walks the head 20 mm and
+        # leaves it there is dirt the hand-back has to jog out. The
+        # return is inside the sampling window and after the M5, so it is
+        # one more rapid that must be dark, which is what the test asks
+        # of the other two.
         job = ["G91", "G21", "M3", "S400",
                "G1 X20 F600",
                "M5", "G4 P2.5",
                "G0 X-20", "G4 P2.5",
                "G0 X20", "G4 P2.5",
+               "G0 X-20", "G4 P0.5",
                "G90", "M2"]
         ctx.arm_press()
         try:
