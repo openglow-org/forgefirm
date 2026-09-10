@@ -456,6 +456,37 @@ class Baseline:
             time.sleep(1.0)
         return None
 
+    def stand_down(self, why):
+        """End whatever the machine is still doing, and prove it ended.
+
+        A run that dies mid-job leaves the job alive behind it: the
+        cooling engine armed and holding for a job nothing will finish,
+        the fans at run duty, and the rest of the program still queued in
+        the pulse ring. Waiting does not end any of that - the engine is
+        holding correctly, for a job that is never coming back.
+
+        Stopping the controller ends it. The supervisor brings the
+        controller back, the arm and the hold go with the job, and the
+        ring is empty on the way in. This is what the ring-residue
+        message has always told an operator to do; the hand-back does it
+        instead of saying it.
+
+        Returns the /mode body the machine settled on, or None."""
+        self.log("baseline: standing the machine down (%s): stopping the controller" % why)
+        st, _b = self.fc_post("/controller/stop")
+        if st != 200:
+            self.log("baseline: stand-down: /controller/stop -> %s" % st)
+        deadline = time.time() + 30
+        while time.time() < deadline and not self.abort():
+            body = self.fc_get("/mode")[1] or {}
+            if body.get("controller") != "running":
+                break
+            time.sleep(1.0)
+        st, _b = self.fc_post("/controller/start")
+        if st != 200:
+            self.log("baseline: stand-down: /controller/start -> %s" % st)
+        return self.wait_settled()
+
     def cloud_mode(self):
         return self.mode == "cloud"
 
@@ -542,11 +573,20 @@ class Baseline:
         if st == 200 and isinstance(c, dict):
             if c.get("phase") != "idle" or c.get("armed") or c.get("hold"):
                 found = "%s/armed=%s/hold=%s" % (c.get("phase"), c.get("armed"), c.get("hold"))
-                w = self._wait("cool idle", lambda: (lambda x: x.get("phase") == "idle" and not x.get("armed")
-                                                    and not x.get("hold"))(self.fc_get("/cool/status")[1] or {}),
-                               COOL_IDLE_S)
+                idle = lambda: (lambda x: x.get("phase") == "idle" and not x.get("armed")     # noqa: E731
+                                and not x.get("hold"))(self.fc_get("/cool/status")[1] or {})
+                w = self._wait("cool idle", idle, COOL_IDLE_S)
+                # The engine holds for a job. A run that ended without
+                # ending its job leaves one alive, and no amount of
+                # waiting ends it: stand the machine down and let the
+                # supervisor bring the controller back clean.
+                act = "waited"
+                if w is None:
+                    self.stand_down("the cooling engine is still %s" % found)
+                    w = self._wait("cool idle", idle, COOL_IDLE_S)
+                    act = "restored (stood the machine down)"
                 left.append(Leftover("cool", found, "idle/unarmed/no hold",
-                                     "waited" if w is not None else "failed: still %s" % found))
+                                     act if w is not None else "failed: still %s" % found))
 
     def _lamp_side(self, left):
         """The lid lamp at forgectrl's idle level (the lid_lamp_idle setting).
@@ -625,10 +665,18 @@ class Baseline:
         # Never jog on top of stale bytes: a run started now would replay
         # whatever the ring still holds before the jog, in a direction and
         # for a distance nobody asked for. Report and leave the head.
+        # Stale bytes in the ring are the last job's, and a jog now would
+        # replay them before its own. The ring empties when the
+        # controller restarts, so the hand-back restarts it rather than
+        # leaving the head where it is and the bytes where they are.
         residue = read_ring_residue()
         if residue:
-            return ("unrestorable: %d unplayed bytes queued in the kernel ring - a jog would "
-                    "replay them; clear the ring (controller restart) before moving" % residue)
+            self.log("baseline: %d unplayed bytes in the kernel ring before the return" % residue)
+            self.stand_down("%d unplayed bytes in the kernel ring" % residue)
+            residue = read_ring_residue()
+            if residue:
+                return ("unrestorable: %d unplayed bytes still queued in the kernel ring after a "
+                        "controller restart - a jog would replay them" % residue)
         # a controller may be inside a respawn backoff (seconds): wait for it
         mode = None
         deadline = time.time() + 30

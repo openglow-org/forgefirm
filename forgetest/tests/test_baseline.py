@@ -154,15 +154,31 @@ class BaselineTests(unittest.TestCase):
         b = self.bl()
         cap = b.capture()
         # the run left 40 unplayed bytes queued in the kernel ring and the
-        # head 1000 counts out: the residue is reported, and the return jog
-        # is refused (it would replay the residue first)
+        # head 1000 counts out: the hand-back stands the machine down to
+        # empty the ring, and only refuses the return jog when the bytes
+        # are still there afterwards (they are here: no daemon to restart
+        # a controller)
         self._pos_bytes(1000, 0, 0, 100, 140)
         left = b.enforce("post", captured=cap)
         items = {x.item: x for x in left}
         self.assertIn("pulse ring", items)
         self.assertEqual(items["pulse ring"].found, "40 unplayed bytes")
-        self.assertIn("unplayed bytes queued", items["position"].action)
+        self.assertIn("still queued", items["position"].action)
+        self.assertIn("after a controller restart", items["position"].action)
         self.assertEqual(baseline.read_ring_residue(), 40)
+
+    def test_the_hand_back_stands_the_machine_down_for_residue(self):
+        """It acts, it does not report: a run that left bytes in the ring
+        gets a controller restart out of the hand-back, because that is
+        what empties the ring."""
+        b = self.bl()
+        cap = b.capture()
+        called = []
+        b.stand_down = lambda why: called.append(why)
+        self._pos_bytes(1000, 0, 0, 100, 140)
+        b.enforce("post", captured=cap)
+        self.assertEqual(len(called), 1)
+        self.assertIn("unplayed bytes", called[0])
 
     def test_clean_ring_reads_zero_residue(self):
         self.assertEqual(baseline.read_ring_residue(), 0)
