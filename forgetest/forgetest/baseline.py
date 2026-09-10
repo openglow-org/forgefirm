@@ -87,9 +87,14 @@ FIXED_SYSFS = [
 # every pulse header (step_freq 10 kHz, the run currents), runs at the
 # service's own x8 with the module's ramp whatever xy_microsteps says, and
 # hands the hold currents back at idle; forcing the GRBL values under it
-# would be the baseline configuring another controller's machine.
+# would be the baseline configuring another controller's machine. The Z
+# pair belongs with them: the cloud client takes the lens microstep mode
+# from the pulse header it is playing (ZSmd, gfhardware z_axis
+# set_mode_from_puls) and the current with it, so a job whose header asks
+# for full step leaves z_mode 0 behind by doing what it was told.
 GRBL_CONTROLLER_SYSFS = ("cnc/motor_lock", "cnc/x_mode", "cnc/y_mode", "cnc/x_decay", "cnc/y_decay",
-                         "cnc/step_freq", "cnc/ramp_rate", "pic/x_step_current", "pic/y_step_current")
+                         "cnc/step_freq", "cnc/ramp_rate", "pic/x_step_current", "pic/y_step_current",
+                         "head/z_current", "head/z_mode")
 
 # Settings the baseline never hands back as bare settings: controller_mode
 # is the persisted mirror of the live mode (the mode item restores it

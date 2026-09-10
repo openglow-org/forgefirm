@@ -400,6 +400,23 @@ class TransientNotLeftoverTests(BaselineTests):
         self.assertEqual(items[0].found, "1014")
 
 
+class CloudOwnedSysfsTests(unittest.TestCase):
+    """In cloud mode the cloud client configures the machine from the
+    pulse header it is playing, the lens included: z_mode comes from
+    ZSmd through gfhardware's set_mode_from_puls. Handing the GRBL values
+    back under it would be the baseline configuring another controller's
+    machine. In GRBL mode the pair is checked as before."""
+
+    def test_the_z_pair_is_the_cloud_clients(self):
+        for attr in ("head/z_current", "head/z_mode"):
+            self.assertIn(attr, baseline.GRBL_CONTROLLER_SYSFS)
+
+    def test_the_z_pair_is_still_checked_in_grbl_mode(self):
+        fixed = dict(baseline.fixed_sysfs())
+        self.assertEqual(fixed.get("head/z_current"), "1")
+        self.assertEqual(fixed.get("head/z_mode"), "1")
+
+
 class PositionDeadbandTests(unittest.TestCase):
     """The counters count steps and a controller's own return lands within
     a few hundredths of a millimeter, not on the step: a difference that
