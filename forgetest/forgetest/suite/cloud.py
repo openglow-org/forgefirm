@@ -372,7 +372,13 @@ def mode_switch(ctx):
             gfhome_homing(ctx, ev, g)
     finally:
         if ev["homing_mode"] != "gfcloud":
-            st, body = fc.post("/settings", data={"homing_mode": ev["homing_mode"] or "none"})
+            # Back to exactly what the machine had: unset is the empty
+            # string, and clearing a key needs the query-string form.
+            # "none" is a value, and writing it where the machine had
+            # nothing is a leftover the hand-back reports.
+            st, body = (fc.post("/settings", params={"homing_mode": ""})
+                        if not ev["homing_mode"]
+                        else fc.post("/settings", data={"homing_mode": ev["homing_mode"]}))
             ctx.log("restore homing_mode=%r -> %s", ev["homing_mode"], st)
     ctx.log("PASS: grbl -> cloud (session, hunt with the lid open, lens homed, airflow unjudged) -> "
             "grbl (port open, %s), then $H homed in %.1f s", ev["grbl_state"], ev["homing_s"])

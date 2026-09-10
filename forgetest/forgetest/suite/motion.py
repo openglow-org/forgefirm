@@ -1337,7 +1337,11 @@ def lid_policy_hold(ctx):
             g.command("G90")
         machine_idle(ctx)
     finally:
-        st, _b = fc.post("/settings", data={"lid_policy": was})
+        # An empty value clears the key, and only the query-string form
+        # carries one: an empty form field never reaches the request, and
+        # the write is refused with "no known setting in request".
+        st, _b = (fc.post("/settings", params={"lid_policy": ""}) if not was
+                  else fc.post("/settings", data={"lid_policy": was}))
         ev["lid_policy_restored"] = (fc.settings() or {}).get("lid_policy", "")
         ctx.log("lid_policy restored to %s", ev["lid_policy_restored"])
     ctx.check(ev["lid_policy_restored"] == was, "lid_policy was not restored to %r", was)
