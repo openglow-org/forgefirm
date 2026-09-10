@@ -424,6 +424,45 @@ class Context:
         self.log("ACT %s %s: done after %.1f s", channel, state, dt)
         return dt
 
+    def press_now(self, text="The button is lit white. Press it now: the laser fires after your press."):
+        """The arm press, at the moment the machine says it is waiting.
+
+        A check that runs a job opens a `press` prompt of its own when
+        it sees the button lit and the tube still dark, which is the
+        machine's own word that the press it wants is this one. Pressing
+        on that is exact; pressing on a button LED read from here is
+        not, because the button is lit through parts of a check that are
+        not the arm (the lens reference, the program on its way to the
+        controller), and a press then lands before the job waits for it
+        and is lost.
+
+        The fixture presses where the bench took this test's presses (or
+        opted in standing); otherwise the notice goes up for a person,
+        who is looking at the same prompt. Returns True when the fixture
+        pressed."""
+        fixture = getattr(self.runner, "fixture", None) if self.runner is not None else None
+        rec = {"channel": "button", "state": "arm", "by": "operator", "ts": now_ts()}
+        self.evidence.setdefault("actions", []).append(rec)
+        opted_in = fixture is not None and fixture.covers("button") and \
+            (fixture.arm_press or self.run.fixture_takeover)
+        if not opted_in:
+            if self.run.fixture_takeover:
+                rec["fixture_lost"] = True
+                self.log("ARM: WARNING the bench actuator took this test's presses and is now "
+                         "gone - asking the operator for the arm press")
+            self.notice(text)
+            return False
+        try:
+            fixture.act("button", "press")
+        except _fixture.FixtureError as e:
+            rec["fixture_error"] = str(e)
+            self.log("ARM press: fixture failed (%s) - asking the operator", e)
+            self.notice(text)
+            return False
+        rec["by"] = "fixture"
+        self.log("ARM press by the fixture, at the machine's own press prompt")
+        return True
+
     def arm_press(self, text="The button lights white: press it to arm. The machine fires after your press.",
                   lit_timeout=60):
         """The arm cue of a live test. A person's press by default: a

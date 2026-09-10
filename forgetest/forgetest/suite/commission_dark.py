@@ -15,6 +15,8 @@ from ..baseline import read_position
 from .commission import wiz, Restore  # noqa: F401 - Restore is re-exported for the sheet
 
 POLL_S = 1.0
+# What the machine's own press prompt says, used when it sends no text.
+PRESS_TEXT = "The button is lit white. Press it now: the laser fires after your press."
 DARK_COVERS = [("forgectrl", "src/wizdark.*"), ("forgectrl", "src/wizcalc.*"),
                ("forgectrl", "src/wiz.*"), ("forgectrl", "src/commission.*"),
                ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.*")]
@@ -76,6 +78,12 @@ def run_check(ctx, wid, on_prompt, timeout_s):
                 if value is not None:
                     st, body = answer(fc, wid, p, value)
                     ctx.check(st == 200, "the answer to %s -> %s %s", p.get("id"), st, body)
+                elif p.get("id") == "press":
+                    # The arm press, asked for by the machine itself: the
+                    # check opens this prompt when the button is lit and
+                    # the tube is still dark. Nothing answers it - the
+                    # press does, and the discharge closes it.
+                    ctx.press_now(p.get("text") or PRESS_TEXT)
             if not d.get("running"):
                 last = d
                 break

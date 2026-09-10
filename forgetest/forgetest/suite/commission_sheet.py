@@ -36,19 +36,18 @@ SHEET_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/wizrun.h"),
 
 # The live wizards in the order the sheet burns them: the wizard id, the
 # answers to its prompts (a middle pick where a person would look at the
-# sheet), the keys its result must carry, and how long the bench actuator
-# waits for the button to light before the arm press goes to a person.
-# The flow-load card settles the coolant loop before it lights the button
-# (60 to 240 s); the others light within seconds of the lens reference.
+# sheet), and the keys its result must carry. The arm press is not timed
+# from here: each card opens a press prompt of its own when the button is
+# lit and the tube still dark, and run_check presses on that.
 CARDS = [
-    ("sheet.frame", {"frame-arm": "Continue", "frame-ok": "Yes"}, ["mark_s", "mark_feed"], 120),
+    ("sheet.frame", {"frame-arm": "Continue", "frame-ok": "Yes"}, ["mark_s", "mark_feed"]),
     ("laser.focus", {"focus-arm": "Continue", "focus-pick": "11", "thickness": "Keep"},
      ["pick", "thickness_mm", "pick_half_steps", "edge_z_mm", "steps_per_mm", "max_height_mm",
-      "focus_range_mm", "stops"], 120),
-    ("laser.floor", {"floor-arm": "Continue", "floor-pick": "8"}, ["faintest_density", "floor_density"], 120),
-    ("laser.dose-curve", {"dose-arm": "Continue"}, ["points", "curve"], 120),
-    ("laser.corner", {"corner-arm": "Continue", "corner-pick": "1.50"}, ["gamma"], 120),
-    ("cooling.flow-load", {"load-arm": "Continue"}, ["lit_s", "dose_raw_s", "peak_c", "k_density", "k_cw"], 420),
+      "focus_range_mm", "stops"]),
+    ("laser.floor", {"floor-arm": "Continue", "floor-pick": "8"}, ["faintest_density", "floor_density"]),
+    ("laser.dose-curve", {"dose-arm": "Continue"}, ["points", "curve"]),
+    ("laser.corner", {"corner-arm": "Continue", "corner-pick": "1.50"}, ["gamma"]),
+    ("cooling.flow-load", {"load-arm": "Continue"}, ["lit_s", "dose_raw_s", "peak_c", "k_density", "k_cw"]),
 ]
 # Every setting a card writes, restored as found when the run ends.
 CARD_SETTINGS = ["lens_hall_edge_z_mm", "lens_stop_below_steps", "lens_stop_above_steps",
@@ -130,12 +129,12 @@ def place(ctx):
     file_card(ctx, "sheet.place")
 
 
-def burn(ctx, wid, answers, want, lit_s):
+def burn(ctx, wid, answers, want):
     """One live card: the preview, the burn after the press with the
     prompts answered from `answers`, the witnesses, the keys of the
-    result in `want`. The actuator waits `lit_s` for the button to light."""
+    result in `want`. run_check makes the arm press when the card asks
+    for it."""
     preview_ok(ctx, wid)
-    ctx.arm_press(lit_timeout=lit_s)
 
     def on_prompt(p):
         return answers.get(p.get("id"))
@@ -161,9 +160,10 @@ def burn(ctx, wid, answers, want, lit_s):
              "it goes with its top edge at the top of the cut area (the head's home corner); "
              "lid closed. Eye protection on, exhaust on, extinguisher in reach.",
              "Start the test and press the machine's button once. That press says you are at the "
-             "machine, and the bench actuator makes every arm press after it. With no actuator "
-             "the start is the Ready answer instead, and you press the button each time it lights "
-             "white: six times, the frame and the five cards.",
+             "machine, and the bench actuator makes every arm press after it, each one when the "
+             "card itself asks for it. With no actuator the start is the Ready answer instead, "
+             "and you press the button each time the page asks: six times, the frame and the "
+             "five cards.",
              "Nothing else: the test answers every prompt itself and puts back every setting the "
              "cards write. It runs about half an hour, mostly the coolant settle and the dark "
              "tails."],
@@ -191,6 +191,6 @@ def sheet(ctx):
               "each. The bench presses when the button lights.")
     place(ctx)
     with Restore(ctx, CARD_SETTINGS):
-        for wid, answers, want, lit_s in CARDS:
-            burn(ctx, wid, answers, want, lit_s)
+        for wid, answers, want in CARDS:
+            burn(ctx, wid, answers, want)
     ctx.log("PASS: the sheet's seven wizards ran on one piece; settings restored")

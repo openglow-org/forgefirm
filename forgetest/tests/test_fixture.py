@@ -586,6 +586,41 @@ class RoutingTests(unittest.TestCase):
         finally:
             runner_mod.hw.button_lit = saved
 
+    def test_the_press_prompt_is_what_the_actuator_presses_on(self):
+        """The machine's own press prompt, not a button LED read from
+        here: the button is lit through parts of a live check that are
+        not the arm, and a press then lands before the job waits for it
+        and is lost. press_now presses at the moment the check asks, with
+        no LED reading and no waiting thread."""
+        run = Run("test", "r.live", "r.live")
+        ctx = Context(run, self.runner, self.reg["r.live"])
+        self.runner.probe_fixture(force=True)
+        self.stub.arm_press = False
+        run.fixture_takeover = True
+        saved = runner_mod.hw.button_lit
+        runner_mod.hw.button_lit = lambda: False   # never consulted
+        try:
+            self.assertTrue(ctx.press_now())
+            self.assertIn(("button", "press"), self.stub.acts)
+        finally:
+            runner_mod.hw.button_lit = saved
+        rec = [r for r in run.evidence["actions"] if r["state"] == "arm"][-1]
+        self.assertEqual(rec["by"], "fixture")
+
+    def test_the_press_prompt_goes_to_the_operator_without_an_actuator(self):
+        """No actuator, or one that never took this test's presses: the
+        notice goes up for a person, who is looking at the same prompt."""
+        run = Run("test", "r.live", "r.live")
+        ctx = Context(run, self.runner, self.reg["r.live"])
+        self.runner.probe_fixture(force=True)
+        self.stub.arm_press = False
+        run.fixture_takeover = False
+        seen = []
+        run.set_notice = lambda text: seen.append(text)
+        self.assertFalse(ctx.press_now("Press it now."))
+        self.assertNotIn(("button", "press"), self.stub.acts)
+        self.assertIn("Press it now.", seen)
+
     def test_the_arm_press_waits_as_long_as_the_card_says_for_the_light(self):
         """A card that settles the coolant before it lights the button
         takes minutes; the caller names the wait, and the actuator presses
