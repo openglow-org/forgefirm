@@ -133,6 +133,13 @@ GRBL_PORT_S = 30                    # the Grbl port after the supervisor reports
 
 XY_STEPS_PER_MM = 53.333            # boards/glowforge.h (x8 microstepping)
 RETURN_MAX_MM = 100.0               # a displaced head is jogged back at most this far
+# The counters count steps; the controller's own returns land within a
+# tenth of a millimeter of where they started, not on the step. A
+# difference under this is that quantization, not a leftover: the head is
+# still put back, so nothing accumulates over a campaign, but the test
+# that made it does not fail for it. X and Y only - Z is the lens, which
+# the return never moves, so any Z difference is still a leftover.
+POSITION_DEADBAND_MM = 0.1
 
 # The XY microstep mode (the xy_microsteps setting: 8, 16 or 32; unset =
 # 8). The GRBL controller reads it at its start and derives its scale,
@@ -196,6 +203,19 @@ def read_position():
         return list(struct.unpack("<3i", raw[:12]))
     except (OSError, struct.error):
         return None
+
+
+def position_quantized(was, now):
+    """True when two step-counter readings differ by no more than the
+    dead band on X and Y and not at all on Z: the step quantization of a
+    move that landed where it meant to, rather than a leftover. A cancel
+    that returns the head to the job start lands within a few hundredths
+    of a millimeter, which is a step or four, and whether that rounds to
+    the same integer is chance."""
+    if was is None or now is None or now[2] != was[2]:
+        return False
+    return (abs(now[0] - was[0]) / XY_STEPS_PER_MM <= POSITION_DEADBAND_MM and
+            abs(now[1] - was[1]) / XY_STEPS_PER_MM <= POSITION_DEADBAND_MM)
 
 
 def read_ring_residue():
@@ -677,7 +697,12 @@ class Baseline:
         was = captured.get("position")
         now = read_position()
         if was is not None and now is not None and now != was and not self.cloud_mode():
-            left.append(Leftover("position", now, was, self._return_head(was, now)))
+            act = self._return_head(was, now)
+            if position_quantized(was, now):
+                self.log("position: %s (expected %s) -> %s; inside the %.2f mm dead band, "
+                         "not a leftover" % (now, was, act, POSITION_DEADBAND_MM))
+            else:
+                left.append(Leftover("position", now, was, act))
         was = captured.get("settings")
         if was:
             st, body = self.fc_get("/settings")

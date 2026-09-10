@@ -354,6 +354,31 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class PositionDeadbandTests(unittest.TestCase):
+    """The counters count steps and a controller's own return lands within
+    a few hundredths of a millimeter, not on the step: a difference that
+    small is quantization, not a leftover. Found on the bench reference,
+    where motion.lid-cancel-home returned the head twice, each within
+    0.04 mm, and failed the hand-back on the four steps left over."""
+
+    def test_a_few_steps_of_xy_are_the_quantization(self):
+        self.assertTrue(baseline.position_quantized([0, 0, 0], [4, 0, 0]))
+        self.assertTrue(baseline.position_quantized([0, 0, 0], [-4, 4, 0]))
+        self.assertTrue(baseline.position_quantized([10, 20, 30], [10, 20, 30]))
+
+    def test_past_the_dead_band_is_a_leftover(self):
+        over = int(baseline.POSITION_DEADBAND_MM * baseline.XY_STEPS_PER_MM) + 2
+        self.assertFalse(baseline.position_quantized([0, 0, 0], [over, 0, 0]))
+        self.assertFalse(baseline.position_quantized([0, 0, 0], [0, over, 0]))
+
+    def test_z_is_exact_because_the_return_never_moves_it(self):
+        self.assertFalse(baseline.position_quantized([0, 0, 0], [0, 0, 1]))
+
+    def test_an_unreadable_reading_is_never_quantization(self):
+        self.assertFalse(baseline.position_quantized(None, [0, 0, 0]))
+        self.assertFalse(baseline.position_quantized([0, 0, 0], None))
+
+
 class BaselineModeTests(BaselineTests):
     """The baseline against a fake forgectrl: what the mode in force
     owns. Reuses the fake sysfs tree of BaselineTests; only the new
