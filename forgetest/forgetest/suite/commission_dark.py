@@ -17,6 +17,10 @@ from .commission import wiz, Restore  # noqa: F401 - Restore is re-exported for 
 POLL_S = 1.0
 # What the machine's own press prompt says, used when it sends no text.
 PRESS_TEXT = "The button is lit white. Press it now: the laser fires after your press."
+# How long the purge fan's current is given to come up after the airflow
+# check switches it back on. The bench reference draws its off current
+# (74) for the first seconds and settles near 630.
+PURGE_SPINUP_S = 30
 DARK_COVERS = [("forgectrl", "src/wizdark.*"), ("forgectrl", "src/wizcalc.*"),
                ("forgectrl", "src/wiz.*"), ("forgectrl", "src/commission.*"),
                ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.*")]
@@ -202,13 +206,25 @@ def check_airflow(ctx):
         # duties. Prove the machine is whole, not just measured.
         purge_on = ctx.sysfs("head/purge_air")
         ctx.check(purge_on == "1", "purge air reads %r after the check, expected 1 (on)", purge_on)
-        gate = ((ctx.forgectrl.get("/cool/status")[1] or {}).get("fan_gates") or {}).get("purge") or {}
-        ctx.evidence["purge_after"] = {"purge_air": purge_on, "gate": gate}
-        ctx.log("purge after the check: commanded %s, drawing %s against the %s floor",
-                purge_on, gate.get("reading"), gate.get("floor"))
-        ctx.check((gate.get("reading") or 0) >= (gate.get("floor") or 0),
-                  "purge draws %s, under the %s floor the check just wrote: the next job would be held",
-                  gate.get("reading"), gate.get("floor"))
+
+        def purge_gate():
+            return ((ctx.forgectrl.get("/cool/status")[1] or {}).get("fan_gates") or {}).get("purge") or {}
+
+        # The check read its off current with the fan off, and the stand-down
+        # commands it back on. The current follows the command, it does not
+        # arrive with it: read in the same second and what comes back is the
+        # off current the check just measured. Wait for the draw the way the
+        # controller below is waited for.
+        took = ctx.wait_for(lambda: (purge_gate().get("reading") or 0) >= (purge_gate().get("floor") or 0),
+                            PURGE_SPINUP_S)
+        gate = purge_gate()
+        ctx.evidence["purge_after"] = {"purge_air": purge_on, "gate": gate, "took_s": took}
+        ctx.log("purge after the check: commanded %s, drawing %s against the %s floor (%s)",
+                purge_on, gate.get("reading"), gate.get("floor"),
+                "after %.1f s" % took if took is not None else "never reached the floor")
+        ctx.check(took is not None,
+                  "purge draws %s after %d s, under the %s floor the check just wrote: the next job "
+                  "would be held", gate.get("reading"), PURGE_SPINUP_S, gate.get("floor"))
     ok = ctx.wait_for(lambda: (ctx.forgectrl.get("/mode")[1] or {}).get("controller") == "running", 60)
     ctx.check(ok is not None, "the controller did not come back after the check")
 
