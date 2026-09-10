@@ -640,6 +640,7 @@ def disarm_in_hold(ctx):
     ev = ctx.evidence
     with ctx.grbl() as g, LiveJob(ctx, g):
         prepare(ctx, g)
+        k0 = kernel_start(ctx)
         ctx.ready(ARM_CUE % "40 mm +X")
         stream(g, ["G91", "G21", "M4", "S400", "G1 X40 F300"])
         ctx.log("armed; waiting for motion to start (arm + your button press)...")
@@ -682,6 +683,20 @@ def disarm_in_hold(ctx):
         ctx.sleep(1)
         if "Alarm" in g.status_report()["state"]:
             g.command("$X")
+        # The hold parks the head part-way through the move and the reset
+        # abandons the rest of it, so the job ends wherever the feed hold
+        # caught it - about 11 mm in, on the bench reference. That is the
+        # test's own doing and it goes back: the kernel counters say how
+        # far the head actually went, which is what a jog has to undo.
+        wait_idle(ctx, g, 15)
+        dx, dy = kernel_xy_mm(ctx)
+        back_x, back_y = k0[0] - dx, k0[1] - dy
+        ev["left_at_mm"] = [round(dx - k0[0], 3), round(dy - k0[1], 3)]
+        if abs(back_x) >= 0.02 or abs(back_y) >= 0.02:
+            ctx.log("returning the head: %+.3f/%+.3f mm", back_x, back_y)
+            g.command("$J=G91X%.3fY%.3fF1200" % (back_x, back_y))
+            wait_idle(ctx, g, 30)
+        ev["returned_mm"] = list(kernel_xy_mm(ctx))
     ctx.check(disarmed_at is not None, "still armed after 120 s in Hold")
     ctx.check(left_hold is None, "the job left Hold (%s) before the disarm", left_hold)
     check_button_dark(ctx, ev)
