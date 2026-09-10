@@ -84,6 +84,32 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(sorted(out), ["s.a", "s.b"])
 
 
+class RunClockTests(unittest.TestCase):
+    """The page shows the last run until the next one starts, so a
+    finished run's elapsed figure must be the time it took, not the time
+    since. Found on the bench reference, where a failed test went on
+    counting past 5000 s and read as still running."""
+
+    def test_a_finished_runs_clock_stops(self):
+        from forgetest.runner import Run
+        run = Run("test", "t.x", "t.x")
+        run.started = time.time() - 30
+        self.assertGreaterEqual(run.snapshot()["elapsed_s"], 30)
+        run.finished = {"result": "FAIL", "message": "", "duration_s": 31}
+        first = run.snapshot()["elapsed_s"]
+        time.sleep(1.1)
+        self.assertEqual(first, 31)
+        self.assertEqual(run.snapshot()["elapsed_s"], 31)
+
+    def test_a_running_runs_clock_ticks(self):
+        from forgetest.runner import Run
+        run = Run("test", "t.x", "t.x")
+        run.started = time.time() - 5
+        first = run.snapshot()["elapsed_s"]
+        time.sleep(1.1)
+        self.assertGreater(run.snapshot()["elapsed_s"], first)
+
+
 class QueueTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

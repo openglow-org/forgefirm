@@ -164,7 +164,12 @@ class Run:
             notice = dict(self.notice) if self.notice else None
         return {
             "kind": self.kind, "id": self.id, "title": self.title,
-            "started": self.started_ts, "elapsed_s": int(time.time() - self.started),
+            # A finished run's clock stops: the page shows the last run
+            # until the next one starts, and a live figure there counts
+            # the time since, not the time it took.
+            "started": self.started_ts,
+            "elapsed_s": (self.finished["duration_s"] if self.finished
+                          else int(time.time() - self.started)),
             "log": lines, "dropped": self.dropped, "prompt": prompt, "notice": notice,
             "finished": self.finished, "aborting": self.aborted.is_set(),
         }
