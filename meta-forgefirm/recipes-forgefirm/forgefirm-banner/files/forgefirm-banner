@@ -1,24 +1,23 @@
 #!/bin/sh
-# Rewrites the address block of /etc/issue, the serial-console login
-# banner: the control panel by mDNS name, then one https:// URL per
-# global address of wlan0 (and eth0 when the machine has one). Every
-# other line of /etc/issue stays as the image build wrote it. The block
-# sits between the marker lines "# ForgeFIRM addresses" and "# end" and
-# is appended when absent. Called by the init script at boot and by the
-# udhcpc hook on every lease event. Idempotent: the file is written only
-# when the block changes.
+# Rewrites /etc/issue, the serial-console login banner: the lines the
+# image build wrote, then one https:// URL per global address of wlan0
+# (and eth0 when the machine has one). The address is the only way in
+# that the banner gives, because it is the one that works on every
+# network. Called by the init script at boot and by the udhcpc hook on
+# every lease event. Idempotent: the file is written only when the text
+# changes.
 #
 # The rootfs is read-only: at the first change after boot the file is
-# bind-mounted from a copy under /run/forgefirm (tmpfs) and the block is
-# written through the mount. Before that the image's own file shows.
+# bind-mounted from a copy under /run/forgefirm (tmpfs) and the banner
+# is written through the mount. Before that the image's own file shows.
+# The image's own text is kept at that moment in a second copy, so the
+# banner needs no marker line in the file and shows nothing but itself.
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 
 ISSUE=/etc/issue
 STATE=/run/forgefirm/issue
-MARK_BEGIN='# ForgeFIRM addresses'
-MARK_END='# end'
-PANEL='Control panel: https://forgefirm.local/'
+BASE=/run/forgefirm/issue.base
 
 # One URL per global address; an IPv6 address gets its URL brackets.
 # Tentative, deprecated and temporary addresses are left out.
@@ -32,45 +31,40 @@ addresses () {
         a = $2
         sub(/\/.*/, "", a)
         if ($1 == "inet6") a = "[" a "]"
-        print "https://" a "/"
+        print "  https://" a "/"
       }'
   done
 }
 
-block () {
-  echo "$MARK_BEGIN"
-  echo "$PANEL"
-  addrs=$(addresses)
-  if [ -n "$addrs" ]; then
-    echo "$addrs"
-  else
-    echo "no network address yet"
-  fi
-  echo "$MARK_END"
+# A mount at the file, read from /proc/mounts (mountpoint(1) judges a
+# file by its device numbers alone).
+is_mounted () {
+  awk -v t="$1" '$2 == t { f = 1 } END { exit !f }' /proc/mounts
 }
 
 [ -f "$ISSUE" ] || exit 0
 
-new=$(block)
-old=$(awk -v b="$MARK_BEGIN" -v e="$MARK_END" \
-        '$0 == b { p = 1 } p { print } $0 == e { p = 0 }' "$ISSUE")
-[ "$new" = "$old" ] && exit 0
-
-# A mount at the file, read from /proc/mounts (mountpoint(1) judges a
-# file by its device numbers alone).
-if ! awk -v t="$ISSUE" '$2 == t { f = 1 } END { exit !f }' /proc/mounts; then
-  mkdir -p "${STATE%/*}" \
-    && cp -p "$ISSUE" "$STATE" \
+# The image's own text: the file as it is before the first write of the
+# boot. /run is a tmpfs, so the copy is made once per boot, and the
+# first caller is the one that finds the file untouched.
+mkdir -p "${STATE%/*}" || exit 1
+[ -f "$BASE" ] || cp -p "$ISSUE" "$BASE" || exit 1
+if ! is_mounted "$ISSUE"; then
+  cp -p "$BASE" "$STATE" \
     && mount --bind "$STATE" "$ISSUE" || exit 1
 fi
 
+base=$(cat "$BASE")
+addrs=$(addresses)
+if [ -n "$addrs" ]; then
+  new=$(printf '%s\n\nControl panel:\n%s\n' "$base" "$addrs")
+else
+  new=$(printf '%s\n\nControl panel: no network address yet\n' "$base")
+fi
+[ "$new" = "$(cat "$ISSUE")" ] && exit 0
+
 tmp="$STATE.tmp.$$"
-awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v blk="$new" '
-  $0 == b { print blk; seen = 1; skip = 1; next }
-  $0 == e && skip { skip = 0; next }
-  !skip { print }
-  END { if (!seen) print blk }
-' "$ISSUE" > "$tmp" || { rm -f "$tmp"; exit 1; }
+printf '%s\n\n' "$new" > "$tmp" || { rm -f "$tmp"; exit 1; }
 cat "$tmp" > "$ISSUE"
 rm -f "$tmp"
 exit 0

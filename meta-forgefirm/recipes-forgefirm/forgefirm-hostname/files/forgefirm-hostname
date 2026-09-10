@@ -1,0 +1,68 @@
+#!/bin/sh
+# Sets the machine's hostname to forgefirm-<xxxx>, where xxxx is the
+# last four hex digits of the wlan0 MAC address (eth0 on a machine with
+# no WiFi). The name is the same at every boot, two machines on one
+# network answer to different names, and the name carries no serial
+# number. The DHCP client sends it as the hostname option
+# (/etc/network/interfaces), so a network with dynamic DNS resolves it.
+#
+# The rootfs is read-only: /etc/hostname shows a copy under
+# /run/forgefirm (tmpfs), bind-mounted, and the name is written through
+# the mount. The init script calls this at boot, before the network
+# starts and before anything reads the name.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+FILE=/etc/hostname
+STATE=/run/forgefirm/hostname
+PREFIX=forgefirm
+WAIT_S=10
+
+# The MAC address of the first interface that has one. An interface
+# before its driver reads the address reports all zeros.
+mac () {
+  for dev in wlan0 eth0; do
+    a=$(cat "/sys/class/net/$dev/address" 2>/dev/null) || continue
+    case "$a" in
+      ''|00:00:00:00:00:00) continue ;;
+    esac
+    printf '%s\n' "$a"
+    return 0
+  done
+  return 1
+}
+
+# A mount at the file, read from /proc/mounts (mountpoint(1) judges a
+# file by its device numbers alone).
+is_mounted () {
+  awk -v t="$1" '$2 == t { f = 1 } END { exit !f }' /proc/mounts
+}
+
+# An interface registers when its driver probes, which udev does earlier
+# in rcS. The wait is for a slow probe and ends at once in the normal
+# case.
+n=0
+while [ "$n" -lt "$WAIT_S" ] && ! mac >/dev/null; do
+  sleep 1
+  n=$((n + 1))
+done
+
+suffix=$(mac | tr -d ':' | tr 'A-Z' 'a-z' | cut -c9-12)
+if [ -n "$suffix" ]; then
+  name="$PREFIX-$suffix"
+else
+  name="$PREFIX"
+fi
+
+[ "$(hostname)" = "$name" ] || hostname "$name"
+
+# The file follows the live name, so every reader agrees.
+[ -f "$FILE" ] || exit 0
+[ "$(cat "$FILE" 2>/dev/null)" = "$name" ] && exit 0
+if ! is_mounted "$FILE"; then
+  mkdir -p "${STATE%/*}" \
+    && cp -p "$FILE" "$STATE" \
+    && mount --bind "$STATE" "$FILE" || exit 1
+fi
+printf '%s\n' "$name" > "$FILE" || exit 1
+exit 0

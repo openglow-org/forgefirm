@@ -35,8 +35,9 @@ def lan_ip():
       covers=_COVERS_AUTH,
       description="Every state-changing endpoint refuses an unauthenticated write (the factory "
                   "return, the SSH switch and the wizard's own routes included); a non-literal "
-                  "Host, a non-literal Origin and a cross-site Sec-Fetch-Site are refused; the "
-                  "cooling report channel accepts the loopback peer and refuses a non-loopback "
+                  "Host, a non-literal Origin and a cross-site Sec-Fetch-Site are refused, while "
+                  "the machine's own hostname passes and that name with a domain on it does not; "
+                  "the cooling report channel accepts the loopback peer and refuses a non-loopback "
                   "one (over HTTP the write is sent to HTTPS first, 302; over HTTPS the route "
                   "answers 403 loopback only); the fuse view is two-factor "
                   "(token and the physical button) and refused without either; "
@@ -96,6 +97,17 @@ def auth(ctx):
     ev["host_name"] = st
     ctx.log("GET /status Host=evil.example.net -> %s", st)
     ctx.check(st == 403, "a DNS-name Host was accepted (%s)", st)
+    # the machine's own name passes; the same name with a domain on it
+    # does not, because anyone can register one
+    own = socket.gethostname()
+    st, body = fc.get("/status", headers={"Host": own})
+    ev["host_own_name"] = st
+    ctx.log("GET /status Host=%s -> %s", own, st)
+    ctx.check(st == 200, "the machine's own hostname was refused as a Host (%s)", st)
+    st, body = fc.get("/status", headers={"Host": own + ".example.net"})
+    ev["host_own_name_domain"] = st
+    ctx.log("GET /status Host=%s.example.net -> %s", own, st)
+    ctx.check(st == 403, "a domain name built on the machine's name was accepted (%s)", st)
     st, body = fc.get("/status", headers={"Origin": "http://evil.example.net"})
     ev["origin_name"] = st
     ctx.log("GET /status Origin=http://evil.example.net -> %s", st)

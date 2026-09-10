@@ -1,7 +1,7 @@
 SUMMARY = "ForgeFIRM console banner: the control panel addresses in /etc/issue"
 DESCRIPTION = "Keeps an address block in the serial-console login banner \
-(/etc/issue): the control panel by mDNS name and by every global address \
-of wlan0 and eth0. Refreshed at boot and on every DHCP lease event."
+(/etc/issue): one control panel URL per global address of wlan0 and eth0. \
+Refreshed at boot and on every DHCP lease event."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 

@@ -28,6 +28,12 @@ def _wdog1_wcr():
         return None
 
 
+def _plain(line):
+    """A line without its ANSI color sequences: what a terminal shows,
+    counted in columns rather than in bytes."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", line)
+
+
 def _read(path, default=None):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -104,7 +110,9 @@ def fds_of(pid):
               ("grblhal-glowforge", "CMakeLists.txt"), ("kernel-module-glowforge", "**"),
               ("linux-fslc", "**")],
       description="The image that is running is the image the manifest describes, with the "
-                  "kernel options, the module, the pulse ring it maps and the SDMA clocks it holds, "
+                  "version stamped in /etc/forgefirm-version and under the machine mark in the "
+                  "console banner and the motd, "
+                  "the kernel options, the module, the pulse ring it maps and the SDMA clocks it holds, "
                   "the daemon ownership, "
                   "the init ordering, the file modes the release depends on, and the mounts: the "
                   "rootfs read-only, /data writable, the account files and the banner rendered "
@@ -113,11 +121,39 @@ def image_health(ctx):
     ev = ctx.evidence
     manifest = ctx.runner.manifest
 
-    # 1. version stamp
+    # 1. version stamp: the machine-readable file, and the two a person
+    # reads - the console banner (/etc/issue, which forgefirm-banner
+    # renders from the image's own text) and the motd a login prints.
+    # Each carries the machine mark with the version on the mark's own
+    # last line, right-justified to the mark's last column.
     ver = (_read("/etc/forgefirm-version", "") or "").strip()
     ev["forgefirm_version"] = ver
     ctx.log("forgefirm-version: %s (manifest: %s)", ver, manifest.version)
     ctx.check(ver == manifest.version, "/etc/forgefirm-version %r != manifest %r", ver, manifest.version)
+    for path in ("/etc/issue", "/etc/motd"):
+        text = _read(path, "") or ""
+        ev[path] = text
+        lines = text.splitlines()
+        at = [i for i, line in enumerate(lines) if line.rstrip().endswith(ver)]
+        ctx.check(at, "%s carries no line ending in the version %r", path, ver)
+        if not at:
+            continue
+        i = at[0]
+        ctx.check(lines[i].rstrip() == lines[i], "%s pads the version line: %r", path, lines[i])
+        ctx.check(_plain(lines[i]).strip() != ver,
+                  "%s puts the version on a line of its own, not on the mark's last line", path)
+        # Right-justified to the mark's last column: the stamped line is
+        # exactly as wide as the widest line above it. Only the motd is
+        # measured, because /etc/issue holds the mark with its
+        # backslashes doubled for the getty that reads it, so its bytes
+        # are wider than the columns a person sees.
+        if path == "/etc/motd":
+            above = [len(_plain(line)) for line in lines[:i] if line.strip()]
+            width = max(above) if above else 0
+            ev["motd_columns"] = [len(_plain(lines[i])), width]
+            ctx.check(len(_plain(lines[i])) == width,
+                      "/etc/motd stamped line is %d columns, the mark above is %d",
+                      len(_plain(lines[i])), width)
 
     # 2. kernel options
     cfg = kernel_config()
@@ -251,7 +287,8 @@ def image_health(ctx):
 
     # 8. the mounts: the rootfs read-only, /data the writable partition,
     # the state a read-only rootfs hands off (the read-only-rootfs image
-    # feature, forgefirm-users, forgefirm-banner, the sshd host keys). The
+    # feature, forgefirm-users, forgefirm-hostname, forgefirm-banner, the
+    # sshd host keys). The
     # dev image alone mounts the factory slots under /factory.
     mounts = {}
     for line in (_read("/proc/mounts", "") or "").splitlines():
@@ -262,7 +299,8 @@ def image_health(ctx):
     def mount_opts(path):
         return (mounts.get(path) or {}).get("opts") or []
 
-    ev["mounts"] = {p: mounts[p] for p in ("/", "/data", "/var/lib", "/etc/passwd", "/etc/issue") if p in mounts}
+    ev["mounts"] = {p: mounts[p] for p in ("/", "/data", "/var/lib", "/etc/passwd",
+                                           "/etc/hostname", "/etc/issue") if p in mounts}
     ctx.log("/ mounted %s; /data %s; /var/lib %s", ",".join(mount_opts("/")) or "(absent)",
             ",".join(mount_opts("/data")) or "(absent)", ",".join(mount_opts("/var/lib")) or "(absent)")
     ctx.check("ro" in mount_opts("/"), "the rootfs is not mounted read-only: %s", mounts.get("/"))
@@ -292,6 +330,7 @@ def image_health(ctx):
             ctx.check(f in mounts, "%s is not the tmpfs render of the account record", f)
         for n in names:
             ctx.check(n in passwd_names, "record account %r is missing from /etc/passwd", n)
+    ctx.check("/etc/hostname" in mounts, "/etc/hostname is not the bind-mounted name copy")
     ctx.check("/etc/issue" in mounts, "/etc/issue is not the bind-mounted banner copy")
     if hw.pidof("sshd"):
         key = "/data/forgefirm/ssh/ssh_host_ed25519_key"

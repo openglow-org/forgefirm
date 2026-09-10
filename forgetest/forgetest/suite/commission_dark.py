@@ -243,7 +243,7 @@ def check_cameras(ctx):
 @test("commission.check-motion", title="The motion check proves the rail, the lens reference, and the jogs",
       subsystem="commission", kind="auto", hardware="takeover", est_min=5,
       covers=DARK_COVERS + [("forgectrl", "src/super.c"), ("forgectrl", "src/liveness.c"),
-                            ("forgectrl", "src/lenshome.c"),
+                            ("forgectrl", "src/lenshome.*"),
                             ("forgectrl", "src/accel.c"), ("forgectrl", "src/cool.c")],
       requires=["forgectrl.auth", "motion.pacing"],
       description="POST /wiz/motion/start: the controller stops, the liveness probe runs and the "

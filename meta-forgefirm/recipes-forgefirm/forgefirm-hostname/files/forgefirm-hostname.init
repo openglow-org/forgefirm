@@ -1,0 +1,31 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          forgefirm-hostname
+# Required-Start:    $local_fs
+# Required-Stop:
+# Default-Start:     S
+# Default-Stop:
+# Short-Description: ForgeFIRM hostname: forgefirm-<xxxx> from the MAC address
+### END INIT INFO
+
+# Writes the hostname before the network starts. At boot this runs at
+# S38 in rcS: /run is mounted (mountall, S03), udev has probed the
+# network drivers (S04), and poky's own hostname.sh (S39) reads the file
+# this leaves.
+
+case "$1" in
+  start|restart|reload|force-reload)
+    /usr/sbin/forgefirm-hostname
+    ;;
+  stop)
+    ;;
+  status)
+    hostname
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+
+exit 0

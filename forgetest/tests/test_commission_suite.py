@@ -1,13 +1,11 @@
 """The commission.* suite on the host: the registration (ids, kinds, the
 takeover tests, the operator tests' hands), the record builders, the
-mDNS packet code, the cookie parsing, the LED cue, the settle rule for a
+machine's name, the cookie parsing, the LED cue, the settle rule for a
 gated supervisor, and the cloud-off surface test driven end to end
 against the fake daemon."""
 import json
 import os
 import shutil
-import socket
-import struct
 import tempfile
 import unittest
 
@@ -19,7 +17,7 @@ from forgetest.suite import commission
 IDS = ("commission.gate-blocks-controllers", "commission.override-until-reboot",
        "commission.advisories-rehash", "commission.account-login", "commission.https-only-writes",
        "commission.ssh-until-reboot", "commission.cloud-disabled-surface",
-       "commission.factory-return", "commission.mdns-announce", "commission.first-run-flow",
+       "commission.factory-return", "commission.machine-name", "commission.first-run-flow",
        "commission.first-run-page", "commission.what-changed", "commission.record-export",
        "commission.mirror")
 OPERATOR = ("commission.first-run-flow", "commission.first-run-page")
@@ -104,8 +102,8 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(t.kind, "auto")                 # the return itself is a bench drill, not a test
         self.assertFalse(t.hands)
 
-    def test_mdns_covers_nothing_by_design(self):
-        self.assertEqual(self.reg["commission.mdns-announce"].covers, ())
+    def test_the_machine_name_covers_nothing_by_design(self):
+        self.assertEqual(self.reg["commission.machine-name"].covers, ())
 
     def test_the_login_test_makes_its_own_account(self):
         # No bench credentials, no precheck: the test installs a temporary
@@ -184,35 +182,45 @@ class RecordTests(unittest.TestCase):
             os.environ.pop("GF_RUN_DIR", None)
 
 
-class MdnsTests(unittest.TestCase):
-    def test_query_is_a_unicast_response_question(self):
-        q = commission.mdns_query("forgefirm.local", qid=0x1234)
-        qid, flags, qd, an, ns, ar = struct.unpack(">HHHHHH", q[:12])
-        self.assertEqual((qid, flags, qd, an, ns, ar), (0x1234, 0, 1, 0, 0, 0))
-        self.assertEqual(q[12:], b"\x09forgefirm\x05local\x00" + struct.pack(">HH", 1, 0x8001))
+class MachineNameTests(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
-    def _response(self, qid, name_bytes, addr, flags=0x8400, extra=b""):
-        q = b"\x09forgefirm\x05local\x00" + struct.pack(">HH", 1, 1)
-        rr = name_bytes + struct.pack(">HHIH", 1, 0x8001, 120, 4) + socket.inet_aton(addr)
-        return struct.pack(">HHHHHH", qid, flags, 1, 1, 0, 0) + q + rr + extra
+    def _net(self, **devs):
+        """A /sys/class/net tree; commission.mac_suffix reads it through
+        commission.read_file, which takes an absolute path."""
+        for dev, mac in devs.items():
+            d = os.path.join(self.root, dev)
+            os.makedirs(d)
+            with open(os.path.join(d, "address"), "w") as f:
+                f.write(mac + "\n")
+        real = commission.read_file
 
-    def test_answers_follow_a_compression_pointer(self):
-        pkt = self._response(7, b"\xc0\x0c", "192.168.1.9")
-        self.assertEqual(commission.mdns_answers(pkt, 7), [("forgefirm.local", "192.168.1.9")])
+        def read(path):
+            head = "/sys/class/net/"
+            if path.startswith(head):
+                return real(os.path.join(self.root, path[len(head):]))
+            return real(path)
 
-    def test_answers_with_the_name_spelled_out(self):
-        pkt = self._response(0, b"\x09forgefirm\x05local\x00", "10.0.0.5")
-        self.assertEqual(commission.mdns_answers(pkt), [("forgefirm.local", "10.0.0.5")])
+        commission.read_file = read
+        self.addCleanup(setattr, commission, "read_file", real)
 
-    def test_wrong_id_or_a_query_yields_nothing(self):
-        pkt = self._response(7, b"\xc0\x0c", "192.168.1.9")
-        self.assertEqual(commission.mdns_answers(pkt, 8), [])
-        self.assertEqual(commission.mdns_answers(self._response(7, b"\xc0\x0c", "1.2.3.4", flags=0), 7), [])
-        self.assertEqual(commission.mdns_answers(b"\x00" * 5), [])
+    def test_the_wifi_address_names_the_machine(self):
+        self._net(wlan0="2C:6B:7D:0D:B0:0A", eth0="00:11:22:33:44:55")
+        self.assertEqual(commission.mac_suffix(), "b00a")
 
-    def test_a_truncated_packet_yields_nothing(self):
-        pkt = self._response(7, b"\xc0\x0c", "192.168.1.9")
-        self.assertEqual(commission.mdns_answers(pkt[:20], 7), [])
+    def test_a_machine_with_no_wifi_falls_back_to_the_wired_address(self):
+        self._net(eth0="00:11:22:33:44:55")
+        self.assertEqual(commission.mac_suffix(), "4455")
+
+    def test_an_unread_address_is_no_address(self):
+        self._net(wlan0="00:00:00:00:00:00")
+        self.assertEqual(commission.mac_suffix(), "")
+
+    def test_no_interface_is_no_address(self):
+        self._net()
+        self.assertEqual(commission.mac_suffix(), "")
 
 
 class SmallHelpersTests(unittest.TestCase):

@@ -48,15 +48,12 @@ IMAGE_INSTALL:append = " grblhal-glowforge forgectrl gfhome gfcloud v4l-utils fw
 # forgefirm-users: renders the operator account record
 # (/data/forgefirm/users, written by forgectrl) into the system account
 # files at boot, before sshd, and on reload; also installs the warning an
-# interactive root shell prints. forgefirm-banner: keeps the control
-# panel addresses in the serial-console banner (/etc/issue).
+# interactive root shell prints. forgefirm-hostname: names the machine
+# forgefirm-<xxxx> from its MAC address, before the network starts.
+# forgefirm-banner: keeps the control panel addresses in the
+# serial-console banner (/etc/issue).
 # forgefirm-persist: the boot timestamp and the random seed on /data.
-# avahi-daemon: mDNS, so the panel answers at https://forgefirm.local/
-# and shows up in service browsers. The daemon is installed by name (the
-# zeroconf distro feature stays off: it would bring libnss-mdns); the
-# build options and the configuration are in conf/distro/forgefirm.conf
-# and recipes-connectivity/avahi.
-IMAGE_INSTALL:append = " forgefirm-users forgefirm-banner forgefirm-persist avahi-daemon"
+IMAGE_INSTALL:append = " forgefirm-users forgefirm-hostname forgefirm-banner forgefirm-persist"
 
 # The rootfs mounts read-only on both images; /data (p3) is the writable
 # partition. read-only-rootfs is poky's feature for it: the root line of
@@ -67,8 +64,9 @@ IMAGE_INSTALL:append = " forgefirm-users forgefirm-banner forgefirm-persist avah
 # package whose post-install must run on the machine, and the removal of
 # the packages a read-only rootfs cannot use (shadow, base-passwd,
 # update-rc.d, update-alternatives; the account files stay). What must
-# last or change at run time is handled file by file: the account files
-# and /etc/issue (forgefirm-users, forgefirm-banner), the sshd host keys
+# last or change at run time is handled file by file: the account files,
+# /etc/hostname and /etc/issue (forgefirm-users, forgefirm-hostname,
+# forgefirm-banner), the sshd host keys
 # (recipes-connectivity/openssh), the timestamp and the random seed
 # (forgefirm-persist). The facts are on the docs site,
 # technical/forgefirm/image-and-bsp; scripts/release.sh checks the built
@@ -108,8 +106,30 @@ IMAGE_OVERHEAD_FACTOR = "1.0"
 IMAGE_ROOTFS_EXTRA_SPACE = "40960"
 IMAGE_ROOTFS_MAXSIZE = "204800"
 
-# Version stamp: /etc/forgefirm-version (machine-readable), echoed on the
-# serial-console login prompt (/etc/issue) and at SSH login (motd).
+# The ForgeFIRM mark and the version stamp:
+# /etc/forgefirm-version (machine-readable), and, under the OpenGlow mark
+# the base image carries (base-files, meta-openglow), the ForgeFIRM mark
+# with the version on its last line, right-justified to the mark's last
+# column, in the two files a person reads - the serial-console login
+# prompt (/etc/issue) and the motd, which every login prints, the network
+# ones included. The mark names the firmware, so the version stands
+# alone.
+#
+# The mark is written once here and rendered for each reader, because the
+# two files are read by different programs:
+#   /etc/issue  busybox getty parses it, and both a backslash and a
+#               percent sign start an escape (libbb/login.c,
+#               print_login_issue). An unrecognized escape prints the
+#               character and swallows the backslash, so the art goes in
+#               with every backslash doubled.
+#   /etc/motd   a login writes it out as it is: nothing is doubled.
+# Both keep their color: a getty passes an escape character through, and
+# so does a login writing the motd. Only the ssh client escapes one, and
+# it does that to a banner alone.
+# The pre-authentication banner (/etc/issue.net) stays unused: the ssh
+# client prints a control character in a banner as an octal escape, and
+# the machine tells a client that has not logged in nothing anyway.
+#
 # Release images carry the release version; the dev image overrides the
 # string with the build timestamp (the same DATETIME as the artifact
 # name) plus a dev tag.
@@ -123,9 +143,44 @@ FORGEFIRM_VERSION_STRING ?= "v${FORGEFIRM_RELEASE}"
 
 write_forgefirm_version() {
     echo "${FORGEFIRM_VERSION_STRING}" > ${IMAGE_ROOTFS}${sysconfdir}/forgefirm-version
-    echo "ForgeFIRM ${FORGEFIRM_VERSION_STRING}" >> ${IMAGE_ROOTFS}${sysconfdir}/issue
+
+    mark=${WORKDIR}/forgefirm-mark
+    cat > $mark <<'MARK'
+  ___                 [1;39m___ ___ ___ __  __[0m
+ | __|__ _ _ __ _ ___[1;39m| __|_ _| _ \  \/  |[0m
+ | _/ _ \ '_/ _` / -_) [1;39m_| | ||   / |\/| |[0m
+ |_|\___/_| \__, \___|[1;39m_| |___|_|_\_|  |_|[0m
+            |___/
+MARK
+
+    # The version rides the mark's own last line, its last character on
+    # the mark's last column: under the FIRM half, in the room the
+    # descender of the Forge half leaves. The mark carries the name, so
+    # the version stands alone. Measured in columns, not in bytes: the
+    # color sequences take no room on the screen, and the doubling below
+    # is undone by the getty that reads it. A version with no room left
+    # keeps one space and runs past the mark rather than being cut.
+    stamped=${WORKDIR}/forgefirm-mark-stamped
+    awk -v v="${FORGEFIRM_VERSION_STRING}" '
+        { line[NR] = $0
+          bare = $0
+          gsub(/\033\[[0-9;]*m/, "", bare)
+          col[NR] = length(bare)
+          if (col[NR] > w) w = col[NR] }
+        END { for (i = 1; i < NR; i++) print line[i]
+              pad = w - col[NR] - length(v)
+              if (pad < 1) pad = 1
+              gap = ""
+              while (length(gap) < pad) gap = gap " "
+              print line[NR] gap v }' $mark > $stamped
+
+    sed 's|\\|\\\\|g' $stamped >> ${IMAGE_ROOTFS}${sysconfdir}/issue
     echo "" >> ${IMAGE_ROOTFS}${sysconfdir}/issue
-    echo "ForgeFIRM ${FORGEFIRM_VERSION_STRING}" > ${IMAGE_ROOTFS}${sysconfdir}/motd
+
+    cat $stamped >> ${IMAGE_ROOTFS}${sysconfdir}/motd
+    echo "" >> ${IMAGE_ROOTFS}${sysconfdir}/motd
+
+    rm -f $mark $stamped
 }
 write_forgefirm_version[vardepsexclude] += "DATETIME"
 # No semicolon after a function name here or below (the vardeps rule in

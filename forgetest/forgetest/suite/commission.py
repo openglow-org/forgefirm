@@ -1,6 +1,7 @@
 """commission.* - the first-run commissioning: the record and the
 controller gate, the advisories, the account and its login, the HTTPS
-boundary, SSH, the cloud switch, the mDNS name, and the factory return.
+boundary, SSH, the cloud switch, the machine's name, and the factory
+return.
 
 The daemon reads the commissioning record (commissioning.json in the
 data directory) and the account record (users) once, at its start, and
@@ -11,7 +12,7 @@ never saves a test record over the real one, and a restore is complete
 when the daemon is up again.
 
 The layer content of this work (the account replay init script, the
-sshd policy, the console banner, the avahi service) is part of the
+sshd policy, the hostname and console banner scripts) is part of the
 platform identity that every fingerprint carries, not of a component.
 No coverage map names it: a change there makes every test necessary
 again.
@@ -23,10 +24,9 @@ import http.client
 import json
 import os
 import random
-import select
+import re
 import socket
 import ssl
-import struct
 import time
 import urllib.parse
 
@@ -46,9 +46,6 @@ ADVISORY_DOCS = ("safety-and-risk", "licenses", "privacy", "cloud-service")
 SAFETY_PHRASE = "I UNDERSTAND"
 LOGIN_FAILS = 5
 LOGIN_LOCK_S = 30
-MDNS_NAME = "forgefirm.local"
-MDNS_GROUP = "224.0.0.251"
-MDNS_PORT = 5353
 
 
 # ----------------------------------------------------------------- files
@@ -777,7 +774,7 @@ def https_only_writes(ctx):
 # ------------------------------------------------------------------ ssh
 
 def sshd_policy():
-    """The three ForgeFIRM keys of the effective sshd policy (sshd -T,
+    """The ForgeFIRM keys of the effective sshd policy (sshd -T,
     lowercase keys), or {"error": ...} when sshd cannot report it."""
     for exe in ("/usr/sbin/sshd", "sshd"):
         rc, out = hw.run([exe, "-T"], timeout=15)
@@ -789,7 +786,7 @@ def sshd_policy():
         for line in out.splitlines():
             parts = line.split(None, 1)
             if len(parts) == 2 and parts[0] in ("permitrootlogin", "permitemptypasswords",
-                                                "passwordauthentication"):
+                                                "passwordauthentication", "banner"):
                 policy[parts[0]] = parts[1].strip()
         return policy
     return {"error": "no sshd binary"}
@@ -814,7 +811,9 @@ def restore_ssh(fc, before):
                   "sshd listens on 22, with the effective policy (sshd -T) at PasswordAuthentication "
                   "yes, and on a release image PermitRootLogin no and PermitEmptyPasswords no (the "
                   "dev image turns root over SSH back on for the bench; the release gate checks "
-                  "the release image's sshd_config as built). An enable outside 0 and 1 is refused (400). On a release "
+                  "the release image's sshd_config as built), and with no pre-authentication "
+                  "banner, so the machine says nothing to a client that has not logged in. "
+                  "An enable outside 0 and 1 is refused (400). On a release "
                   "image POST enable=0 removes the flag and stops sshd; on the dev image the boot "
                   "rule keeps sshd up and the stop is never gated, so the test removes the flag "
                   "by hand (as a reboot does, the flag is on tmpfs) and sshd stays. The prior "
@@ -848,6 +847,13 @@ def ssh_until_reboot(ctx):
         ctx.log("sshd -T: %s", policy)
         ctx.check(policy.get("passwordauthentication") == "yes",
                   "PasswordAuthentication is %r: the account cannot log in", policy.get("passwordauthentication"))
+
+        # No pre-authentication banner: the machine says nothing to a
+        # client that has not logged in. The mark and the version go in
+        # the motd, which a login prints (image.health).
+        ctx.check(policy.get("banner") in (None, "none"),
+                  "sshd sends a pre-authentication banner (%r)", policy.get("banner"))
+
         if not before["dev_image"]:
             ctx.check(policy.get("permitrootlogin") == "no" and policy.get("permitemptypasswords") == "no",
                       "a release image runs sshd with PermitRootLogin %r, PermitEmptyPasswords %r",
@@ -1002,165 +1008,89 @@ def factory_return(ctx):
     ctx.log("PASS: the return is refused without confirm=1; the page confirms before it calls")
 
 
-# ----------------------------------------------------------------- mDNS
+# --------------------------------------------------- the machine's name
 
-def mdns_query(name, qid=None):
-    """A DNS query packet for the A record of name with the unicast-
-    response bit set (RFC 6762 5.4), so the responder answers this
-    socket directly."""
-    qid = random.randrange(1, 65536) if qid is None else qid
-    labels = b"".join(struct.pack("B", len(p)) + p.encode("ascii") for p in name.strip(".").split("."))
-    return struct.pack(">HHHHHH", qid, 0, 1, 0, 0, 0) + labels + b"\x00" + struct.pack(">HH", 1, 0x8001)
+def mac_suffix():
+    """The last four hex digits of the MAC address the hostname is built
+    from: wlan0, or eth0 on a machine with no WiFi."""
+    for dev in ("wlan0", "eth0"):
+        raw = read_file("/sys/class/net/%s/address" % dev)
+        mac = (raw or b"").decode("ascii", "replace").strip().replace(":", "").lower()
+        if mac and mac != "0" * 12:
+            return mac[-4:]
+    return ""
 
 
-def _dns_name(pkt, off):
-    """(name, offset after the name); follows compression pointers."""
-    parts = []
-    jumped = False
-    end = off
-    hops = 0
-    while True:
-        if off >= len(pkt):
-            raise ValueError("truncated name")
-        n = pkt[off]
-        if n == 0:
-            off += 1
-            break
-        if n & 0xC0 == 0xC0:
-            if off + 1 >= len(pkt):
-                raise ValueError("truncated pointer")
-            ptr = ((n & 0x3F) << 8) | pkt[off + 1]
-            if not jumped:
-                end = off + 2
-            jumped = True
-            off = ptr
-            hops += 1
-            if hops > 32:
-                raise ValueError("pointer loop")
+def cmdlines():
+    """The command line of every process on the machine, one string
+    each."""
+    out = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
             continue
-        off += 1
-        parts.append(pkt[off:off + n].decode("ascii", "replace"))
-        off += n
-    if not jumped:
-        end = off
-    return ".".join(parts), end
+        raw = read_file("/proc/%s/cmdline" % name)
+        if raw:
+            out.append(raw.decode("utf-8", "replace").replace("\0", " ").strip())
+    return out
 
 
-def mdns_answers(pkt, qid=None):
-    """The A records of a DNS response: [(name, address)]. A qid, when
-    given, must match the packet's id; the answer flag (QR) must be set."""
-    if len(pkt) < 12:
-        return []
-    pid, flags, qd, an, ns, ar = struct.unpack(">HHHHHH", pkt[:12])
-    if qid is not None and pid != qid:
-        return []
-    if not flags & 0x8000:
-        return []
-    off = 12
-    try:
-        for _ in range(qd):
-            _name, off = _dns_name(pkt, off)
-            off += 4
-        out = []
-        for _ in range(an + ns + ar):
-            name, off = _dns_name(pkt, off)
-            if off + 10 > len(pkt):
-                break
-            rtype, rclass, _ttl, rdlen = struct.unpack(">HHIH", pkt[off:off + 10])
-            off += 10
-            rdata = pkt[off:off + rdlen]
-            off += rdlen
-            if rtype == 1 and rdlen == 4:
-                out.append((name.lower(), socket.inet_ntoa(rdata)))
-        return out
-    except ValueError:
-        return []
-
-
-def mdns_resolve(ip, name=MDNS_NAME, timeout=3.0, tries=3):
-    """Ask the LAN for the A record of name over mDNS from the interface
-    that holds ip, and collect the answers: {address}. The query goes to
-    the multicast group; the responder on this machine answers the
-    unicast-response bit directly (a legacy query from a port that is
-    not 5353 is answered the same way), and a listener on 5353 catches
-    a multicast answer too."""
-    found = set()
-    qid = random.randrange(1, 65536)
-    q = mdns_query(name, qid)
-    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    rx = None
-    try:
-        tx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        tx.bind((ip, 0))
-        tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(ip))
-        tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
-        tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-        try:
-            rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if hasattr(socket, "SO_REUSEPORT"):
-                rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            rx.bind(("", MDNS_PORT))
-            rx.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
-                          socket.inet_aton(MDNS_GROUP) + socket.inet_aton(ip))
-        except OSError:
-            rx = None
-        socks = [s for s in (tx, rx) if s is not None]
-        for _ in range(tries):
-            tx.sendto(q, (MDNS_GROUP, MDNS_PORT))
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                ready, _w, _x = select.select(socks, [], [], max(0.05, deadline - time.time()))
-                for s in ready:
-                    try:
-                        pkt, _peer = s.recvfrom(4096)
-                    except OSError:
-                        continue
-                    # a multicast answer carries id 0; the direct one echoes the query's
-                    for n, addr in mdns_answers(pkt, qid if s is tx else None):
-                        if n == name.lower():
-                            found.add(addr)
-                if found:
-                    return found
-    finally:
-        tx.close()
-        if rx is not None:
-            rx.close()
-    return found
-
-
-@test("commission.mdns-announce", title="The machine answers forgefirm.local", subsystem="commission",
-      kind="auto", est_min=1,
+@test("commission.machine-name", title="The machine names itself from its MAC address",
+      subsystem="commission", kind="auto", est_min=1,
       requires=["forgectrl.auth"],
-      description="avahi-daemon runs, its configuration names the host forgefirm on the WiFi and "
-                  "wired links, and the service file advertises the panel on 443 and 80. An mDNS "
-                  "query for the A record of forgefirm.local, sent to the multicast group from "
-                  "the board's own LAN interface, is answered with the board's LAN address; that "
-                  "is what `ping forgefirm.local` on a workstation resolves. No component "
-                  "covers this: the avahi files are layer content, in the platform identity of "
+      description="The machine calls itself forgefirm-<xxxx>, where xxxx is the last four hex "
+                  "digits of its WiFi MAC address, so two machines on one network answer to "
+                  "different names and no name carries a serial number. The live name, "
+                  "/etc/hostname (a bind-mounted copy, because the rootfs is read-only) and the "
+                  "MAC address agree; the DHCP client sends the name as the hostname option, "
+                  "which is what a network with dynamic DNS publishes; the console banner offers "
+                  "the machine's addresses and nothing else, with no marker line and no .local "
+                  "name; and no mDNS responder is on the image. No component covers this: the "
+                  "hostname and banner scripts are layer content, in the platform identity of "
                   "every fingerprint.")
-def mdns_announce(ctx):
+def machine_name(ctx):
     ev = ctx.evidence
-    pids = hw.pidof("avahi-daemon")
-    ev["avahi_pids"] = pids
-    ctx.check(pids, "avahi-daemon is not running")
-    conf = read_file("/etc/avahi/avahi-daemon.conf") or b""
-    ctx.check(b"host-name=forgefirm" in conf, "avahi-daemon.conf does not name the host forgefirm")
-    ctx.check(b"allow-interfaces=wlan0,eth0" in conf, "avahi-daemon.conf does not restrict the interfaces")
-    svc = read_file("/etc/avahi/services/forgefirm.service") or b""
-    ev["service_file_bytes"] = len(svc)
-    ctx.check(b"_https._tcp" in svc and b"<port>443</port>" in svc, "the service file lacks HTTPS 443")
-    ctx.check(b"_http._tcp" in svc and b"<port>80</port>" in svc, "the service file lacks HTTP 80")
+
+    # 1. the name, the file and the MAC address agree
+    suffix = mac_suffix()
+    ev["mac_suffix"] = suffix
+    ctx.check(suffix, "no MAC address to build a name from")
+    live = socket.gethostname()
+    on_file = ((read_file("/etc/hostname") or b"").decode("utf-8", "replace")).strip()
+    ev["hostname"] = live
+    ev["hostname_file"] = on_file
+    ctx.log("hostname %r (MAC suffix %s)", live, suffix or "none")
+    ctx.check(live == "forgefirm-" + suffix,
+              "the hostname is %r, expected forgefirm-%s", live, suffix)
+    ctx.check(on_file == live, "/etc/hostname holds %r, the live name is %r", on_file, live)
+
+    # 2. the DHCP client sends it (option 12), so dynamic DNS can publish it
+    dhcp = [c for c in cmdlines() if c.split(" ")[0].split("/")[-1] == "udhcpc"]
+    ev["udhcpc"] = dhcp
+    ctx.check(dhcp, "no DHCP client is running")
+    ctx.check(any("-x hostname:" + live in c for c in dhcp),
+              "the DHCP client does not send the machine's name: %s", dhcp)
+
+    # 3. the console banner: the addresses, and nothing that is not the banner
+    issue = (read_file("/etc/issue") or b"").decode("utf-8", "replace")
+    ev["issue"] = issue
     ip = lan_ip()
     ev["lan_ip"] = ip
     ctx.check(ip, "cannot determine the board's LAN address")
-    t0 = time.time()
-    found = mdns_resolve(ip)
-    ev["answers"] = sorted(found)
-    ev["resolve_s"] = round(time.time() - t0, 2)
-    ctx.log("%s -> %s (%.1f s)", MDNS_NAME, sorted(found) or "no answer", ev["resolve_s"])
-    ctx.check(found, "no mDNS answer for %s from the LAN interface (%s)", MDNS_NAME, ip)
-    ctx.check(ip in found, "%s resolves to %s, not the LAN address %s", MDNS_NAME, sorted(found), ip)
+    ctx.check("Control panel:" in issue, "the console banner names no control panel")
+    ctx.check("https://%s/" % ip in issue,
+              "the console banner does not carry the LAN address %s", ip)
+    for junk in ("# end", "# ForgeFIRM addresses", ".local"):
+        ctx.check(junk not in issue, "the console banner shows %r", junk)
+    urls = re.findall(r"https://(\S+)/", issue)
+    ev["banner_urls"] = urls
+    for u in urls:
+        literal = u.startswith("[") or all(c.isdigit() or c == "." for c in u)
+        ctx.check(literal, "the console banner offers %r, which is not an address", u)
+
+    # 4. no mDNS on the image; the name is the only name the machine has
+    ev["avahi_pids"] = hw.pidof("avahi-daemon")
+    ctx.check(not ev["avahi_pids"], "an mDNS responder is running: %s", ev["avahi_pids"])
+    ctx.check(not os.path.exists("/etc/avahi"), "/etc/avahi is on the image")
 
 
 # --------------------------------------------------------- the first run
@@ -1458,7 +1388,8 @@ def cert_page(ctx):
         ctx.check(st == 200, "GET %s/cert -> %s, expected 200", base, st)
         ctx.check("location" not in hdrs, "GET %s/cert redirected", base)
         ctx.check(fp in text, "the fingerprint is not on the page from %s", base)
-        ctx.check("forgefirm.local" in text, "forgefirm.local is not among the names on the page")
+        ctx.check(socket.gethostname() in text,
+                  "the machine's hostname is not among the names on the page")
         st, body, hdrs = request(base, "GET", "/cert.pem")
         ctx.check(st == 200 and body.startswith(b"-----BEGIN CERTIFICATE-----"),
                   "GET %s/cert.pem -> %s, not a PEM certificate", base, st)
