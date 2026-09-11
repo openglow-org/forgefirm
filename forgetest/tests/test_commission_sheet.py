@@ -17,7 +17,44 @@ from forgetest.runner import Context, Run  # noqa: E402
 from forgetest.suite import commission_sheet  # noqa: E402
 
 LIVE = ["sheet.frame", "laser.focus", "laser.floor", "laser.dose-curve", "laser.corner", "cooling.flow-load"]
+# The focus card's program is read again after it ran: the served ladder
+# must then lie in the window the card wrote.
+PREVIEWS = ["sheet.frame", "laser.focus", "laser.focus", "laser.floor", "laser.dose-curve", "laser.corner",
+            "cooling.flow-load"]
 EMISSION = {"hv_max": 610, "laser_on_samples": 900, "thermopile_delta": 600, "lit_s": 30.0}
+SPM = 2.922                     # the lens screw, half-steps per mm ($102)
+EDGE_DEFAULT = 3.35
+
+
+def lens_block(s):
+    """The /status lens block as the daemon builds it from the settings: a
+    stop count from 1 to 40 stands, anything else is the fallback."""
+    def count(key, fallback):
+        try:
+            n = float(s.get(key, ""))
+        except ValueError:
+            return fallback, False
+        return (int(n), True) if 1 <= n <= 40 else (fallback, False)
+    try:
+        edge = float(s.get("lens_hall_edge_z_mm", ""))
+    except ValueError:
+        edge = EDGE_DEFAULT
+    below, a = count("lens_stop_below_steps", 10)
+    above, b = count("lens_stop_above_steps", 12)
+    return {"edge_z": round(edge, 2), "below": below, "above": above, "stops_found": a and b,
+            "reach_min": round(edge - below / SPM, 2), "reach_max": round(edge + above / SPM, 2)}
+
+
+def ladder_z(edge, below, above):
+    """The focus ladder the daemon builds: twelve whole half-steps from
+    the top of the window to the bottom."""
+    return [round(edge + round(above - (above + below) * i / 11) / SPM, 2) for i in range(12)]
+
+
+# The window the focus card finds and writes before its controller starts.
+STOPS = {"lens_stop_below_steps": "14", "lens_stop_above_steps": "20"}
+FOCUS_WINDOW = {"below": 14, "above": 20, "reach_min": round(EDGE_DEFAULT - 14 / SPM, 2),
+                "reach_max": round(EDGE_DEFAULT + 20 / SPM, 2)}
 
 # Each wizard as the daemon runs it: its prompts in order (id, kind,
 # options) and the result it ends with. A "jog" prompt repeats until the
@@ -37,7 +74,9 @@ SCRIPT = {
                      "steps_per_mm": 2.922, "max_height_mm": 13.81,
                      "focus_range_mm": {"min": 2.17, "max": 13.81},
                      "stops": {"found": True, "below": 14, "above": 20, "contact_below": 16,
-                               "contact_above": 22, "why": ""}, "emission": EMISSION}),
+                               "contact_above": 22, "why": ""},
+                     "window": dict(FOCUS_WINDOW), "ladder_z": ladder_z(EDGE_DEFAULT, 14, 20),
+                     "emission": EMISSION}),
     "laser.floor": ([("floor-arm", "continue", ["Continue"]),
                      ("floor-pick", "choice", ["2", "4", "6", "8", "None"])],
                     {"faintest_density": 8.0, "floor_density": 10.0, "emission": EMISSION}),
@@ -50,10 +89,11 @@ SCRIPT = {
                           {"lit_s": 30.0, "dose_raw_s": 12000, "peak_c": 0.72, "k_density": 2.14e-5,
                            "k_cw": 2.78e-5, "emission": EMISSION}),
 }
-# What each card writes when it ends.
+# What a card writes when it starts (the focus card's window, before its
+# controller starts) and when it ends.
+START_WRITES = {"laser.focus": dict(STOPS)}
 WRITES = {
-    "laser.focus": {"lens_hall_edge_z_mm": "6.96", "lens_stop_below_steps": "14",
-                    "lens_stop_above_steps": "20"},
+    "laser.focus": {"lens_hall_edge_z_mm": "6.96"},
     "laser.floor": {"laser_floor_density": "10"},
     "laser.dose-curve": {"laser_dose_curve": "10:0.44,100:100"},
     "laser.corner": {"laser_corner_gamma": "1.5"},
@@ -115,9 +155,11 @@ class ScriptedDaemon:
         self.versions = {}
         self.answers = {}          # wid -> [values]
         self.order = []            # the wizards as started
+        self.settings_at_start = {}    # wid -> the settings as the wizard found them
         self.previews = []
         self.queue = []
         self.seq = 0
+        self.stray_z = None        # a Z the served program commands beyond the reach, when set
         fake.on_get = self.on_get
         fake.on_post = self.on_post
 
@@ -130,6 +172,10 @@ class ScriptedDaemon:
         return True
 
     def on_get(self, path, q):
+        s = self.fake.state["settings"]
+        if path == "/status":
+            # the lens block follows the settings, as the daemon's does
+            return 200, dict(self.fake.state["status"], lens=lens_block(s))
         if path == "/wiz/dark":
             return 200, dict(self.dark)
         if path == "/wiz":
@@ -140,8 +186,18 @@ class ScriptedDaemon:
                 return 404, {"error": "no such card"}
             return 200, b"<svg xmlns='http://www.w3.org/2000/svg'></svg>", "image/svg+xml"
         if path == "/wiz/sheet.gcode":
-            # the frame and the text are M4 at the mark dose, as the daemon serves them
-            return 200, b"; mock\nM4 S400\nG0 X60 Y42\nG1 X120 Y42 F3000\nM5\n", "text/plain"
+            # the frame and the text are M4 at the mark dose, as the daemon
+            # serves them; the head's Z is the edge, the tail goes back to
+            # it, and the focus card's ladder spans the window the settings
+            # hold now
+            lens = lens_block(s)
+            lines = ["; mock", "G0 Z%.2f" % lens["edge_z"], "M4 S400", "G0 X60 Y42", "G1 X120 Y42 F3000"]
+            if q.get("card") == "laser.focus":
+                lines += ["G0 Z%.2f" % z for z in ladder_z(lens["edge_z"], lens["below"], lens["above"])]
+            if self.stray_z is not None:
+                lines.append("G0 Z%.2f" % self.stray_z)
+            lines += ["M5", "G0 Z%.2f" % lens["edge_z"], "G0 X0 Y0", "M2"]
+            return 200, ("\n".join(lines) + "\n").encode(), "text/plain"
         return None
 
     def on_post(self, path, form):
@@ -151,6 +207,8 @@ class ScriptedDaemon:
             if wid not in SCRIPT:
                 return 404, {"error": "no such wizard"}
             self.order.append(wid)
+            self.settings_at_start[wid] = dict(s)
+            s.update(START_WRITES.get(wid, {}))
             self.queue = list(SCRIPT[wid][0])
             self.dark.update({"id": wid, "running": True, "phase": "starting", "result": None, "error": ""})
             self.open_next()
@@ -199,7 +257,7 @@ class SheetRunTests(unittest.TestCase):
         self.assertEqual(d.answers["laser.focus"], ["Continue", "11", "Keep"])
         self.assertEqual(d.answers["laser.floor"], ["Continue", "8"])
         self.assertEqual(d.answers["laser.corner"], ["Continue", "1.50"])
-        self.assertEqual(d.previews, LIVE)
+        self.assertEqual(d.previews, PREVIEWS)
         cards = run.evidence["cards"]
         self.assertEqual(sorted(cards), sorted(["sheet.place"] + LIVE))
         for wid in LIVE:
@@ -208,6 +266,24 @@ class SheetRunTests(unittest.TestCase):
         self.assertNotIn("emission", run.evidence)
         self.assertEqual(cards["sheet.place"]["result"]["origin_x"], 100)
         self.assertEqual(run.evidence["settings_before"], FOUND)
+        # A fresh machine's run: the lens settings were gone before the
+        # frame, the frame's program ran in the fallback window, the focus
+        # card's window was in the settings when the floor card started,
+        # and the window check filed what it compared.
+        for k in commission_sheet.LENS_SETTINGS:
+            self.assertNotIn(k, d.settings_at_start["sheet.frame"], k)
+        self.assertEqual(run.evidence["lens_fresh"]["stops_found"], False)
+        self.assertEqual(run.evidence["program_z"]["sheet.frame"]["reach"], [-0.07, 7.46])
+        floor_start = d.settings_at_start["laser.floor"]
+        self.assertEqual({k: floor_start[k] for k in commission_sheet.LENS_SETTINGS},
+                         {"lens_hall_edge_z_mm": "6.96", "lens_stop_below_steps": "14", "lens_stop_above_steps": "20"})
+        fw = run.evidence["focus_window"]
+        self.assertEqual(fw["window"], FOCUS_WINDOW)
+        self.assertEqual(fw["settings"]["lens_stop_below_steps"], "14")
+        self.assertEqual(len(fw["ladder_z"]), 12)
+        self.assertEqual(fw["program_z_before"]["reach"], [-0.07, 7.46])      # the fallback ladder
+        self.assertEqual(fw["program_z_after"]["reach"], [2.17, 13.8])        # the written window at the new edge
+        self.assertEqual(len(fw["program_z_after"]["z"]), 14)                 # head, twelve lines, tail
         for k, v in FOUND.items():
             self.assertEqual(self.fake.state["settings"][k], v, k)      # restored
 
@@ -260,6 +336,44 @@ class SheetRunTests(unittest.TestCase):
                 self.assertEqual(self.fake.state["settings"][k], v, k)
         finally:
             SCRIPT["laser.floor"] = (SCRIPT["laser.floor"][0], dict(SCRIPT_DARK, emission=EMISSION))
+
+    def test_a_focus_window_the_settings_do_not_hold_fails_the_run(self):
+        # The defect the bench found: the focus card burned its ladder over
+        # the stops it found while the controller's Z limit stood on the
+        # settings, which did not hold them. A daemon whose focus result
+        # names a window the settings do not hold fails the run before the
+        # floor card, and the settings still go back.
+        from forgetest.runner import Failed
+        saved = dict(START_WRITES["laser.focus"])
+        START_WRITES["laser.focus"] = {}
+        try:
+            t = catalog.load_suite()["commission.sheet"]
+            run = Run("test", t.id, t.title)
+            run.unattended = True
+            with self.assertRaises(Failed) as cm:
+                t.fn(Context(run, None, t))
+            self.assertIn("the settings hold", str(cm.exception))
+            self.assertEqual(self.daemon.order, ["sheet.place", "sheet.frame", "laser.focus"])
+            for k, v in FOUND.items():
+                self.assertEqual(self.fake.state["settings"][k], v, k)
+        finally:
+            START_WRITES["laser.focus"] = saved
+
+    def test_a_program_z_beyond_the_reach_fails_before_the_burn(self):
+        # A served program that commands a Z the lens does not reach is
+        # refused before the card starts: nothing burns.
+        from forgetest.runner import Failed
+        self.daemon.stray_z = 10.6
+        t = catalog.load_suite()["commission.sheet"]
+        run = Run("test", t.id, t.title)
+        run.unattended = True
+        with self.assertRaises(Failed) as cm:
+            t.fn(Context(run, None, t))
+        self.assertIn("outside the lens window", str(cm.exception))
+        self.assertIn("10.6", str(cm.exception))
+        self.assertEqual(self.daemon.order, ["sheet.place"])
+        for k, v in FOUND.items():
+            self.assertEqual(self.fake.state["settings"][k], v, k)
 
 
 if __name__ == "__main__":

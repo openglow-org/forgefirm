@@ -247,8 +247,11 @@ TOOLS = [
     {"id": "z-envelope-test", "title": "Z envelope harness", "script": "z_envelope_test.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
      "desc": "The Z soft limit belongs to the driver, not to $20: an unreferenced Z is collapsed to where the "
-             "lens stands, and neither a $20 nor a $132 write frees it. A CI harness (the grblHAL repo): needs "
-             "the host-built null-sink controller, not the machine, so it is not a bench-page tool."},
+             "lens stands, and neither a $20 nor a $132 write frees it. A referenced lens (forgectrl's marker "
+             "and the lens settings) opens it to the window the settings hold, the fallback or the focus "
+             "card's stops: the ends of the reach run, two half-steps past either end alarms. A CI harness "
+             "(the grblHAL repo): needs the host-built null-sink controller, not the machine, so it is not a "
+             "bench-page tool."},
     {"id": "raster-dry", "title": "Dry top-speed raster per XY microstep mode", "script": "raster_dry.py",
      "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("modes", "choice", "8 16 32", "the modes to run, in order", ["8", "16", "32", "8 16 32"])],

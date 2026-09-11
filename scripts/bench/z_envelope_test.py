@@ -25,6 +25,19 @@ no root) and drives it over TCP:
      does not free Z either
   6. X and Y are still free after both writes
 
+A referenced lens opens the envelope to the window the shared settings
+hold, the same keys the daemon's wizards build their Z from. forgectrl
+leaves the lens on its hall edge and a marker in the state directory
+before the controller starts; the driver takes it as it loads its
+settings and places the edge on its step grid:
+
+  7. the marker with the edge alone: Z sits at the edge's grid step, the
+     fallback window (10 below, 12 above) runs to its ends, and two
+     half-steps past either end alarms
+  8. the marker with the focus card's stops (14 below, 20 above): the
+     wider window runs to its ends, two half-steps past either alarms
+  9. a stop count out of range (41) falls back on its side alone
+
 The binary keeps its settings in EEPROM.DAT in the working directory, so
 each run starts from defaults in a temporary directory and leaves
 nothing behind.
@@ -53,13 +66,24 @@ def fail(msg):
 
 
 class Session:
-    """One null-sink controller process with its own settings store."""
+    """One null-sink controller process with its own settings store.
+    `conf` (key: value) is the shared config the driver reads; with
+    `referenced` the lens marker forgectrl leaves is in the state
+    directory, so the driver takes the lens reference at its start."""
 
-    def __init__(self):
+    def __init__(self, conf=None, referenced=False):
         self.workdir = tempfile.mkdtemp(prefix="z-envelope-")
         env = dict(os.environ, GF_STATE_DIR=self.workdir, FFLOG_STDERR="1")
         for key in ("GFSINK", "GF_SWITCH_FILE", "GF_VERDICT_FILE"):
             env.pop(key, None)
+        conf_path = os.path.join(self.workdir, "forgefirm.conf")
+        with open(conf_path, "w") as f:
+            for k, v in (conf or {}).items():
+                f.write("%s = %s\n" % (k, v))
+        env["GFHOME_CONF"] = conf_path
+        if referenced:
+            with open(os.path.join(self.workdir, "lens.home"), "w") as f:
+                f.write("edge 0 3 3\n")
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)],
                                      cwd=self.workdir, env=env,
                                      stdout=subprocess.DEVNULL,
@@ -113,6 +137,23 @@ class Session:
         m = re.search(r"<(\w+)", self.send("?"))
         return m.group(1) if m else "?"
 
+    def mpos_z(self):
+        """The reported machine Z (no work offset is set in a session)."""
+        m = re.search(r"[MW]Pos:(-?[\d.]+),(-?[\d.]+),(-?[\d.]+)", self.send("?"))
+        if not m:
+            fail("no position in the status report")
+        return float(m.group(3))
+
+    def wait_idle(self, timeout=15.0):
+        """A move that ran plays out before the next line is judged: the
+        soft limit on a moving machine holds first and alarms after."""
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.state() == "Idle":
+                return
+            time.sleep(0.1)
+        fail("the controller did not return to Idle")
+
     def move(self, gcode):
         """Run one move. Returns True when the soft limit blocked it.
         An alarm needs a reset and an unlock before the next move."""
@@ -160,6 +201,60 @@ def free_in_xy(s, when):
     check(ran, "X and Y free %s" % when, "an X or Y move was blocked %s" % when)
 
 
+def window_holds(s, steps, below, above, what):
+    """The envelope of a referenced lens whose edge sits on grid step
+    `steps`: the ends of the reach (`below` and `above` half-steps from
+    the edge) run, two half-steps past either end alarms. The controller
+    keeps a half-step of slack beyond the reach, so one past is not
+    judged here; two is outside on every head."""
+    spm = float(s.setting("$102"))
+    top, bottom = (steps + above) / spm, (steps - below) / spm
+    s.wait_idle()
+    check(not s.move("G0 Z%.3f" % top), "%s: the top of the reach, Z %.3f, runs" % (what, top),
+          "%s: Z %.3f, the top of the reach, was blocked" % (what, top))
+    s.wait_idle()
+    check(not s.move("G0 Z%.3f" % bottom), "%s: the bottom of the reach, Z %.3f, runs" % (what, bottom),
+          "%s: Z %.3f, the bottom of the reach, was blocked" % (what, bottom))
+    over, under = (steps + above + 2) / spm, (steps - below - 2) / spm
+    s.wait_idle()
+    check(s.move("G0 Z%.3f" % over), "%s: two half-steps over the top, Z %.3f, alarms" % (what, over),
+          "%s: Z %.3f, two half-steps over the top, ran" % (what, over))
+    s.wait_idle()
+    check(s.move("G0 Z%.3f" % under), "%s: two half-steps under the bottom, Z %.3f, alarms" % (what, under),
+          "%s: Z %.3f, two half-steps under the bottom, ran" % (what, under))
+
+
+def referenced_cases():
+    """The lens referenced by forgectrl's marker: the envelope is the
+    window the shared settings hold, as the daemon's wizards read it."""
+    edge = 3.35
+    conf = {"lens_hall_edge_z_mm": "%.2f" % edge}
+    s = Session(conf=conf, referenced=True)
+    try:
+        spm = float(s.setting("$102"))
+        steps = int(round(edge * spm))
+        z = s.mpos_z()
+        check(abs(z - steps / spm) < 0.002,
+              "referenced: Z sits at the edge's grid step, %.3f" % z,
+              "referenced: Z reads %.3f, not the edge's grid step %.3f" % (z, steps / spm))
+        window_holds(s, steps, 10, 12, "the fallback window")
+        free_in_xy(s, "with the lens referenced")
+    finally:
+        s.close()
+
+    s = Session(conf=dict(conf, lens_stop_below_steps="14", lens_stop_above_steps="20"), referenced=True)
+    try:
+        window_holds(s, steps, 14, 20, "the focus card's window")
+    finally:
+        s.close()
+
+    s = Session(conf=dict(conf, lens_stop_below_steps="41", lens_stop_above_steps="20"), referenced=True)
+    try:
+        window_holds(s, steps, 10, 20, "a below count out of range")
+    finally:
+        s.close()
+
+
 def main():
     if not os.path.isfile(BIN):
         fail("no controller binary at %s" % BIN)
@@ -189,6 +284,7 @@ def main():
         free_in_xy(s, "after the settings writes")
     finally:
         s.close()
+    referenced_cases()
     print("PASS z_envelope_test")
 
 

@@ -21,7 +21,7 @@ from ..catalog import test
 from .commission_dark import run_check, Restore
 
 SHEET_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/wizrun.h"),
-                ("forgectrl", "src/sheet.*"),
+                ("forgectrl", "src/lens.*"), ("forgectrl", "src/sheet.*"),
                 ("forgectrl", "src/font_hershey.*"), ("forgectrl", "src/jobstream.*"),
                 ("forgectrl", "src/curverec.*"), ("forgectrl", "src/wizdark.*"),
                 ("forgectrl", "src/wiz.*"), ("forgectrl", "src/commission.*"),
@@ -71,6 +71,22 @@ def preview_ok(ctx, wid):
     ctx.check(st == 200 and re.search(rb"^M[34] S\d", body or b"", re.M) is not None,
               "no program for %s (%s)", wid, st)
     ctx.evidence["program_lines"] = body.count(b"\n")
+    # Every Z the program commands is a height the head reaches in the
+    # window the machine holds now: the focus card's own numbers once it
+    # has them, and the conservative fallback on a head whose travel is
+    # not known yet. The controller refuses a Z outside it with ALARM:2,
+    # and it refuses it while the body is still burning, so the card dies
+    # where the parser is and not where the bad line is.
+    lens = (fc.status() or {}).get("lens") or {}
+    lo, hi = lens.get("reach_min"), lens.get("reach_max")
+    zs = [float(m) for m in re.findall(rb"^G0 Z(-?[0-9.]+)", body or b"", re.M)]
+    ctx.evidence.setdefault("program_z", {})[wid] = {
+        "z": zs, "reach": [lo, hi], "stops_found": lens.get("stops_found")}
+    ctx.check(lo is not None and hi is not None, "/status carries no lens reach: %s", lens)
+    if lo is not None and hi is not None:
+        out = [z for z in zs if z < lo - 0.01 or z > hi + 0.01]
+        ctx.check(not out, "%s commands Z outside the lens window %.2f..%.2f: %s",
+                  wid, lo, hi, out)
 
 
 def emission_ok(ctx, last):
@@ -87,6 +103,61 @@ def file_card(ctx, wid):
     """Move the card's evidence under its own key."""
     ev = ctx.evidence
     ev.setdefault("cards", {})[wid] = {k: ev.pop(k) for k in CARD_EVIDENCE if k in ev}
+
+
+# The lens settings: the head's numbers, which a fresh machine does not
+# have. Cleared before the cards so the run is a fresh machine's.
+LENS_SETTINGS = CARD_SETTINGS[:3]
+FALLBACK_WINDOW = (10, 12)
+
+
+def fresh_lens(ctx):
+    """The lens as a fresh machine has it: the head's numbers unknown, so
+    the frame runs in the fallback window and the focus card has to find
+    the stops and write them before its ladder burns. The machine's own
+    numbers come back with the restore at the end of the run."""
+    fc = ctx.forgectrl
+    for k in LENS_SETTINGS:
+        st, _ = fc.post("/settings", params={k: ""})
+        ctx.check(st == 200, "clearing %s -> %s", k, st)
+    lens = (fc.status() or {}).get("lens") or {}
+    ctx.evidence["lens_fresh"] = lens
+    ctx.check(lens.get("stops_found") is False and (lens.get("below"), lens.get("above")) == FALLBACK_WINDOW,
+              "the lens window is not the fallback after the clear: %s", lens)
+
+
+def focus_window_ok(ctx):
+    """The window the focus card burned its ladder in is the one it wrote
+    before its controller started, and the one the machine holds now: the
+    result's window is the stops it found (or the fallback), the settings
+    hold that window, every ladder height lies in its reach, and the
+    program served now agrees with /status."""
+    fc = ctx.forgectrl
+    r = ((ctx.evidence.get("cards") or {}).get("laser.focus") or {}).get("result") or {}
+    w, stops = r.get("window") or {}, r.get("stops") or {}
+    s = fc.settings() or {}
+    held = (str(s.get("lens_stop_below_steps")), str(s.get("lens_stop_above_steps")))
+    ctx.check(held == (str(w.get("below")), str(w.get("above"))),
+              "the settings hold the window %s, the ladder ran in %s/%s", held, w.get("below"), w.get("above"))
+    if stops.get("found"):
+        ctx.check((w.get("below"), w.get("above")) == (stops.get("below"), stops.get("above")),
+                  "the ladder's window %s is not the stops found %s", w, stops)
+    else:
+        ctx.check((w.get("below"), w.get("above")) == FALLBACK_WINDOW,
+                  "stops not found (%s), but the ladder's window is %s", stops.get("why"), w)
+    zs = r.get("ladder_z") or []
+    lo, hi = w.get("reach_min"), w.get("reach_max")
+    out = [z for z in zs if lo is None or hi is None or z < lo - 0.01 or z > hi + 0.01]
+    ctx.check(len(zs) == 12 and not out, "ladder heights outside the reach %s..%s: %s", lo, hi, out or zs)
+    ev = ctx.evidence
+    before = dict(ev.get("program_z") or {}).get("laser.focus")
+    preview_ok(ctx, "laser.focus")
+    ev["focus_window"] = {"window": w, "stops": stops, "ladder_z": zs,
+                          "settings": {k: s.get(k) for k in LENS_SETTINGS},
+                          "program_z_before": before,
+                          "program_z_after": (ev.get("program_z") or {}).get("laser.focus"),
+                          "preview_bytes": ev.pop("preview_bytes", None),
+                          "program_lines": ev.pop("program_lines", None)}
 
 
 def thickness_answer(ctx):
@@ -167,15 +238,22 @@ def burn(ctx, wid, answers, want):
              "Nothing else: the test answers every prompt itself and puts back every setting the "
              "cards write. It runs about half an hour, mostly the coolant settle and the dark "
              "tails."],
-      description="One run over the sheet's seven wizards on one piece of wood. "
+      description="One run over the sheet's seven wizards on one piece of wood, as a fresh "
+                  "machine runs them: the three lens settings are cleared first, so the frame "
+                  "runs in the fallback window and the focus card has to find the stops and write "
+                  "them before its ladder burns. "
                   "POST /wiz/sheet.place/start references the lens, takes the controller in "
                   "loopback posture, jogs +X 10 and -X 10, and sets the origin at the head "
                   "(Full sheet; the thickness answered in the machine's units, 3.2 mm or "
                   "0.125 in). Then, each after the press and each with its preview "
-                  "and program served by GET /wiz/sheet.svg and /wiz/sheet.gcode: the frame "
+                  "and program served by GET /wiz/sheet.svg and /wiz/sheet.gcode, every Z the "
+                  "program commands inside the reach /status reports: the frame "
                   "(180 x 130 mm) and the header band at the mark dose; the focus card (the "
-                  "lens homed on its bottom stop, the hall edge counted, twelve lines down the "
-                  "travel; the pick is line 11, the thickness kept); the floor card (twelve "
+                  "lens on its hall edge, the stops found by the head accelerometer and written "
+                  "as the window before the controller starts, twelve lines from the top of the "
+                  "window to the bottom; the pick is line 11, the thickness kept; after it the "
+                  "settings, the result's window, and the served program must hold the window "
+                  "the ladder ran in); the floor card (twelve "
                   "rungs from 2 to 24 percent with the floor and the curve off for the job; the "
                   "pick is 8, the floor written is 10); the dose card (seven rungs sampled at "
                   "25 Hz, the curve fit on 20 s of dark); the corner card (five gammas reloaded "
@@ -191,6 +269,9 @@ def sheet(ctx):
               "each. The bench presses when the button lights.")
     place(ctx)
     with Restore(ctx, CARD_SETTINGS):
+        fresh_lens(ctx)
         for wid, answers, want in CARDS:
             burn(ctx, wid, answers, want)
-    ctx.log("PASS: the sheet's seven wizards ran on one piece; settings restored")
+            if wid == "laser.focus":
+                focus_window_ok(ctx)
+    ctx.log("PASS: the sheet's seven wizards ran on one piece as a fresh machine's; settings restored")
