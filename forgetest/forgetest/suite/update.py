@@ -8,6 +8,7 @@ from ..catalog import test
 from .. import hw
 
 _UPDATE_COVERS = [("forgectrl", "src/update.c"), ("forgectrl", "src/update.h"),
+                  ("forgectrl", "src/relcheck.c"), ("forgectrl", "src/relcheck.h"),
                   ("ffboot", "**")]
 
 
