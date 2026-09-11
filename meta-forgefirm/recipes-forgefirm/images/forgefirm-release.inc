@@ -15,4 +15,4 @@
 # it to equal the rootfs stamp, the .fw meta-version and the release tag,
 # and the acceptance test image.health compares the stamp on the running
 # machine with the manifest's.
-FORGEFIRM_RELEASE ?= "0.0.2"
+FORGEFIRM_RELEASE ?= "0.0.3"
