@@ -1,5 +1,6 @@
 """update.* - the A/B slot inventory and the firmware verification path."""
 import os
+import re
 import tempfile
 import time
 import shutil
@@ -118,3 +119,76 @@ def slots_and_signature(ctx):
         except OSError:
             pass
         shutil.rmtree(work, ignore_errors=True)
+
+
+_VERSION_RX = re.compile(r"^v?\d+\.\d+\.\d+")
+
+
+@test("update.release-check", title="Release check answers from the releases API; the alert dismissal is per release",
+      subsystem="update", kind="auto", est_min=1,
+      covers=_UPDATE_COVERS + [("forgectrl", "src/ui/panel.js"), ("forgectrl", "src/ui/index.html")],
+      requires=["forgectrl.auth"],
+      description="GET /update/release answers the kept answer of the daily check (available, version, "
+                  "current, new, checked, dismissed). POST /update/check asks the releases API now and "
+                  "answers the same shape; a machine with no route to the API answers 502, which the drill "
+                  "records and steps over. A published release is a v<semver> tag with the firmware "
+                  "file's size and its notes, and `new` follows the version order: a development build "
+                  "sees every release as newer. POST /update/dismiss marks that version dismissed, an "
+                  "empty version undoes it, and a version that is not a tag is refused. The dismissal "
+                  "the machine had before the drill is put back.")
+def release_check(ctx):
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    keys = ("available", "version", "current", "new", "checked", "dismissed", "detail", "bytes")
+
+    st, before = fc.get("/update/release")
+    ctx.log("GET /update/release -> %s %s", st, {k: before.get(k) for k in keys} if isinstance(before, dict) else before)
+    ctx.check(st == 200 and isinstance(before, dict) and "available" in before and "checked" in before,
+              "GET /update/release -> %s", st)
+    ev["before"] = {k: before.get(k) for k in keys}
+    prior = before.get("version", "") if before.get("dismissed") else ""
+
+    st, now = fc.post("/update/check")
+    ctx.log("POST /update/check -> %s %s", st, {k: now.get(k) for k in keys} if isinstance(now, dict) else now)
+    if st == 502:
+        ctx.log("the machine has no route to the releases API; the kept answer stands")
+        now = before
+    else:
+        ctx.check(st == 200 and isinstance(now, dict) and "available" in now, "POST /update/check -> %s", st)
+        ctx.check(isinstance(now.get("checked"), int) and now["checked"] >= before.get("checked", 0),
+                  "the check did not move `checked`: %s", now.get("checked"))
+    ev["after_check"] = {k: now.get(k) for k in keys}
+
+    if now.get("available"):
+        ctx.check(_VERSION_RX.match(str(now.get("version", ""))) is not None,
+                  "the release version is not a v<semver> tag: %r", now.get("version"))
+        ctx.check(isinstance(now.get("bytes"), int) and now["bytes"] > 0,
+                  "the firmware file's size is missing: %r", now.get("bytes"))
+        ctx.check(isinstance(now.get("notes"), str), "the notes are not a string")
+        ctx.check(isinstance(now.get("new"), bool), "`new` is not a bool")
+        if not _VERSION_RX.match(str(now.get("current", ""))):
+            ctx.check(now.get("new") is True,
+                      "a development build (%r) must see release %s as newer", now.get("current"), now["version"])
+    else:
+        ctx.log("no release available: %s", now.get("detail"))
+        ctx.check(isinstance(now.get("detail"), str) and now["detail"], "an unavailable release names no reason")
+
+    try:
+        st, body = fc.post("/update/dismiss", params={"version": "v0.0.1; rm -rf /"})
+        ctx.log("POST /update/dismiss version=<not a tag> -> %s %s", st, body)
+        ctx.check(st == 400, "a version that is not a tag was not refused: %s", st)
+
+        tag = now["version"] if now.get("available") else "v0.0.0"
+        st, body = fc.post("/update/dismiss", params={"version": tag})
+        ctx.log("POST /update/dismiss version=%s -> %s %s", tag, st,
+                {k: body.get(k) for k in keys} if isinstance(body, dict) else body)
+        ctx.check(st == 200 and isinstance(body, dict), "POST /update/dismiss -> %s", st)
+        if now.get("available"):
+            ctx.check(body.get("dismissed") is True, "the dismissal of %s was not recorded: %r", tag, body.get("dismissed"))
+        st, body = fc.post("/update/dismiss", params={"version": ""})
+        ctx.log("POST /update/dismiss version= -> %s", st)
+        ctx.check(st == 200 and isinstance(body, dict) and body.get("dismissed") is False,
+                  "the empty version did not undo the dismissal: %s %r", st, body.get("dismissed") if isinstance(body, dict) else body)
+    finally:
+        st, body = fc.post("/update/dismiss", params={"version": prior})
+        ctx.log("dismissal put back to %r -> %s", prior, st)

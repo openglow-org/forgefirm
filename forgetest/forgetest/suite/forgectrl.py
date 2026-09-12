@@ -56,6 +56,7 @@ def auth(ctx):
                          ("/mode", {"controller": "grbl"}), ("/settings", {"ui_units": "mm"}),
                          ("/diag/flow-verify", None), ("/diag/abort", None),
                          ("/update/apply", None), ("/boot", {"target": "a"}),
+                         ("/update/check", None), ("/update/dismiss", {"version": "v0.0.0"}),
                          ("/system/reboot", None), ("/restore/factory", None),
                          ("/restore/factory-return", {"confirm": "1"}), ("/system/ssh", {"enable": "1"}),
                          ("/wiz/advisories/accept", None), ("/wiz/account", None),
