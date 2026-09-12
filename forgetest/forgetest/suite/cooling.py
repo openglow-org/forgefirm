@@ -1329,3 +1329,64 @@ def flow_under_load(ctx):
     ctx.check(dt is not None, "the window did not close after M2")
     ctx.log("PASS: lit through the window, raw rise %.1f C, laser %.1f C off, judged %.1f C against %.1f "
             "(dT %.1f), window closed %.1f s after M2", raw, share, rise, float(limit), float(dtc), dt)
+
+
+@test("cooling.fan-duty-readback", title="A fan duty a device lost is read back and put back inside a tick",
+      subsystem="cooling", kind="auto", mode="grbl", est_min=2,
+      covers=_COOL_COVERS + [("kernel-module-glowforge", "src/head*")],
+      requires=["kernel.latch-locked-idle"],
+      description="M8 opens a run session and every fan reads its run duty back from its device. "
+                  "The head's air-assist register is then written back to the idle duty behind the "
+                  "engine's back (what a head reset or a dropped transaction leaves) and the exhaust "
+                  "PWM to zero: within a few ticks each reads its run duty again, the log names each "
+                  "loss and its put-back, and the session stays OK with no airflow fault (a fan put "
+                  "back gets its spin-up grace). Then M9 and the idle duties.")
+def fan_duty_readback(ctx):
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    run = {"head/air_assist_pwm": 1023, "thermal/exhaust_pwm": 65535, "thermal/intake_pwm": 43278}
+    with ctx.grbl() as g:
+        c = _hold_session(ctx, g, fc, lambda c: c.get("phase") == "run", "readback", 20)
+        try:
+            ctx.check(c.get("phase") == "run", "no run session opened: %s", c)
+            ctx.sleep(2)
+            before = {k: hw.sysfs_int(k) for k in run}
+            ctx.log("duties at run: %s", before)
+            ev["run_duties"] = before
+            ctx.check(all(before.get(k) == v for k, v in run.items()),
+                      "not every fan reads its run duty: %s", before)
+            hw.sysfs_write("head/air_assist_pwm", 204)
+            hw.sysfs_write("thermal/exhaust_pwm", 0)
+            lost = {k: hw.sysfs_int(k) for k in ("head/air_assist_pwm", "thermal/exhaust_pwm")}
+            ctx.log("written behind the engine's back: %s", lost)
+            back = {}
+            t0 = time.time()
+            while time.time() - t0 < 6:
+                ctx.sleep(0.5)
+                back = {k: hw.sysfs_int(k) for k in ("head/air_assist_pwm", "thermal/exhaust_pwm")}
+                if back.get("head/air_assist_pwm") == 1023 and back.get("thermal/exhaust_pwm") == 65535:
+                    break
+            took = round(time.time() - t0, 1)
+            ev["put_back"] = {"duties": back, "after_s": took}
+            ctx.log("put back after %s s: %s", took, back)
+            ctx.check(back.get("head/air_assist_pwm") == 1023, "the air-assist duty was not put back: %s", back)
+            ctx.check(back.get("thermal/exhaust_pwm") == 65535, "the exhaust duty was not put back: %s", back)
+            ctx.sleep(2)
+            ctx.check(_tail_has(fc, "head/air_assist_pwm read 204 with 1023 commanded: put back"),
+                      "the air-assist loss is not named in the log")
+            ctx.check(_tail_has(fc, "thermal/exhaust_pwm read 0 with 65535 commanded: put back"),
+                      "the exhaust loss is not named in the log")
+            for _ in range(8):
+                ctx.sleep(1)
+                c = _cool(fc)
+                if c.get("verdict") != "OK":
+                    break
+            ev["verdict_after"] = {"verdict": c.get("verdict"), "hold": c.get("hold"), "reason": c.get("reason")}
+            ctx.check(c.get("verdict") == "OK" and not c.get("hold"),
+                      "the session did not stay OK after the put-back: %s %s", c.get("verdict"), c.get("reason"))
+        finally:
+            g.command("M9")
+            _session_ended(ctx, fc, "readback")
+    idle = {k: hw.sysfs_int(k) for k in run}
+    ev["idle_duties"] = idle
+    ctx.log("duties at idle: %s", idle)
