@@ -206,6 +206,100 @@
   border-left: 4px solid var(--og-red);
 }
 
+/* ---- The release dialog -------------------------------------------- */
+#rel-view h3 {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--og-dim);
+  margin: 12px 0 4px;
+}
+.relnotes {
+  max-height: 40vh;
+  overflow: auto;
+  border: 1px solid var(--og-line);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 4px 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.relnotes h1,
+.relnotes h2,
+.relnotes h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 10px 0 4px;
+}
+.relnotes h1:first-child,
+.relnotes h2:first-child,
+.relnotes h3:first-child {
+  margin-top: 0;
+}
+.relnotes p,
+.relnotes ul {
+  margin: 0 0 6px;
+}
+.relnotes ul {
+  padding-left: 20px;
+}
+.relnotes code {
+  font-size: 12px;
+}
+.relnotes table {
+  border-collapse: collapse;
+  margin: 4px 0 8px;
+}
+.relnotes th,
+.relnotes td {
+  border: 1px solid var(--og-line);
+  padding: 2px 8px;
+  text-align: left;
+}
+.relwarn {
+  background: var(--og-warn-bg);
+  border: 1px solid var(--og-warn);
+  color: var(--og-warn-txt);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+.relsteps {
+  margin: 0 0 12px;
+  padding-left: 22px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.relsteps li {
+  color: var(--og-dim);
+}
+.relsteps li.cur {
+  color: var(--og-txt);
+  font-weight: 600;
+}
+.relsteps li.done {
+  color: var(--og-ok);
+}
+.relsteps li.done::after {
+  content: ' \2713';
+}
+.progress {
+  --bs-progress-bg: var(--og-line-soft);
+  --bs-progress-bar-bg: var(--og-action);
+  --bs-progress-height: 10px;
+  margin: 0 0 8px;
+}
+#rel-phase {
+  min-height: 1.4em;
+  font-size: 12.5px;
+  margin: 0;
+}
+#rel-err {
+  margin: 10px 0 0;
+}
+
 /* ---- Chrome: header, tabs, footer ---------------------------------- */
 body {
   margin: 0;
