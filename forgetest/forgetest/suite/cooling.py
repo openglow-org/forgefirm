@@ -1390,3 +1390,89 @@ def fan_duty_readback(ctx):
     idle = {k: hw.sysfs_int(k) for k in run}
     ev["idle_duties"] = idle
     ctx.log("duties at idle: %s", idle)
+
+
+@test("cooling.fail-tier-stop", title="A fail-tier verdict ends the controller: CRASH stops motion, "
+                                      "locks the laser, and the supervisor restarts the controller",
+      subsystem="cooling", kind="operator", mode="grbl", est_min=4,
+      covers=_COOL_COVERS + [("forgectrl", "src/super.*")],
+      requires=["cooling.crash-watch-plumbing", "motion.deadman"], actions=["button"],
+      steps=["Bed clear, lid closed, 40 mm of free +X travel. Nothing fires: the job is dark (S0).",
+             "Press the physical button when it lights white, once. The head moves and stops on "
+             "its own; the controller restarts."],
+      description="The engine's fail tiers (a lid IR fire signal, a head crash signal) do not "
+                  "leave the job to the controller: after the kernel writes (motion stopped, the "
+                  "latch locked) the engine ends the controller through the supervisor, which "
+                  "starts it again, so no run start can relight what was locked and the sender "
+                  "sees the job end. Provable without emission or a physical crash: the crash "
+                  "watch's thresholds at their lowest (1) make the head's own move trip the abort "
+                  "generator inside an armed, dark (S0) job. Expected: the engine logs the crash "
+                  "signal, the supervisor logs the stop and starts a new controller (new pid), the "
+                  "latch is locked, the kernel idle, no emission, and the thresholds are put back.")
+def fail_tier_stop(ctx):
+    from .laser import prepare, stream, sample
+    from .motion import FORGECTRL_LOG, _log_lines, _log_offset
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    before = fc.settings()
+    orig = {k: before.get(k, "") for k in CRASH_KEYS}
+    ev["orig"] = orig
+    ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle at the start")
+    st, m0 = fc.get("/mode")
+    ctx.check(st == 200 and isinstance(m0, dict) and m0.get("controller") == "running", "controller not running: %s", m0)
+    pid0 = m0.get("pid")
+    _set_gates(ctx, fc, {k: "1" for k in CRASH_KEYS})
+    off = _log_offset(FORGECTRL_LOG)
+    t_arm = None
+    try:
+        try:
+            with ctx.grbl() as g:
+                prepare(ctx, g)
+                ctx.ready("DARK JOB (S0, nothing fires). Bed clear with 40 mm of free +X travel, lid closed. "
+                          "The head moves 20 mm and the controller restarts on its own.")
+                stream(g, ["G91", "G21", "M3 S0", "G4 P1", "G1 X20 F1200", "G1 X-20 F1200", "M5", "G90", "M2"])
+                ctx.arm_press()
+                t_arm = ctx.wait_for(lambda: bool((sample(ctx) or {}).get("armed")), 240)
+                ctx.clear_notice()
+                ctx.check(t_arm is not None, "the window never opened (arm refused, or no press)")
+                t0 = time.time()
+                tripped = ctx.wait_for(lambda: _cool(fc).get("verdict") == "CRASH"
+                                       or (fc.get("/mode")[1] or {}).get("pid") not in (None, pid0), 30)
+                ctx.log("the crash tier tripped after %s s", tripped)
+        except (hw.HwError, OSError) as e:
+            ctx.log("the Grbl connection ended with the restart: %s", e)
+        t_kill = time.time()
+        m1 = None
+        while time.time() - t_kill < 60:
+            st, m1 = fc.get("/mode")
+            if isinstance(m1, dict) and m1.get("controller") == "running" and m1.get("pid") != pid0:
+                break
+            ctx.sleep(0.5)
+        # the daemon's lines reach the log file through syslog, a moment
+        # after the events they name
+        ctx.wait_for(lambda: bool(_log_lines(FORGECTRL_LOG, off, "HEAD CRASH SIGNAL"))
+                     and bool(_log_lines(FORGECTRL_LOG, off, "head crash signal - the controller is stopped")), 15)
+        engine = _log_lines(FORGECTRL_LOG, off, "HEAD CRASH SIGNAL")
+        super_ = _log_lines(FORGECTRL_LOG, off, "head crash signal - the controller is stopped")
+        smp = sample(ctx)
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        ev["result"] = {"mode_after": m1, "engine_lines": [ln[-160:] for ln in engine[-2:]],
+                        "super_lines": [ln[-160:] for ln in super_[-2:]],
+                        "emission": smp and smp["emission"], "kernel": smp and smp["kstate"],
+                        "latch_locked": ilk is not None and bool(ilk & (1 << 3))}
+        ctx.log("after the crash tier: %s", ev["result"])
+        ctx.check(engine, "the engine did not log the crash signal")
+        ctx.check(super_, "the supervisor did not log the fail-tier stop")
+        ctx.check(m1 and m1.get("pid") != pid0, "the controller was not stopped and started again: %s", m1)
+        ctx.check(ev["result"]["latch_locked"], "latch not locked after the crash tier")
+        ctx.check(not (smp and smp["emission"]), "emission during a dark job: %s", smp and smp["emission"])
+        ctx.check(fc.wait_idle(30, abort=ctx.aborted), "machine not idle after the restart")
+    finally:
+        fc.wait_idle(30, abort=ctx.aborted)
+        st, body = fc.post("/settings", params=orig)
+        ctx.log("restore thresholds: POST /settings %s -> %s", orig, st)
+    after = fc.settings()
+    ctx.check(all(after.get(k, "") == orig[k] for k in CRASH_KEYS),
+              "thresholds not restored: %s", {k: after.get(k) for k in CRASH_KEYS})
+    ctx.log("PASS: the crash tier stopped the job, locked the latch, and the supervisor restarted "
+            "the controller (pid %s -> %s)", pid0, m1 and m1.get("pid"))

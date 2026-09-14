@@ -252,6 +252,26 @@ def kill_trail(ctx, t0, seconds=5.0):
     return trail
 
 
+def kill_fast_trail(t0, seconds=1.5):
+    """The latch and the kernel state read from sysfs every few
+    milliseconds after a kill: the supervisor's own reaction, which the
+    HTTP samples of kill_trail cannot resolve. A controller death is a
+    signal to the supervisor, not a poll, so the relock lands within
+    milliseconds; the kernel leaves running once its stop ramp is done."""
+    locked_at = stopped_at = None
+    end = t0 + seconds
+    while time.time() < end and (locked_at is None or stopped_at is None):
+        now = time.time() - t0
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        if locked_at is None and ilk is not None and ilk & IL_LASER_LATCH:
+            locked_at = round(now, 3)
+        st = hw.sysfs_read("cnc/state")
+        if stopped_at is None and st is not None and st != "running":
+            stopped_at = round(now, 3)
+        time.sleep(0.005)
+    return {"latch_locked_at_s": locked_at, "kernel_stopped_at_s": stopped_at}
+
+
 def judge_kill(ctx, trail, what):
     """(first zero, tail stayed zero, kernel stopped running) from a trail."""
     for t in trail:
@@ -715,7 +735,9 @@ def disarm_in_hold(ctx):
                   "SIGTERM, so emission drops within 2.5 s and stays 0, the kernel is not running, "
                   "and the restart is a separate operator-judged step. Unexpected: mid-burn SIGKILL "
                   "of the controller - the supervisor's exit safing must end the fire tail inside "
-                  "the ring's in-flight window, leave the latch locked, and respawn the controller.")
+                  "the ring's in-flight window, leave the latch locked, and respawn the controller. "
+                  "The death is a signal to the supervisor, not a poll: the latch relocks within "
+                  "300 ms of the kill and the kernel is out of running within a second.")
 def armed_kill(ctx):
     ev = ctx.evidence
     fc = ctx.forgectrl
@@ -769,13 +791,20 @@ def armed_kill(ctx):
         ctx.log("emission live (%s) - SIGKILL controller pid %s NOW", smp["emission"], pid)
         t_kill = time.time()
         _os.kill(pid, _signal.SIGKILL)
+        fast = kill_fast_trail(t_kill)
         trail = kill_trail(ctx, t_kill)
+    ctx.log("after the kill (sysfs): %s", fast)
     zero_at, tail_zero, not_running = judge_kill(ctx, trail, "kill")
     ilk = hw.sysfs_int("cnc/interlock_circuit")
     locked = ilk is not None and bool(ilk & (1 << 3))
     ev["sigkill"] = {"pid": pid, "zero_at_s": zero_at, "tail_zero": tail_zero,
-                     "kernel_not_running": not_running, "latch_locked": locked, "trail": trail}
+                     "kernel_not_running": not_running, "latch_locked": locked, "trail": trail,
+                     "fast": fast}
     ctx.log("latch locked after the kill: %s", locked)
+    ctx.check(fast["latch_locked_at_s"] is not None and fast["latch_locked_at_s"] < 0.3,
+              "the latch was not locked within 300 ms of the kill: %s", fast)
+    ctx.check(fast["kernel_stopped_at_s"] is not None and fast["kernel_stopped_at_s"] < 1.0,
+              "the kernel was still running 1 s after the kill: %s", fast)
     ctx.check(zero_at is not None and zero_at < 2.5,
               "emission did not drop within 2.5 s of the kill (first 0 at %s)", zero_at)
     ctx.check(tail_zero, "emission returned after the kill")

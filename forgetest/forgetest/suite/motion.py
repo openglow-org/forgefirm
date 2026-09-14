@@ -753,11 +753,14 @@ def _return_x(ctx, delta_mm):
     machine_idle(ctx)
 
 
-@test("motion.deadman", title="Dead-man: controller kill, controller hang, forgectrl restart mid-move",
-      subsystem="motion", kind="auto", mode="grbl", est_min=4,
+@test("motion.deadman", title="Dead-man: controller kill, controller hang, forgectrl restart mid-move, "
+                             "a kill during the web-service homing",
+      subsystem="motion", kind="auto", mode="grbl", est_min=6,
       covers=_MOTION_COVERS + [("forgectrl", "src/main.c"), ("forgectrl", "init/**")],
       requires=["motion.cancel-abort", "kernel.k1-k2"],
-      steps=["Bed clear; the head needs 40 mm of free +X travel and must not be at the left rail."],
+      steps=["Bed clear; the head needs 40 mm of free +X travel and must not be at the left rail. "
+             "With cloud mode enabled the test also homes through the web service and kills the "
+             "controller mid-homing (about a minute); the head ends wherever the homing was."],
       description="SIGKILL of the controller mid-move: the supervisor reaps it, safes (cnc/stop, "
                   "latch relocked - it never unlocked), and respawns within seconds. SIGSTOP (a "
                   "hang) mid-move: the ring drains into a kernel underrun (fast halt, latch "
@@ -770,7 +773,10 @@ def _return_x(ctx, delta_mm):
                   "move completes with every step (the armed case faults, proven on the host). "
                   "forgectrl restart mid-move: the busy controller finishes the move unmanaged "
                   "and the new daemon retakes supervision at idle. After each drill the head is "
-                  "jogged back by the kernel-measured distance.")
+                  "jogged back by the kernel-measured distance. SIGKILL during $H (the web-service "
+                  "homing, with cloud mode enabled): the homing runner the controller left behind "
+                  "is ended before the respawn, the kernel is idle when the new controller starts, "
+                  "and the pulse device has one controller on it.")
 def deadman(ctx):
     import os as _os
     import signal as _signal
@@ -978,8 +984,155 @@ def deadman(ctx):
     x1 = _kernel_x_mm(ctx)
     _return_x(ctx, (x1 - x0) if (x0 is not None and x1 is not None) else None)
     machine_idle(ctx)
+
+    # ---- 4. SIGKILL during $H: the homing runner is ended, the kernel idle, one writer
+    homing_kill(ctx, wait_running)
+
     ctx.log("PASS: kill respawned in %s s, hang -> underrun in %s s, short stall warned and completed, "
-            "restart retook supervision (pid %s)", respawn_s, halt_s, m3.get("pid"))
+            "restart retook supervision (pid %s), the kill during $H ended the runner (%s)",
+            respawn_s, halt_s, m3.get("pid"), ev.get("homing_kill", {}).get("runner_gone_s", "skipped"))
+
+
+def _pulse_holders():
+    """The processes holding the pulse device open, by name."""
+    out = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            for fd in os.listdir("/proc/%s/fd" % pid):
+                if os.readlink("/proc/%s/fd/%s" % (pid, fd)) == "/dev/glowforge":
+                    with open("/proc/%s/comm" % pid) as f:
+                        out.append(f.read().strip())
+                    break
+        except OSError:
+            continue
+    return out
+
+
+def homing_kill(ctx, wait_running):
+    """SIGKILL the GRBL controller while gfhome (the web-service homing
+    runner, its own process group on the inherited pulse fd) is moving
+    the head. The supervisor must end the runner before it starts another
+    controller, or two processes write the ring. Skipped when cloud mode
+    is not enabled on the machine (the runner needs the service)."""
+    import os as _os
+    import signal as _signal
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    before = fc.settings()
+    if str(before.get("cloud_enabled", "")).lower() not in ("1", "true", "yes", "on"):
+        ctx.log("kill during $H: skipped, cloud mode is not enabled on this machine")
+        return
+    hm = before.get("homing_mode", "")
+    ev["homing_kill"] = {"homing_mode": hm}
+    if hm != "gfcloud":
+        st, body = fc.post("/settings", data={"homing_mode": "gfcloud"})
+        ctx.check(st == 200, "homing_mode=gfcloud -> %s %s", st, body)
+    try:
+        m4 = wait_running(10)
+        ctx.check(m4, "controller not running before the homing drill")
+        pid4 = m4["pid"]
+        off = _log_offset(FORGECTRL_LOG)
+        runner_up = None
+        try:
+            with ctx.grbl() as g:
+                clean_slate(ctx, g)
+                g.send_raw(b"$H\n")
+                runner_up = ctx.wait_for(lambda: bool(hw.pidof("gfhome.py")), 30)
+                ctx.check(runner_up is not None, "the homing runner never started for $H")
+                ctx.sleep(3.0)                  # into the session: the runner drives the head
+                ctx.log("SIGKILL sent to controller pid %d during $H (runner pid %s)",
+                        pid4, hw.pidof("gfhome.py"))
+                _os.kill(pid4, _signal.SIGKILL)
+        except (hw.HwError, OSError) as e:
+            ctx.log("the Grbl connection ended with the kill: %s", e)
+        t_kill = time.time()
+        gone_s = ctx.wait_for(lambda: not hw.pidof("gfhome.py"), 15)
+        ev["homing_kill"]["runner_gone_s"] = gone_s
+        ctx.check(gone_s is not None, "the homing runner outlived its controller")
+        m5 = None
+        while time.time() - t_kill < 60:
+            st, m5 = fc.get("/mode")
+            if isinstance(m5, dict) and m5.get("controller") == "running" and m5.get("pid") != pid4:
+                break
+            ctx.sleep(0.5)
+        kstate = hw.sysfs_read("cnc/state")
+        holders = _pulse_holders()
+        lines = _log_lines(FORGECTRL_LOG, off, "homing runner")
+        halted = _log_lines(FORGECTRL_LOG, off, "halting it")
+        ev["homing_kill"].update({"respawn_s": round(time.time() - t_kill, 1), "mode_after": m5,
+                                  "kernel_state_at_respawn": kstate, "pulse_holders": holders,
+                                  "super_lines": [ln[-160:] for ln in lines[-3:]]})
+        ctx.log("kill during $H: runner gone in %s s, respawned as %s, kernel %s, pulse held by %s",
+                gone_s, m5 and m5.get("pid"), kstate, holders)
+        ctx.check(m5 and m5.get("pid") != pid4, "no respawn after the kill during $H: %s", m5)
+        ctx.check(lines, "the supervisor did not log the runner's end")
+        ctx.check(not halted, "the kernel had to be halted for the respawn: %s", halted[-1:])
+        ctx.check(kstate in ("idle", "disabled"), "the kernel was %s when the new controller started", kstate)
+        ctx.check("gfhome.py" not in holders and holders.count("grblHAL_glowfor") <= 1,
+                  "more than one controller on the pulse device: %s", holders)
+        ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle after the drill")
+    finally:
+        if hm != "gfcloud":
+            st, body = (fc.post("/settings", params={"homing_mode": ""}) if not hm
+                        else fc.post("/settings", data={"homing_mode": hm}))
+            ctx.log("restore homing_mode=%r -> %s", hm, st)
+
+
+@test("motion.respawn-gate", title="A respawn waits for the lid the way a first spawn does",
+      subsystem="motion", kind="operator", mode="grbl", est_min=2,
+      covers=_MOTION_COVERS, requires=["motion.deadman", "motion.gate-waits-for-lid"], actions=["lid"],
+      steps=["Bed clear. Open the lid when told and close it when told; nothing moves."],
+      description="The enclosure check runs before every controller spawn, respawns included. "
+                  "With the lid open, the controller is killed: the supervisor safes the machine "
+                  "(latch locked), reports waiting with why naming the lid, and starts no controller "
+                  "while the lid stays open. When the lid closes the controller comes back verified, "
+                  "without a second motion probe (the probe is once per broker hold).")
+def respawn_gate(ctx):
+    import os as _os
+    import signal as _signal
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle at the start")
+    st, m0 = fc.get("/mode")
+    ctx.check(st == 200 and isinstance(m0, dict) and m0.get("controller") == "running", "controller not running: %s", m0)
+    pid0 = m0.get("pid")
+    off = _log_offset(FORGECTRL_LOG)
+    ctx.act("lid", "open")
+    try:
+        ctx.sleep(1.0)
+        _os.kill(pid0, _signal.SIGKILL)
+        t_kill = time.time()
+        ctx.log("SIGKILL sent to controller pid %d with the lid open", pid0)
+        waited = ctx.wait_for(lambda: (fc.get("/mode")[1] or {}).get("controller") == "waiting", 15)
+        st, m1 = fc.get("/mode")
+        ev["after_kill"] = {"waiting_s": waited, "mode": m1}
+        ctx.log("mode %.1f s after the kill: %s", time.time() - t_kill, m1)
+        ctx.check(waited is not None, "the supervisor did not report waiting for the lid: %s", m1)
+        ctx.check("lid" in (m1.get("why") or ""), "why does not name the lid: %r", m1.get("why"))
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        ctx.check(ilk is not None and ilk & (1 << 3), "latch not locked after the kill")
+        ctx.sleep(4.0)
+        st, m2 = fc.get("/mode")
+        ctx.check(isinstance(m2, dict) and m2.get("controller") == "waiting" and not m2.get("pid"),
+                  "the wait did not hold with the lid open: %s", m2)
+    finally:
+        ctx.act("lid", "close")
+    t_close = time.time()
+    came = ctx.wait_for(lambda: ((fc.get("/mode")[1] or {}).get("controller") == "running"
+                                 and (fc.get("/mode")[1] or {}).get("pid") != pid0), 60)
+    st, m3 = fc.get("/mode")
+    ev["after_close"] = {"running_s": came, "mode": m3}
+    ctx.log("mode %.1f s after the lid closed: %s", time.time() - t_close, m3)
+    ctx.check(came is not None and m3.get("motion") == "verified",
+              "the controller did not come back verified after the lid closed: %s", m3)
+    lines = _probe_lines(FORGECTRL_LOG, off)
+    ev["probe_lines"] = lines[-2:]
+    ctx.check(not lines, "the motion probe ran again for the respawn: %s", lines[:1])
+    ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle at the end")
+    ctx.log("PASS: the respawn waited %.1f s for the lid, then came back verified in %.1f s with no probe",
+            t_close - t_kill, came)
 
 
 @test("motion.soft-limits", title="After a home the bed is the X/Y envelope",
