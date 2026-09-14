@@ -792,10 +792,178 @@ def armed_kill(ctx):
     ctx.log("/mode after the kill: %s", m1)
     ctx.check(m1 and m1.get("controller") == "running" and m1.get("pid") != pid,
               "supervisor did not respawn the controller: %s", m1)
+    # The respawned controller starts locked and stays locked: a latch it
+    # did not unlock is never relit by a run start, and no arm has asked.
+    ctx.check(wait_grbl_port(ctx), "the respawned controller never accepted a Grbl connection")
+    ctx.sleep(2)
+    ilk = hw.sysfs_int("cnc/interlock_circuit")
+    ev["latch_locked_after_respawn"] = ilk is not None and bool(ilk & IL_LASER_LATCH)
+    ctx.check(ev["latch_locked_after_respawn"],
+              "the respawned controller unlocked the latch with no arm (interlock_circuit=%s)", ilk)
     ev["beam_at_fire_kill"] = smp.get("beam")
     check_button_dark(ctx, ev)
     ctx.log("PASS: expected stop 0 at +%s s and SIGKILL 0 at +%s s, latch locked, controller "
-            "respawned, button dark", ev["expected"]["zero_at_s"], zero_at)
+            "respawned with the latch still locked, button dark", ev["expected"]["zero_at_s"], zero_at)
+
+
+@test("laser.verdict-cut", title="A blocked verdict mid-cut locks the latch and holds; the clean "
+                                 "verdict resumes with no press",
+      subsystem="laser", kind="live", mode="grbl", est_min=4,
+      covers=_LASER_COVERS,
+      requires=["laser.emission-witness"], actions=["button"],
+      steps=["Scrap under the head with 40 mm of free +X travel; lid closed; exhaust on.",
+             "Press the physical button when it lights white (the arm). Nothing else: the test "
+             "takes the cooling verdict away itself and gives it back."],
+      description="A 40 mm line at constant power (M3 S400/F300, 8 s). About 1.5 s in, the test "
+                  "pauses the machine-services daemon for 3.5 s, so the cooling verdict the "
+                  "controller reads goes stale: the controller's pause tier. The controller must "
+                  "hold the job (grbl Hold) under the still-open armed window with the stream "
+                  "masked dark, so the kernel's LASER_ON sample count reads 0 before the cut "
+                  "resumes, and it must not write the latch: a lock sets the hardware button "
+                  "latch, which only a press clears, so both bit 3 (the SoC lock) and bit 2 "
+                  "(the button latch) of interlock_circuit stay clear through the whole run. "
+                  "When the daemon returns (the verdict fresh, clean, resume_ok), the controller "
+                  "must resume the cut lit from where it stopped, with no button press and no "
+                  "prompt; the M2 program end then disarms as usual. The daemon's own dead-man "
+                  "(5 s of silence) is not reached: the controller keeps reporting through the "
+                  "pause. The beam detector witnesses the cut on both sides of the hold.")
+def verdict_cut(ctx):
+    import os as _os
+    import signal as _signal
+    ev = ctx.evidence
+    fc = ctx.forgectrl
+    PAUSE_S = 3.5
+    pids = hw.pidof("forgectrl")
+    ctx.check(pids, "no forgectrl process found to pause")
+    ev["daemon_pids"] = pids
+    state_path = "/run/forgefirm/grbl.state"
+
+    def grbl_state_file():
+        try:
+            with open(state_path) as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def resume_daemon():
+        for p in pids:
+            try:
+                _os.kill(p, _signal.SIGCONT)
+            except OSError:
+                pass
+
+    trail = []
+    text = ""
+    with ctx.grbl() as g, LiveJob(ctx, g):
+        prepare(ctx, g)
+        k0 = kernel_start(ctx)
+        base = sample(ctx)
+        ctx.check(base, "forgectrl /status or /cool/status unavailable")
+        ctx.check(not base["emission"], "emission_samples nonzero before the job (%s)", base["emission"])
+        ctx.ready(ARM_CUE % "40 mm +X")
+        job = ["G91", "G21", "M3", "S400", "G1 X40 F300", "M5", "G0 X-40", "G90", "M2"]
+        smp = arm_and_fire(ctx, g, room="40 mm +X", job=job)
+        beams = [(smp.get("beam"), smp.get("beam_d"))]
+        ctx.log("emission live (%s); pausing the daemon in 1 s", smp["emission"])
+        ctx.sleep(1.0)
+        g.drain()
+        t0 = time.time()
+        try:
+            for p in pids:
+                _os.kill(p, _signal.SIGSTOP)
+            ctx.log("daemon paused (SIGSTOP %s) for %.1f s: the verdict goes stale", pids, PAUSE_S)
+            # No HTTP while the daemon is paused: the controller's socket,
+            # sysfs and the controller's state file are the witnesses.
+            while time.time() - t0 < PAUSE_S:
+                st = g.status_report()["state"]
+                text += g.drain()
+                il = hw.sysfs_int("cnc/interlock_circuit")
+                trail.append({"t": round(time.time() - t0, 2), "gstate": st, "il": il,
+                              "emission": hw.sysfs_int("cnc/laser_on_sampled"),
+                              "armed": '"armed":true' in grbl_state_file()})
+                time.sleep(0.12)
+        finally:
+            resume_daemon()
+            ctx.log("daemon resumed (SIGCONT) at +%.2f s", time.time() - t0)
+        # Through the resume and to the end of the cut, sampling the same
+        # witnesses (the daemon's own once it answers again).
+        resumed_at = None
+        end = time.time() + 30
+        while time.time() < end:
+            ctx.checkpoint()
+            st = g.status_report()["state"]
+            text += g.drain()
+            il = hw.sysfs_int("cnc/interlock_circuit")
+            row = {"t": round(time.time() - t0, 2), "gstate": st, "il": il,
+                   "emission": hw.sysfs_int("cnc/laser_on_sampled"),
+                   "armed": '"armed":true' in grbl_state_file()}
+            if time.time() - t0 > PAUSE_S + 1.0:
+                s = sample(ctx)
+                if s:
+                    row["beam"] = s.get("beam")
+                    beams.append((s.get("beam"), s.get("beam_d")))
+            trail.append(row)
+            if resumed_at is None and st.startswith("Run"):
+                resumed_at = time.time() - t0
+            if st.startswith("Idle") and resumed_at is not None and time.time() - t0 > resumed_at + 3.0:
+                break
+            time.sleep(0.12)
+        for r in trail:
+            ctx.log("  %s", r)
+        ev["trail"] = trail
+        ev["messages"] = [ln for ln in text.splitlines() if ln.startswith("[MSG:") or ln.startswith("ALARM")]
+        ctx.log("controller: %s", ev["messages"])
+        dt = wait_disarm(ctx, 75)
+        ev["disarm_after_idle_s"] = round(dt, 1) if dt is not None else None
+        ctx.check(ctx.forgectrl.wait_idle(15, abort=ctx.aborted), "machine not idle after the job")
+        check_kernel_returned(ctx, ev, k0)
+
+    def locked(r):
+        return r["il"] is not None and bool(r["il"] & IL_LASER_LATCH)
+
+    def button_latched(r):
+        return r["il"] is not None and bool(r["il"] & IL_BUTTON_LATCH)
+
+    held = [r for r in trail if r["gstate"].startswith("Hold")]
+    ev.update({"held_at_s": held[0]["t"] if held else None,
+               "resumed_at_s": round(resumed_at, 2) if resumed_at else None,
+               "latch_locked_samples": sum(1 for r in trail if locked(r)),
+               "button_latch_set_samples": sum(1 for r in trail if button_latched(r))})
+    ctx.check(held and held[0]["t"] < PAUSE_S, "the stale verdict did not hold the job during the "
+              "pause (first Hold at %s)", ev["held_at_s"])
+    ctx.check("fire masked, job held" in text, "the controller did not report the pause tier")
+    ctx.check(ev["latch_locked_samples"] == 0,
+              "the pause tier wrote the latch (locked in %d samples): a lock sets the hardware "
+              "button latch and the resume would need a press", ev["latch_locked_samples"])
+    ctx.check(ev["button_latch_set_samples"] == 0,
+              "the hardware button latch read SET in %d samples: the resume needed a press",
+              ev["button_latch_set_samples"])
+    ctx.check(all(r["armed"] for r in trail if r["t"] < (resumed_at or PAUSE_S + 5)),
+              "the armed window closed during the pause")
+    ctx.check("press the button" not in text, "the resume asked for a button press")
+    ctx.check(DISARMED_MSG not in text.split("resuming")[0], "the pause tier disarmed the job")
+    # Dark from the hold until the resume: the gate masked the stream.
+    span = [r for r in trail if held and r["t"] >= held[0]["t"]
+            and (resumed_at is None or r["t"] < resumed_at)]
+    zero = next((r for r in span if r["emission"] == 0), None)
+    ev["emission_zero_after_hold_s"] = round(zero["t"] - held[0]["t"], 2) if zero else None
+    ctx.check(zero is not None and zero["t"] - held[0]["t"] <= 2.5,
+              "emission did not read 0 within 2.5 s of the hold (before the resume)")
+    ctx.check(resumed_at is not None, "the clean verdict did not resume the cut")
+    ctx.check("resuming" in text, "the controller did not report the resume")
+    after = [r for r in trail if resumed_at and r["t"] >= resumed_at]
+    ctx.check(any(r["emission"] for r in after), "the resumed cut ran dark (no emission after the resume)")
+    ctx.check("ALARM" not in text, "an alarm was raised on the pause tier")
+    ctx.check(dt is not None and dt < 10.0, "the M2 job did not disarm promptly at Idle (%s s)", dt)
+    beam_witness(ctx, ev, [{"beam": b, "beam_d": d} for b, d in beams], base)
+    judge_beam(ctx, ev["beam"], "the cut")
+    check_button_dark(ctx, ev)
+    ctx.log("PASS: held at +%s s with the latch untouched, emission 0 %s s after the hold, resumed "
+            "lit at +%s s with no press, disarmed %.1f s after Idle", ev["held_at_s"],
+            ev["emission_zero_after_hold_s"], ev["resumed_at_s"], dt)
+
+
+DISARMED_MSG = "laser disarmed - latch locked"
 
 
 @test("laser.arm-wait-lid", title="Lid open during the arm wait cancels the job",

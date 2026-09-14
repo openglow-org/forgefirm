@@ -79,12 +79,34 @@ over TCP, then checks the dumps against the kernel feeder contract:
      the default gamma of 2 than at gamma 1, and the cruise middle
      renders the same - the exponent shapes only the velocity-scaled
      rolloff, never the programmed level
- 24. a hold verdict is held again after a resume: with the engine's
-     verdict at its fail tier (hold, fire blocked, no resume) the client
-     holds the job; a ~ under that verdict, which is what a button press
-     or a sender does, moves the head for at most one client poll, dark,
-     before the client holds it again and says so; the clean verdict then
-     resumes the hold the client took, and the rest of the line cuts lit
+ 24. the verdict's pause tier: with the engine's verdict at a pause
+     (OVERTEMP: hold, fire blocked, no resume) the client holds the job
+     under the open window; the deceleration into that first hold runs
+     lit to the stop, as a feed hold's does (the segments already planned
+     at speed would otherwise play dark and leave a gap in the cut), and
+     the stream engine's per-tick gate masks the stream from the stop on;
+     a ~ under that verdict, which is what a button press or a sender
+     does, moves the head dark for at most one client poll before the
+     client holds it again and says so; the clean verdict then resumes
+     the hold the client took with no new press, and the rest of the line
+     cuts lit. The latch is never written by a pause (a lock sets the
+     hardware button latch, which only a press clears): the latch
+     sideband (GFSINK_LATCH_LOG) carries the unlock at the arm and the
+     lock at the program end and nothing between
+ 25. the verdict's fail tier: a verdict named AIRFLOW (fire blocked, hold,
+     no resume) mid-M3 ends the job: the window closes, the latch locks,
+     the job is reset with ALARM:3, the stream ends dark well short of the
+     line, and a ~ under the clean verdict that follows resumes nothing;
+     the sideband ends on the lock and carries no unlock after it
+ 26. a sender change mid-M3 closes the window and holds the job, and the
+     deceleration into that hold ships dark: the gate follows the window
+     on every tick, so a fire state the core never updates cannot outlive
+     the consent it rode on
+ 27. a verdict that goes stale (the engine stops publishing mid-cut)
+     holds the job the moment the client's cache expires, on its own
+     clock between two of its file reads, lit to the stop like rule 24:
+     no dark cut runs out while the client waits for its next read; the
+     engine's return resumes the cut lit
 
 The analog sessions select the reference mode through the config; on
 hardware the controller ignores it (density is the only product model -
@@ -401,28 +423,37 @@ def wait_state(sock, log, prefix, timeout=5.0):
     fail("controller never reached %s" % prefix)
 
 
-# The published verdict is clean unless a session sets this: then it is
-# the engine's fail tier (hold, fire blocked, no resume), what an airflow
-# fault publishes. A ("verdict", "hold") step sets it, ("verdict",
+# The published verdict is clean unless a session sets a mode: "hold" is
+# the engine's pause tier (OVERTEMP: hold, fire blocked, no resume) and
+# "fail" its fail tier (AIRFLOW: the same flags under a name the client
+# ends the job on). A ("verdict", <mode>) step sets it, ("verdict",
 # "clean") clears it.
-VERDICT_HOLD = threading.Event()
+VERDICT_MODE = {"mode": "clean"}
+VERDICT_NAMES = {"hold": "OVERTEMP", "fail": "AIRFLOW"}
 
 
 def publish_verdicts(path, stop):
     """Publish a fresh cooling verdict every 0.5 s (the arm flow refuses
-    without one; freshness window is 2 s), clean unless VERDICT_HOLD is
-    set. Same-host monotonic clock, atomic rename so the reader never
-    sees a torn file. "armed" is the engine's acknowledgment that it has
-    taken the controller's armed window; the arm waits for it, so a
-    stand-in engine that means to let jobs run must assert it."""
+    without one; freshness window is 2 s), clean unless VERDICT_MODE
+    says otherwise. Same-host monotonic clock, atomic rename so the
+    reader never sees a torn file. "armed" is the engine's
+    acknowledgment that it has taken the controller's armed window; the
+    arm waits for it, so a stand-in engine that means to let jobs run
+    must assert it."""
     while not stop.is_set():
-        hold = VERDICT_HOLD.is_set()
-        body = ('{"ts_mono":%.3f,"fire_ok":%s,"hold":%s,'
+        mode = VERDICT_MODE["mode"]
+        if mode == "stale":
+            stop.wait(0.5)              # the engine has stopped publishing
+            continue
+        blocked = mode != "clean"
+        body = ('{"ts_mono":%.3f,"fire_ok":%s,"verdict":"%s","hold":%s,'
                 '"resume_ok":%s,"armed":true,"reason":"%s"}'
                 % (time.clock_gettime(time.CLOCK_MONOTONIC),
-                   "false" if hold else "true", "true" if hold else "false",
-                   "false" if hold else "true",
-                   "harness: airflow fault" if hold else ""))
+                   "false" if blocked else "true",
+                   VERDICT_NAMES.get(mode, "OK"),
+                   "true" if blocked else "false",
+                   "false" if blocked else "true",
+                   ("harness: %s" % VERDICT_NAMES[mode]) if blocked else ""))
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             f.write(body)
@@ -442,8 +473,9 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
         workdir = tempfile.mkdtemp(prefix="laser-test-")
     dump = os.path.join(workdir, "stream.bin")
     verdict = os.path.join(workdir, "cooling.state")
+    latch_log = os.path.join(workdir, "latch.log")
     env = dict(os.environ, GFSINK_DUMP=dump, GF_VERDICT_FILE=verdict,
-               FFLOG_STDERR="1")
+               GFSINK_LATCH_LOG=latch_log, FFLOG_STDERR="1")
     # The lens reference the daemon leaves before a controller starts:
     # forgectrl sweeps the carriage onto the hall edge and marks it, and
     # the controller opens the Z envelope on that mark. Without one Z
@@ -462,7 +494,7 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
         env["GFHOME_CONF"] = conf_path
 
     stop = threading.Event()
-    VERDICT_HOLD.clear()
+    VERDICT_MODE["mode"] = "clean"
     pub = threading.Thread(target=publish_verdicts, args=(verdict, stop), daemon=True)
     pub.start()
 
@@ -494,12 +526,18 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
             elif isinstance(step, tuple) and step[0] == "rt":
                 sock.sendall(step[1])           # a realtime character: no ok follows
             elif isinstance(step, tuple) and step[0] == "wait_state":
-                wait_state(sock, log, step[1])
+                wait_state(sock, log, step[1], step[2] if len(step) > 2 else 5.0)
             elif isinstance(step, tuple) and step[0] == "verdict":
-                if step[1] == "hold":
-                    VERDICT_HOLD.set()
-                else:
-                    VERDICT_HOLD.clear()
+                VERDICT_MODE["mode"] = step[1]
+            elif isinstance(step, tuple) and step[0] == "expect_text":
+                if not wait_text(sock, log, step[1], step[2] if len(step) > 2 else 5.0):
+                    fail("[%s] the controller never said %r" % (name, step[1]))
+            elif isinstance(step, tuple) and step[0] == "reconnect":
+                # A sender change: the socket closes and a new one connects.
+                sock.close()
+                time.sleep(step[1] if len(step) > 1 else 0.3)
+                sock = socket.create_connection(("127.0.0.1", PORT), timeout=1)
+                read_avail(sock, log, 0.5)
             else:
                 send_line(sock, step, log)
 
@@ -522,14 +560,101 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
             proc.kill()
         stop.set()
         pub.join(2)
-        VERDICT_HOLD.clear()
+        VERDICT_MODE["mode"] = "clean"
 
     data = open(dump, "rb").read()
+    try:
+        run_session.latch = open(latch_log).read().split()
+    except OSError:
+        run_session.latch = []
     if not data and arm_required:
         fail("[%s] empty stream dump" % name)
     if not keep:
         shutil.rmtree(workdir, ignore_errors=True)
     return data
+
+
+def wait_text(sock, log, needle, timeout):
+    """Drain the socket until needle appears in the accumulated log."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if needle in "".join(log):
+            return True
+        read_avail(sock, log, 0.2)
+    return needle in "".join(log)
+
+
+def latch_transitions(lines):
+    """The sideband's lock/unlock lines with repeats collapsed: the
+    ownership sequence as transitions."""
+    out = []
+    for ln in lines:
+        if ln in ("lock", "unlock") and (not out or out[-1] != ln):
+            out.append(ln)
+    return out
+
+
+def holds_in(ticks, min_run=2000):
+    """The stationary stretches (no X/Y/Z step for min_run ticks) inside
+    the motion, as (start, end) tick spans."""
+    step = [1 if t & 0x25 else 0 for t in ticks]
+    first = step.index(1)
+    last = len(step) - 1 - step[::-1].index(1)
+    holds, run = [], 0
+    for i in range(first, last + 1):
+        if step[i]:
+            if run >= min_run:
+                holds.append((i - run, i))
+            run = 0
+        else:
+            run += 1
+    return holds
+
+
+# The deceleration into a hold from F3000 (50 mm/s) at the board's
+# 700 mm/s^2: 71 ms, about 2000 ticks. A gate that closes with the
+# hold darkens all of it but the producer's lead (10 ms, ~280 ticks);
+# a fire state that outlives the gate lights it to the last step.
+DECEL_TICKS = int(50.0 / 700.0 * MACHINE_TICK_HZ)
+DECEL_DARK_MIN = DECEL_TICKS - 600
+
+
+def dark_lead(ticks, hold):
+    """Ticks between the last FIRE tick before `hold` and its stop."""
+    h0 = hold[0]
+    last = next((i for i in range(h0 - 1, -1, -1) if ticks[i] & 0x10), None)
+    return h0 - last if last is not None else h0
+
+
+def check_decel_dark(name, ticks, hold, what):
+    """No FIRE tick in the deceleration into `hold` beyond the lead: the
+    gate closed with the cause (a closed window, a lost sender)."""
+    lead = dark_lead(ticks, hold)
+    if lead < DECEL_DARK_MIN:
+        fail("[%s] the deceleration into the hold ran lit: the last FIRE tick is %d "
+             "ticks before the stationary stretch, expected at least %d (%s)"
+             % (name, lead, DECEL_DARK_MIN, what))
+    return lead
+
+
+# A lit deceleration ends within the producer's lead (10 ms) plus one
+# shipper period (10 ms) of the stop: the gate closes when the core
+# reports the hold complete, and the bytes produced ahead of the cursor
+# by then ship dark. 1000 ticks is 35 ms, under 0.2 mm at the end of a
+# ramp from 50 mm/s; a gate that closed before the head stopped shows
+# as the whole deceleration (~2000 ticks) or more.
+DECEL_LIT_MAX = 1000
+
+
+def check_decel_lit(name, ticks, hold, what):
+    """FIRE ran to the stop: the pause tier keeps the beam through the
+    deceleration it planned, so no dark motion precedes the hold."""
+    lead = dark_lead(ticks, hold)
+    if lead > DECEL_LIT_MAX:
+        fail("[%s] %d ticks (%.0f ms) of dark motion before the stop, expected at most %d: "
+             "the gate closed before the head stopped (%s)"
+             % (name, lead, lead * 1e3 / MACHINE_TICK_HZ, DECEL_LIT_MAX, what))
+    return lead
 
 
 def tick_bytes(data):
@@ -1092,42 +1217,45 @@ def main():
               "(%d ticks), lit from the first step out (%d fire ticks)"
               % (mode, decel, dlen, accel))
 
-    # --- rule 24: a hold verdict is held again after a resume -----------
+    # --- rule 24: the verdict's pause tier -------------------------------
     # One long line at 50 mm/s. Mid-move the engine's verdict goes to its
-    # fail tier (hold, fire blocked, no resume: an airflow fault) and the
-    # client takes the feed hold. A ~ then resumes the job under the
-    # standing verdict, which is what a button press or a sender does;
-    # the client must hold it again within its poll, saying so, and the
-    # stretch it moved in between ships dark. The clean verdict then
-    # resumes the hold the client took, and the rest of the line cuts lit.
+    # pause tier (OVERTEMP: hold, fire blocked, no resume): the client
+    # takes the feed hold, and the stream's gate darkens the deceleration
+    # into it; the latch is not written. A ~ then resumes the job under
+    # the standing verdict, which is what a button press or a sender
+    # does; the client must hold it again within its poll, saying so,
+    # and the stretch it moved in between ships dark. The clean verdict
+    # then resumes the hold the client took, and the rest of the line
+    # cuts lit; M2 closes the window and locks.
     TICK_HZ = 28160
     steps = ["G90", "G21", "M3 S500", "G1 X150 F3000", ("sleep", 0.7),
              ("verdict", "hold"), ("wait_state", "Hold:0"), ("sleep", 0.5),
              ("rt", b"~"), ("sleep", 1.2), ("wait_state", "Hold:0"),
-             ("sleep", 0.5), ("verdict", "clean"), WAIT_IDLE, "M5"]
+             ("sleep", 0.5), ("verdict", "clean"), WAIT_IDLE, "M5", "M2",
+             ("expect_text", "laser disarmed")]
     data = run_session("verdict-rehold", steps, conf=DENSITY_CONF_FLOORED)
     text = run_session.text
     if "held again" not in text:
         fail("[verdict-rehold] the client did not say it held the job again")
     if "resuming" not in text:
         fail("[verdict-rehold] the client did not resume its own hold once the verdict cleared")
+    if "fire masked, job held" not in text:
+        fail("[verdict-rehold] the pause tier did not report the masked hold")
+    if "latch locked" in text.split("Pgm End")[0]:
+        fail("[verdict-rehold] the pause tier locked the latch")
+    if "ALARM" in text:
+        fail("[verdict-rehold] the pause tier raised an alarm")
     ticks = tick_bytes(data)
-    step = [1 if t & 0x05 else 0 for t in ticks]
     fire = [1 if t & 0x10 else 0 for t in ticks]
-    first = step.index(1)
+    step = [1 if t & 0x05 else 0 for t in ticks]
     last = len(step) - 1 - step[::-1].index(1)
-    holds, run = [], 0                              # the stationary stretches inside the motion
-    for i in range(first, last + 1):
-        if step[i]:
-            if run >= 2000:
-                holds.append((i - run, i))
-            run = 0
-        else:
-            run += 1
+    holds = holds_in(ticks)
     if len(holds) != 2:
         fail("[verdict-rehold] expected two holds in the stream, found %d: %s"
              % (len(holds), holds))
     (_h1s, h1e), (h2s, h2e) = holds
+    lit_lead = check_decel_lit("verdict-rehold", ticks, holds[0],
+                               "a pause keeps the beam through its first deceleration")
     between = sum(fire[h1e:h2s])
     if between:
         fail("[verdict-rehold] FIRE while resumed under the hold verdict: %d fire ticks "
@@ -1139,9 +1267,101 @@ def main():
     if lit_after < 50:
         fail("[verdict-rehold] the resume after the clean verdict ran dark (%d fire ticks)"
              % lit_after)
-    print("PASS [verdict-rehold]: held, resumed dark for %d ticks (%.2f s), held again, "
-          "lit after the clear (%d fire ticks)"
-          % (h2s - h1e, (h2s - h1e) / float(TICK_HZ), lit_after))
+    seq = latch_transitions(run_session.latch)
+    if seq != ["unlock", "lock"]:
+        fail("[verdict-rehold] latch ownership sequence %s, expected unlock (arm) and lock "
+             "(program end) only: a pause must not write the latch" % seq)
+    print("PASS [verdict-rehold]: held lit to %d ticks before the stop, resumed dark for "
+          "%d ticks (%.2f s), held again, lit after the clear (%d fire ticks), latch %s"
+          % (lit_lead, h2s - h1e, (h2s - h1e) / float(TICK_HZ), lit_after, seq))
+
+    # --- rule 25: the verdict's fail tier --------------------------------
+    # The same line; mid-move the verdict goes to AIRFLOW. The job ends:
+    # window closed, latch locked, ALARM:3, the stream short and dark at
+    # its end, and the clean verdict that follows resumes nothing.
+    steps = ["G90", "G21", "M3 S500", "G1 X150 F3000", ("sleep", 0.7),
+             ("verdict", "fail"), ("wait_state", "Alarm", 5.0),
+             ("expect_text", "laser disarmed"), ("verdict", "clean"), ("sleep", 1.0),
+             ("rt", b"~"), ("sleep", 0.5), ("wait_state", "Alarm", 2.0), "$X"]
+    data = run_session("verdict-fail", steps, conf=DENSITY_CONF_FLOORED)
+    text = run_session.text
+    if "ALARM:3" not in text:
+        fail("[verdict-fail] the fail tier did not end the job with ALARM:3")
+    if "AIRFLOW" not in text:
+        fail("[verdict-fail] the fail tier did not name the verdict")
+    if "resuming" in text or "held again" in text:
+        fail("[verdict-fail] the fail tier was treated as a pause")
+    check_termination("verdict-fail", data)
+    line_ticks = 150.0 / 50.0 * TICK_HZ
+    lit = count_fire(data)
+    if lit > line_ticks * 0.5:
+        fail("[verdict-fail] %d fire ticks: the job ran on past the fail-tier verdict "
+             "(the whole line is %d)" % (lit, line_ticks))
+    seq = latch_transitions(run_session.latch)
+    if seq != ["unlock", "lock"]:
+        fail("[verdict-fail] latch ownership sequence %s, expected unlock (arm), lock "
+             "(the fail tier), and nothing after" % seq)
+    print("PASS [verdict-fail]: AIRFLOW mid-cut ended the job with ALARM:3, %d of %d ticks "
+          "lit, ends dark, latch %s, ~ resumed nothing" % (lit, line_ticks, seq))
+
+    # --- rule 26: a sender change mid-M3 darkens the hold's decel ---------
+    steps = ["G90", "G21", "M3 S500", "G1 X150 F3000", ("sleep", 0.7),
+             ("reconnect", 0.3), ("wait_state", "Hold:0", 5.0), ("sleep", 0.5),
+             ("rt", b"\x18"), ("sleep", 0.5)]
+    data = run_session("sender-drop", steps, conf=DENSITY_CONF_FLOORED)
+    ticks = tick_bytes(data)
+    # No cycle follows the hold here, so the stream ends on the hold's
+    # deceleration: the stop is the tick after the last step.
+    step = [1 if t & 0x25 else 0 for t in ticks]
+    if 1 not in step:
+        fail("[sender-drop] no motion in the stream")
+    stop = len(step) - step[::-1].index(1)
+    if count_fire(data) < 1000:
+        fail("[sender-drop] the cut before the sender change ran dark (%d fire ticks)"
+             % count_fire(data))
+    dark = check_decel_dark("sender-drop", ticks, (stop, stop),
+                            "the gate must follow the window closed on the sender change")
+    seq = latch_transitions(run_session.latch)
+    if seq[:2] != ["unlock", "lock"]:
+        fail("[sender-drop] latch ownership sequence %s, expected unlock (arm), lock "
+             "(the sender change)" % seq)
+    print("PASS [sender-drop]: the sender change held the job with the decel dark from %d "
+          "ticks before the stop, latch %s" % (dark, seq))
+
+    # --- rule 27: a stale verdict holds the moment the cache expires -----
+    # The engine stops publishing mid-cut. The client reads the file
+    # every 500 ms and its cache expires on its own clock between two
+    # reads: the hold must land at the expiry, not at the next read, and
+    # the deceleration runs lit to the stop like rule 24's, so no dark
+    # cut runs out in between. The engine's return resumes the cut lit.
+    steps = ["G90", "G21", "M3 S500", "G1 X150 F3000", ("sleep", 0.7),
+             ("verdict", "stale"), ("wait_state", "Hold:0", 6.0), ("sleep", 0.5),
+             ("verdict", "clean"), WAIT_IDLE, "M5", "M2", ("expect_text", "laser disarmed")]
+    data = run_session("verdict-stale", steps, conf=DENSITY_CONF_FLOORED)
+    text = run_session.text
+    if "cooling service lost" not in text:
+        fail("[verdict-stale] the client did not report the engine gone")
+    if "resuming" not in text or "restored" not in text:
+        fail("[verdict-stale] the client did not resume once the engine returned")
+    ticks = tick_bytes(data)
+    holds = holds_in(ticks)
+    if len(holds) != 1:
+        fail("[verdict-stale] expected one hold in the stream, found %d: %s" % (len(holds), holds))
+    lit_lead = check_decel_lit("verdict-stale", ticks, holds[0],
+                               "the hold must land at the cache's expiry, lit to the stop")
+    fire = [1 if t & 0x10 else 0 for t in ticks]
+    step = [1 if t & 0x05 else 0 for t in ticks]
+    last = len(step) - 1 - step[::-1].index(1)
+    lit_after = sum(fire[holds[0][1]:last + 1])
+    if lit_after < 50:
+        fail("[verdict-stale] the resume after the engine's return ran dark (%d fire ticks)" % lit_after)
+    seq = latch_transitions(run_session.latch)
+    if seq != ["unlock", "lock"]:
+        fail("[verdict-stale] latch ownership sequence %s, expected unlock (arm) and lock "
+             "(program end) only" % seq)
+    print("PASS [verdict-stale]: the expired cache held the job lit to %d ticks (%.0f ms) "
+          "before the stop, lit after the return (%d fire ticks), latch %s"
+          % (lit_lead, lit_lead * 1e3 / MACHINE_TICK_HZ, lit_after, seq))
 
     # --- rule 22: a jog never fires, whatever the modal spindle says ----
     # The arm flow runs on the M3 (window open), the modal spindle is on

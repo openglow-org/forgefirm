@@ -39,6 +39,20 @@ reported messages:
      not to where it was paused (the core restarts a held cycle through
      Idle); a job abandoned in a hold and reset ends there, so the next
      job's start is captured afresh where it begins
+ 11. the cooling verdict's pause tier (OVERTEMP) holds the job under the
+     open window without writing the latch (a lock sets the hardware
+     button latch, which only a press clears); the clean verdict then
+     resumes it with no new button press: no prompt, no second arm
+ 12. the verdict's fail tier (AIRFLOW) ends the job: disarmed, reset with
+     ALARM:3, and a ~ under the clean verdict that follows resumes nothing
+ 13. a sender change during a re-arm cancels it: the press that follows
+     resumes nothing, the job stays held, and the new sender's own ~
+     prompts afresh
+ 14. a jog does not hold the armed window open: with the spindle off the
+     grace counts down through jogs, and the window closes on time
+ 15. a press counts only after the button has been seen up: a press that
+     began before the wait is not consent (the harness's own presses
+     follow a fresh prompt for the same reason)
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -141,28 +155,48 @@ def wait_idle(sock, log):
     fail("controller never returned to Idle")
 
 
-def publish_verdicts(path, stop, fire_ok, armed_ack=True, ack_after_s=0.0):
-    """Stand in for the cooling engine. "armed" is the engine's
-    acknowledgment that it has taken the controller's armed window and
-    applied the run airflow; the controller refuses to fire on a verdict
-    that lacks it, so an engine that never acknowledges (armed_ack
-    False) must produce a refused arm and no emission. ack_after_s
-    withholds the acknowledgment for that long first, which is the real
-    engine's case: it answers on its next tick, and the controller has
-    to see the refreshed verdict to get past the arm."""
+def publish_verdicts(path, stop, verdict):
+    """Stand in for the cooling engine. `verdict` is the session's live
+    dict: fire_ok, hold, resume_ok, name, armed_ack, ack_after_s. "armed"
+    is the engine's acknowledgment that it has taken the controller's
+    armed window and applied the run airflow; the controller refuses to
+    fire on a verdict that lacks it, so an engine that never
+    acknowledges (armed_ack False) must produce a refused arm and no
+    emission. ack_after_s withholds the acknowledgment for that long
+    first, which is the real engine's case: it answers on its next
+    tick, and the controller has to see the refreshed verdict to get
+    past the arm."""
     t0 = time.monotonic()
     while not stop.is_set():
-        acked = armed_ack and time.monotonic() - t0 >= ack_after_s
-        body = ('{"ts_mono":%.3f,"fire_ok":%s,"hold":false,'
-                '"resume_ok":true,"armed":%s,"reason":""}'
+        v = dict(verdict)
+        acked = v["armed_ack"] and time.monotonic() - t0 >= v["ack_after_s"]
+        body = ('{"ts_mono":%.3f,"fire_ok":%s,"verdict":"%s","hold":%s,'
+                '"resume_ok":%s,"armed":%s,"reason":"%s"}'
                 % (time.clock_gettime(time.CLOCK_MONOTONIC),
-                   "true" if fire_ok else "false",
-                   "true" if acked else "false"))
+                   "true" if v["fire_ok"] else "false", v["name"],
+                   "true" if v["hold"] else "false",
+                   "true" if v["resume_ok"] else "false",
+                   "true" if acked else "false",
+                   "" if v["fire_ok"] else "harness: %s" % v["name"]))
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             f.write(body)
         os.replace(tmp, path)
         stop.wait(0.5)
+
+
+def wait_for_new(log, needle, n_before, timeout, sock=None):
+    """Wait until needle appears in the log more times than n_before: a
+    fresh occurrence, never a stale match from an earlier job."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if "".join(log).count(needle) > n_before:
+            return True
+        if sock is not None:
+            read_avail(sock, log, 0.2)
+        else:
+            time.sleep(0.1)
+    return False
 
 
 class Session:
@@ -189,8 +223,10 @@ class Session:
             self.set_switches(switches)
             env["GF_SWITCH_FILE"] = self.switch_file
         self.stop = threading.Event()
+        self.verdict = {"fire_ok": fire_ok, "hold": False, "resume_ok": True, "name": "OK",
+                        "armed_ack": armed_ack, "ack_after_s": ack_after_s}
         self.pub = threading.Thread(target=publish_verdicts,
-                                    args=(verdict, self.stop, fire_ok, armed_ack, ack_after_s),
+                                    args=(verdict, self.stop, self.verdict),
                                     daemon=True)
         self.pub.start()
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)],
@@ -219,6 +255,16 @@ class Session:
         with open(tmp, "w") as f:
             f.write("%d\n" % word)
         os.replace(tmp, self.switch_file)
+
+    def set_verdict(self, name="OK", fire_ok=True, hold=False, resume_ok=True):
+        """The engine's next verdicts: a pause tier (OVERTEMP: fire
+        blocked, hold, no resume), a fail tier (AIRFLOW: the same under a
+        name the client ends the job on), or clean."""
+        self.verdict.update({"name": name, "fire_ok": fire_ok, "hold": hold,
+                             "resume_ok": resume_ok})
+
+    def count(self, needle):
+        return "".join(self.log).count(needle)
 
     def send_raw(self, line):
         """Send a line without waiting for ok/error (the arm wait blocks
@@ -867,13 +913,17 @@ def test_lid_open_in_wait():
 
 def start_armed_move(s, tag, gcode="G1 X30 F60"):
     """Arm through the button and get a long move under way; returns once
-    the controller reports Run."""
+    the controller reports Run. The prompt and the armed message are
+    waited for as fresh occurrences: a press that lands before the
+    wait has begun is not consent (rule 15), so the press must follow
+    THIS job's prompt, not an earlier job's."""
+    prompts, armed = s.count(PROMPT), s.count(ARMED)
     s.send_raw("M4 S100")
     s.send_raw(gcode)
-    if not wait_for(s.log, PROMPT, 5, s.sock):
+    if not wait_for_new(s.log, PROMPT, prompts, 5, s.sock):
         fail("[%s] no button prompt" % tag)
     s.press_button()
-    if not wait_for(s.log, ARMED, 5, s.sock):
+    if not wait_for_new(s.log, ARMED, armed, 5, s.sock):
         fail("[%s] the button press did not arm" % tag)
     if not s.wait_state("Run", 5):
         fail("[%s] the job never reported Run" % tag)
@@ -1045,9 +1095,158 @@ def test_lid_policy_hold():
         s.close()
 
 
+def test_verdict_pause_resumes_without_press():
+    """Rule 11: the pause tier holds under the open window without a
+    latch write; the clean verdict resumes with no press. The window is
+    proven still open by the absence of any prompt and of a second arm."""
+    s = Session("verdict-pause", disarm_s=60, switches=SW_CLOSED)
+    try:
+        start_armed_move(s, "verdict-pause", gcode="G1 X30 F120")   # 15 s of motion
+        time.sleep(0.5)
+        s.set_verdict("OVERTEMP", fire_ok=False, hold=True, resume_ok=False)
+        if not s.wait_state("Hold", 5):
+            fail("[verdict-pause] the pause tier did not hold the job (state %s)" % s.state())
+        if not wait_for(s.log, "fire masked, job held", 3, s.sock):
+            fail("[verdict-pause] the pause tier did not report the masked hold")
+        if "latch locked" in "".join(s.log):
+            fail("[verdict-pause] the pause tier wrote the latch")
+        if DISARMED in "".join(s.log):
+            fail("[verdict-pause] the pause tier closed the armed window")
+        time.sleep(1.5)
+        s.set_verdict("OK", fire_ok=True, hold=False, resume_ok=True)
+        if not s.wait_state("Run", 5):
+            fail("[verdict-pause] the clean verdict did not resume the job (state %s)" % s.state())
+        if not wait_for(s.log, "resuming", 2, s.sock):
+            fail("[verdict-pause] the resume was not reported")
+        if RESUME_PROMPT in "".join(s.log) or s.count(PROMPT) != 1:
+            fail("[verdict-pause] the resume asked for a button press")
+        if s.armed_count() != 1:
+            fail("[verdict-pause] the resume armed again (armed messages: %d)" % s.armed_count())
+        if "ALARM" in "".join(s.log):
+            fail("[verdict-pause] the pause tier raised an alarm")
+        s.sock.sendall(b"\x18")
+        print("PASS [verdict-pause]: OVERTEMP held under the open window with no latch write; "
+              "the clean verdict resumed with no press")
+    finally:
+        s.close()
+
+
+def test_verdict_fail_tier_ends_job():
+    """Rule 12: the fail tier disarms, resets the job with ALARM:3, and
+    nothing resumes it."""
+    s = Session("verdict-fail", disarm_s=60, switches=SW_CLOSED)
+    try:
+        start_armed_move(s, "verdict-fail", gcode="G1 X30 F120")
+        time.sleep(0.5)
+        s.set_verdict("AIRFLOW", fire_ok=False, hold=True, resume_ok=False)
+        if not s.wait_state("Alarm", 5):
+            fail("[verdict-fail] the fail tier did not end the job in Alarm (state %s)" % s.state())
+        if not wait_for(s.log, DISARMED, 3, s.sock):
+            fail("[verdict-fail] the fail tier did not close the armed window")
+        text = "".join(s.log)
+        if "ALARM:3" not in text:
+            fail("[verdict-fail] no ALARM:3 on the fail tier")
+        if "AIRFLOW" not in text:
+            fail("[verdict-fail] the fail tier did not name the verdict")
+        s.set_verdict("OK", fire_ok=True, hold=False, resume_ok=True)
+        time.sleep(1.5)
+        s.sock.sendall(b"~")
+        read_avail(s.sock, s.log, 1.0)
+        if not s.state().startswith("Alarm"):
+            fail("[verdict-fail] a ~ after the fail tier resumed something (state %s)" % s.state())
+        if "resuming" in "".join(s.log):
+            fail("[verdict-fail] the client resumed after the fail tier")
+        send_line(s.sock, "$X", s.log)
+        if not s.wait_state("Idle", 3):
+            fail("[verdict-fail] $X did not unlock the alarm")
+        print("PASS [verdict-fail]: AIRFLOW disarmed, reset the job with ALARM:3, and nothing "
+              "resumed it")
+    finally:
+        s.close()
+
+
+def test_sender_change_during_rearm_cancels():
+    """Rule 13: a sender change while a re-arm waits for the press
+    cancels the re-arm; the press resumes nothing and the job stays
+    held; the new sender's ~ prompts afresh."""
+    s = Session("rearm-sender-change", disarm_s=60, switches=SW_CLOSED)
+    try:
+        start_armed_move(s, "rearm-sender-change", gcode="G1 X30 F120")
+        time.sleep(1.0)
+        s.sock.close()                                     # mid-move: held, disarmed
+        time.sleep(0.5)
+        s.sock = s.connect()
+        if s.wait_state("Hold", 5) is None:
+            fail("[rearm-sender-change] the job was not held on the sender change")
+        s.sock.sendall(b"~")
+        if not wait_for(s.log, RESUME_PROMPT, 5, s.sock):
+            fail("[rearm-sender-change] the resume did not prompt for the button")
+        # A second sender change, inside the re-arm wait. The cancel is
+        # reported at the disconnect, to nobody (output with no client is
+        # discarded), so the evidence is what the press does next: nothing.
+        s.sock.close()
+        time.sleep(0.5)
+        s.sock = s.connect()
+        st = read_state(s, '"connected":true')
+        if '"arming":false' not in st:
+            fail("[rearm-sender-change] the re-arm wait survived the sender change: %r" % st)
+        # A press now is the machine's resume button for the new sender:
+        # it resumes nothing and arms nothing, it opens a fresh re-arm
+        # prompt of its own (the displaced consent is gone), and only a
+        # second press, against that prompt, re-arms the held job.
+        before = s.armed_count()
+        prompts = s.count(RESUME_PROMPT)
+        s.press_button()
+        read_avail(s.sock, s.log, 1.0)
+        if s.armed_count() != before or not s.state().startswith("Hold"):
+            fail("[rearm-sender-change] a press after the canceled re-arm resumed the job "
+                 "(armed %d -> %d, state %s)" % (before, s.armed_count(), s.state()))
+        if not wait_for_new(s.log, RESUME_PROMPT, prompts, 3, s.sock):
+            fail("[rearm-sender-change] the press after the cancel did not open a fresh re-arm prompt")
+        s.press_button()
+        end = time.time() + 10
+        while time.time() < end and s.armed_count() != before + 1:
+            read_avail(s.sock, s.log, 0.2)
+        if s.armed_count() != before + 1:
+            fail("[rearm-sender-change] the second press did not re-arm the held job")
+        s.sock.sendall(b"\x18")
+        print("PASS [rearm-sender-change]: the sender change canceled the re-arm; the next press "
+              "resumed nothing and prompted afresh, and the press after it re-armed")
+    finally:
+        s.close()
+
+
+def test_jog_does_not_extend_window():
+    """Rule 14: with the spindle off, jogs do not reset the disarm grace:
+    the window closes on time through them."""
+    s = Session("jog-grace", disarm_s=2)
+    try:
+        send_line(s.sock, "M4 S100", s.log)
+        send_line(s.sock, "G1 X1 F600", s.log)
+        if not wait_for(s.log, ARMED, 5, s.sock):
+            fail("[jog-grace] job did not arm")
+        send_line(s.sock, "M5", s.log)
+        wait_idle(s.sock, s.log)
+        t0 = time.time()
+        while time.time() - t0 < 5.0 and DISARMED not in "".join(s.log):
+            send_line(s.sock, "$J=G91X1F1200", s.log)
+            read_avail(s.sock, s.log, 0.3)
+        dt = time.time() - t0
+        if DISARMED not in "".join(s.log):
+            fail("[jog-grace] the window stayed open through %.1f s of jogging (grace 2 s)" % dt)
+        wait_idle(s.sock, s.log)
+        print("PASS [jog-grace]: the window closed after %.1f s of jogging with the spindle off" % dt)
+    finally:
+        s.close()
+
+
 def main():
     if not os.path.isfile(BIN):
         fail("controller binary not found at %s" % BIN)
+    test_verdict_pause_resumes_without_press()
+    test_verdict_fail_tier_ends_job()
+    test_sender_change_during_rearm_cancels()
+    test_jog_does_not_extend_window()
     test_job_window()
     test_status_files()
     test_laser_keys_reload()
