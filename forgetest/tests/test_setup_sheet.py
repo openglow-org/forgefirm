@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import helpers  # noqa: E402
 from forgetest import catalog  # noqa: E402
 from forgetest.runner import Context, Run  # noqa: E402
-from forgetest.suite import commission_sheet  # noqa: E402
+from forgetest.suite import setup_sheet  # noqa: E402
 
 LIVE = ["sheet.frame", "laser.focus", "laser.floor", "laser.dose-curve", "laser.corner", "cooling.flow-load"]
 # The focus card's program is read again after it ran: the served ladder
@@ -107,7 +107,7 @@ FOUND = {"lens_hall_edge_z_mm": "3.35", "lens_stop_below_steps": "10", "lens_sto
 
 class RegistrationTests(unittest.TestCase):
     def setUp(self):
-        self.t = catalog.load_suite()["commission.sheet"]
+        self.t = catalog.load_suite()["setup.sheet"]
 
     def test_one_live_test_on_the_button_with_the_sheet_at_hand(self):
         t = self.t
@@ -118,12 +118,12 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue(t.hands)
         self.assertFalse(t.fixture_runnable(("button", "lid", "interlock")))
         self.assertIsNone(getattr(t, "precheck", None))
-        for want in ("commission.check-motion", "laser.emission-witness", "cooling.flow-verify"):
+        for want in ("setup.check-motion", "laser.emission-witness", "cooling.flow-verify"):
             self.assertIn(want, t.requires)
 
     def test_no_other_sheet_test_remains(self):
-        ids = [i for i in catalog.load_suite() if i.startswith("commission.sheet")]
-        self.assertEqual(ids, ["commission.sheet"])
+        ids = [i for i in catalog.load_suite() if i.startswith("setup.sheet")]
+        self.assertEqual(ids, ["setup.sheet"])
 
     def test_covers_the_live_runner_the_renderer_the_sender_the_page_and_the_driver(self):
         covers = set(self.t.covers)
@@ -137,7 +137,7 @@ class RegistrationTests(unittest.TestCase):
         text = " ".join(self.t.steps).lower()
         self.assertIn("press the machine's button once", text)
         self.assertNotIn("when the page", text)
-        self.assertEqual(len(commission_sheet.CARDS), 6)
+        self.assertEqual(len(setup_sheet.CARDS), 6)
 
 
 class ScriptedDaemon:
@@ -246,7 +246,7 @@ class SheetRunTests(unittest.TestCase):
         self.fake.stop()
 
     def test_the_whole_sheet_on_one_piece(self):
-        t = catalog.load_suite()["commission.sheet"]
+        t = catalog.load_suite()["setup.sheet"]
         run = Run("test", t.id, t.title)
         run.unattended = True           # the ready gate passes; the arm cue is a notice
         t.fn(Context(run, None, t))
@@ -270,12 +270,12 @@ class SheetRunTests(unittest.TestCase):
         # frame, the frame's program ran in the fallback window, the focus
         # card's window was in the settings when the floor card started,
         # and the window check filed what it compared.
-        for k in commission_sheet.LENS_SETTINGS:
+        for k in setup_sheet.LENS_SETTINGS:
             self.assertNotIn(k, d.settings_at_start["sheet.frame"], k)
         self.assertEqual(run.evidence["lens_fresh"]["stops_found"], False)
         self.assertEqual(run.evidence["program_z"]["sheet.frame"]["reach"], [-0.07, 7.46])
         floor_start = d.settings_at_start["laser.floor"]
-        self.assertEqual({k: floor_start[k] for k in commission_sheet.LENS_SETTINGS},
+        self.assertEqual({k: floor_start[k] for k in setup_sheet.LENS_SETTINGS},
                          {"lens_hall_edge_z_mm": "6.96", "lens_stop_below_steps": "14", "lens_stop_above_steps": "20"})
         fw = run.evidence["focus_window"]
         self.assertEqual(fw["window"], FOCUS_WINDOW)
@@ -294,7 +294,7 @@ class SheetRunTests(unittest.TestCase):
         place_prompts, place_result = SCRIPT["sheet.place"]
         SCRIPT["sheet.place"] = (place_prompts, dict(place_result, thickness_mm=3.175))
         try:
-            t = catalog.load_suite()["commission.sheet"]
+            t = catalog.load_suite()["setup.sheet"]
             run = Run("test", t.id, t.title)
             run.unattended = True
             t.fn(Context(run, None, t))
@@ -310,7 +310,7 @@ class SheetRunTests(unittest.TestCase):
         place_prompts, place_result = SCRIPT["sheet.place"]
         SCRIPT["sheet.place"] = (place_prompts, dict(place_result, thickness_mm=0.0))
         try:
-            t = catalog.load_suite()["commission.sheet"]
+            t = catalog.load_suite()["setup.sheet"]
             run = Run("test", t.id, t.title)
             run.unattended = True
             with self.assertRaises(Failed) as cm:
@@ -326,7 +326,7 @@ class SheetRunTests(unittest.TestCase):
         SCRIPT_DARK["emission"] = {"hv_max": 0, "laser_on_samples": 0, "thermopile_delta": 0}
         SCRIPT["laser.floor"] = (SCRIPT["laser.floor"][0], SCRIPT_DARK)
         try:
-            t = catalog.load_suite()["commission.sheet"]
+            t = catalog.load_suite()["setup.sheet"]
             run = Run("test", t.id, t.title)
             run.unattended = True
             with self.assertRaises(Failed):
@@ -347,7 +347,7 @@ class SheetRunTests(unittest.TestCase):
         saved = dict(START_WRITES["laser.focus"])
         START_WRITES["laser.focus"] = {}
         try:
-            t = catalog.load_suite()["commission.sheet"]
+            t = catalog.load_suite()["setup.sheet"]
             run = Run("test", t.id, t.title)
             run.unattended = True
             with self.assertRaises(Failed) as cm:
@@ -364,7 +364,7 @@ class SheetRunTests(unittest.TestCase):
         # refused before the card starts: nothing burns.
         from forgetest.runner import Failed
         self.daemon.stray_z = 10.6
-        t = catalog.load_suite()["commission.sheet"]
+        t = catalog.load_suite()["setup.sheet"]
         run = Run("test", t.id, t.title)
         run.unattended = True
         with self.assertRaises(Failed) as cm:

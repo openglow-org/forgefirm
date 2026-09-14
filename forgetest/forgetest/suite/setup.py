@@ -1,9 +1,9 @@
-"""commission.* - the first-run commissioning: the record and the
+"""setup.* - the first-run setup: the record and the
 controller gate, the advisories, the account and its login, the HTTPS
 boundary, SSH, the cloud switch, the machine's name, and the factory
 return.
 
-The daemon reads the commissioning record (commissioning.json in the
+The daemon reads the setup record (setup.json in the
 data directory) and the account record (users) once, at its start, and
 keeps them in memory; only its own routes write them. A test that needs
 a different record installs the file under a forgectrl restart (a
@@ -34,13 +34,13 @@ from ..catalog import test
 from .. import hw
 from .forgectrl import lan_ip
 
-RECORD = "commissioning.json"
+RECORD = "setup.json"
 USERS = "users"
-OVERRIDE = "commissioning-override"
+OVERRIDE = "setup-override"
 SSH_FLAG = "ssh-enabled"
 TLS_BASE = "https://127.0.0.1"          # FORGECTRL_TLS_URL overrides (host tests)
 
-# The image's required wizards, all at version 1 (commission.c).
+# The image's required wizards, all at version 1 (setup.c).
 REQUIRED_WIZARDS = ("advisories", "account", "preferences", "machine", "cloud")
 ADVISORY_DOCS = ("safety-and-risk", "licenses", "privacy", "cloud-service")
 SAFETY_PHRASE = "I UNDERSTAND"
@@ -176,8 +176,8 @@ def record_without_wizards(record):
 
 
 def complete_record(status, base=None, account_name="bench"):
-    """A complete commissioning record for a machine that must count as
-    commissioned: every advisory at the hash GET /wiz reports, the
+    """A complete setup record for a machine that must count as
+    set up: every advisory at the hash GET /wiz reports, the
     press recorded, an account (the one of `base` when it has one),
     every wizard of the catalog at its version, and the run complete.
     `status` is a GET /wiz body; `base` is an existing record to keep
@@ -352,12 +352,12 @@ def gate_is_open():
 
 # -------------------------------------------------------------- the gate
 
-_GATE_COVERS = [("forgectrl", "src/commission.*"), ("forgectrl", "src/super.c"),
+_GATE_COVERS = [("forgectrl", "src/setup.*"), ("forgectrl", "src/super.c"),
                 ("forgectrl", "src/main.c"), ("forgectrl", "src/paths.h")]
 
 
-@test("commission.gate-blocks-controllers", title="The commissioning gate spawns no controller",
-      subsystem="commission", kind="auto", hardware="takeover", mode="grbl", est_min=5,
+@test("setup.gate-blocks-controllers", title="The setup gate spawns no controller",
+      subsystem="setup", kind="auto", hardware="takeover", mode="grbl", est_min=5,
       covers=_GATE_COVERS, requires=["forgectrl.auth"], precheck=gate_is_open,
       description="With the override removed and a record that lacks every required wizard "
                   "(installed under a forgectrl restart, the consent and the account kept), "
@@ -374,11 +374,11 @@ def gate_blocks_controllers(ctx):
     ctx.log("before: gate %s, override %s, required %s", before.get("gate"), before.get("override"),
             before.get("required"))
     raw = read_file(record_path())
-    ctx.check(raw, "no commissioning record at %s", record_path())
+    ctx.check(raw, "no setup record at %s", record_path())
     try:
         record = json.loads(raw.decode("utf-8"))
     except ValueError as e:
-        ctx.fail("the commissioning record is not JSON: %s", e)
+        ctx.fail("the setup record is not JSON: %s", e)
     lacking = json.dumps(record_without_wizards(record), indent=1, sort_keys=True).encode() + b"\n"
     had_override = override_present()
     ev["override_before"] = had_override
@@ -391,7 +391,7 @@ def gate_blocks_controllers(ctx):
         ctx.log("/mode after the restart: %s (after %s s)", m, took)
         ctx.check(m.get("controller") == "gated" and m.get("gated") is True,
                   "the supervisor did not report the gate: %s", m)
-        ctx.check("commissioning required" in (m.get("why") or ""),
+        ctx.check("setup required" in (m.get("why") or ""),
                   "the reason does not name the missing wizards: %r", m.get("why"))
         w = wiz(fc)
         ev["gated_wiz"] = wiz_summary(w)
@@ -439,11 +439,11 @@ def gate_blocks_controllers(ctx):
     ctx.log("restored: gate %s, controller %s", after.get("gate"), m.get("controller"))
 
 
-@test("commission.override-until-reboot", title="The override stands until the next reboot",
-      subsystem="commission", kind="auto", est_min=1,
+@test("setup.override-until-reboot", title="The override stands until the next reboot",
+      subsystem="setup", kind="auto", est_min=1,
       covers=_GATE_COVERS, requires=["forgectrl.auth"],
       description="The bench seed: the dev image's forgetest init script writes "
-                  "/run/forgefirm/commissioning-override at boot. With it present, GET /wiz "
+                  "/run/forgefirm/setup-override at boot. With it present, GET /wiz "
                   "reports the override and an open gate, the reason names the wizards it lifts "
                   "when any is required, and GET /mode reports the controller running and not "
                   "gated. The file lives on tmpfs (/proc/mounts), so a reboot removes it by "
@@ -486,9 +486,9 @@ def override_until_reboot(ctx):
 
 # ------------------------------------------------------------ advisories
 
-@test("commission.advisories-rehash", title="An advisory is accepted at its current hash only",
-      subsystem="commission", kind="auto", hardware="takeover", est_min=3,
-      covers=[("forgectrl", "src/advisories.*"), ("forgectrl", "src/commission.*"),
+@test("setup.advisories-rehash", title="An advisory is accepted at its current hash only",
+      subsystem="setup", kind="auto", hardware="takeover", est_min=3,
+      covers=[("forgectrl", "src/advisories.*"), ("forgectrl", "src/setup.*"),
               ("forgectrl", "src/wiz.*"), ("forgectrl", "src/sha256.*"), ("forgectrl", "src/main.c"),
               ("forgectrl", "src/ui/md.js"), ("forgectrl", "src/ui/embed_docs.cmake")],
       requires=["forgectrl.auth"],
@@ -504,7 +504,7 @@ def advisories_rehash(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
     raw = read_file(record_path())
-    ctx.check(raw, "no commissioning record at %s", record_path())
+    ctx.check(raw, "no setup record at %s", record_path())
     before = wiz(fc)
     ev["before"] = wiz_summary(before)
     docs = {d.get("id"): d for d in before.get("documents") or []}
@@ -579,7 +579,7 @@ def advisories_rehash(ctx):
 
 # -------------------------------------------------------------- the login
 
-@test("commission.account-login", title="The panel login over HTTPS", subsystem="commission",
+@test("setup.account-login", title="The panel login over HTTPS", subsystem="setup",
       kind="auto", est_min=2,
       covers=[("forgectrl", "src/auth.*"), ("forgectrl", "src/session.*"), ("forgectrl", "src/users.*"),
               ("forgectrl", "src/tls.*"), ("forgectrl", "src/peer.*"), ("forgectrl", "src/main.c"),
@@ -702,7 +702,7 @@ def login_checks(ctx, name, pw):
 
 # ------------------------------------------------------- HTTPS boundary
 
-@test("commission.https-only-writes", title="Writes from the LAN go to HTTPS", subsystem="commission",
+@test("setup.https-only-writes", title="Writes from the LAN go to HTTPS", subsystem="setup",
       kind="auto", est_min=1,
       covers=[("forgectrl", "src/auth.*"), ("forgectrl", "src/tls.*"), ("forgectrl", "src/peer.*"),
               ("forgectrl", "src/main.c")],
@@ -802,8 +802,8 @@ def restore_ssh(fc, before):
     write_file(flag, b"" if before.get("enabled") else None)
 
 
-@test("commission.ssh-until-reboot", title="SSH is switched from the panel until the next reboot",
-      subsystem="commission", kind="auto", est_min=1,
+@test("setup.ssh-until-reboot", title="SSH is switched from the panel until the next reboot",
+      subsystem="setup", kind="auto", est_min=1,
       covers=[("forgectrl", "src/main.c"), ("forgectrl", "src/paths.h")],
       requires=["forgectrl.auth"],
       description="GET /system/ssh reports enabled, running, and dev_image, and agrees with the "
@@ -888,8 +888,8 @@ def ssh_until_reboot(ctx):
 
 # ---------------------------------------------------------------- cloud
 
-@test("commission.cloud-disabled-surface", title="Nothing points at the cloud while it is off",
-      subsystem="commission", kind="auto", mode="grbl", est_min=1,
+@test("setup.cloud-disabled-surface", title="Nothing points at the cloud while it is off",
+      subsystem="setup", kind="auto", mode="grbl", est_min=1,
       covers=[("forgectrl", "src/main.c"), ("forgectrl", "src/super.c"), ("forgectrl", "src/settings.*"),
               ("forgectrl", "src/wiz.c"), ("forgectrl", "src/hooks.h")],
       requires=["forgectrl.settings-bounds"],
@@ -971,8 +971,8 @@ def cloud_disabled_surface(ctx):
 
 # ---------------------------------------------------------- the operator
 
-@test("commission.factory-return", title="The return to the factory firmware is guarded",
-      subsystem="commission", kind="auto", est_min=1,
+@test("setup.factory-return", title="The return to the factory firmware is guarded",
+      subsystem="setup", kind="auto", est_min=1,
       covers=[("forgectrl", "src/update.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.js")],
       requires=["update.slots-and-signature"],
       description="The return itself reboots the machine as a Glowforge, so it never runs from the "
@@ -1034,8 +1034,8 @@ def cmdlines():
     return out
 
 
-@test("commission.machine-name", title="The machine names itself from its MAC address",
-      subsystem="commission", kind="auto", est_min=1,
+@test("setup.machine-name", title="The machine names itself from its MAC address",
+      subsystem="setup", kind="auto", est_min=1,
       requires=["forgectrl.auth"],
       description="The machine calls itself forgefirm-<xxxx>, where xxxx is the last four hex "
                   "digits of its WiFi MAC address, so two machines on one network answer to "
@@ -1213,12 +1213,12 @@ def finished_first_run(ctx):
               "the controller did not come back after the setup: %s", m)
 
 
-_FIRST_RUN_REQUIRES = ["commission.gate-blocks-controllers", "commission.advisories-rehash"]
+_FIRST_RUN_REQUIRES = ["setup.gate-blocks-controllers", "setup.advisories-rehash"]
 
 
-@test("commission.first-run-flow", title="The first run, driven as the page drives it", subsystem="commission",
+@test("setup.first-run-flow", title="The first run, driven as the page drives it", subsystem="setup",
       kind="operator", hardware="takeover", est_min=3,
-      covers=[("forgectrl", "src/wiz.*"), ("forgectrl", "src/commission.*"), ("forgectrl", "src/users.*"),
+      covers=[("forgectrl", "src/wiz.*"), ("forgectrl", "src/setup.*"), ("forgectrl", "src/users.*"),
               ("forgectrl", "src/session.*"), ("forgectrl", "src/button.*"), ("forgectrl", "src/led.*"),
               ("forgectrl", "src/sheetid.*"), ("forgectrl", "src/advisories.*"), ("forgectrl", "src/hooks.h"),
               ("forgectrl", "src/main.c")],
@@ -1309,11 +1309,11 @@ def first_run_flow(ctx):
         ctx.log("the run completed: gate open, the controller back")
 
 
-@test("commission.first-run-page", title="The first-run page, walked once", subsystem="commission",
+@test("setup.first-run-page", title="The first-run page, walked once", subsystem="setup",
       kind="operator", hardware="takeover", est_min=6,
       covers=[("forgectrl", "src/ui/wizard.*"), ("forgectrl", "src/ui/forms.js"), ("forgectrl", "src/ui/md.js"),
               ("forgectrl", "src/ui/login.*"), ("forgectrl", "src/ui/embed_docs.cmake"), ("forgectrl", "src/tls.*")],
-      requires=_FIRST_RUN_REQUIRES + ["commission.first-run-flow"],
+      requires=_FIRST_RUN_REQUIRES + ["setup.first-run-flow"],
       actions=["button"], hands=["workstation"],
       steps=["From the workstation open https://<address>/ and accept the self-signed certificate.",
              "Click through the setup: scroll each document to its end and accept it (type I "
@@ -1328,7 +1328,7 @@ def first_run_flow(ctx):
                   "clicks through (the documents accepted, the press step with the LEDs "
                   "breathing teal, the account created, the run complete, the gate open, the "
                   "controller back). The operator confirms the panel opened. Everything the run "
-                  "wrote is restored as commission.first-run-flow restores it.")
+                  "wrote is restored as setup.first-run-flow restores it.")
 def first_run_page(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -1364,8 +1364,8 @@ def first_run_page(ctx):
         ctx.confirm("Did the control panel open after Finish?")
 
 
-@test("commission.cert-page", title="The certificate is checkable before the warning",
-      subsystem="commission", kind="auto", est_min=1,
+@test("setup.cert-page", title="The certificate is checkable before the warning",
+      subsystem="setup", kind="auto", est_min=1,
       covers=[("forgectrl", "src/tls.*"), ("forgectrl", "src/main.c"),
               ("forgectrl", "src/ui/wizard.html"), ("forgectrl", "src/ui/wizard.js")],
       requires=["forgectrl.auth"],
@@ -1423,9 +1423,9 @@ def flag_of(w, level, wid):
     return None
 
 
-@test("commission.what-changed", title="A replaced part asks for its checks again",
-      subsystem="commission", kind="auto", est_min=2, hardware="takeover",
-      covers=[("forgectrl", "src/commission.*"), ("forgectrl", "src/wiz.*"), ("forgectrl", "src/main.c"),
+@test("setup.what-changed", title="A replaced part asks for its checks again",
+      subsystem="setup", kind="auto", est_min=2, hardware="takeover",
+      covers=[("forgectrl", "src/setup.*"), ("forgectrl", "src/wiz.*"), ("forgectrl", "src/main.c"),
               ("forgectrl", "src/ui/panel.js"), ("forgectrl", "src/ui/index.html"),
               ("forgectrl", "src/ui/help.js")],
       requires=["forgectrl.auth"],
@@ -1493,9 +1493,9 @@ def what_changed(ctx):
     ctx.check(bool(mode(fc).get("gated")) == gated_before, "the gate does not read as before")
 
 
-@test("commission.record-export", title="The record: JSON, the printable page, and the log bundle",
-      subsystem="commission", kind="auto", est_min=2,
-      covers=[("forgectrl", "src/commission.*"), ("forgectrl", "src/recordhtml.*"), ("forgectrl", "src/wiz.*"),
+@test("setup.record-export", title="The record: JSON, the printable page, and the log bundle",
+      subsystem="setup", kind="auto", est_min=2,
+      covers=[("forgectrl", "src/setup.*"), ("forgectrl", "src/recordhtml.*"), ("forgectrl", "src/wiz.*"),
               ("forgectrl", "src/logs.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/index.html"),
               ("forgectrl", "src/ui/panel.js"), ("forgectrl", "src/ui/wizard.html")],
       requires=["forgectrl.auth", "logs.tree-tail-export"],
@@ -1504,7 +1504,7 @@ def what_changed(ctx):
                   "named after the sheet id; GET /wiz/record.html is a page with no script that "
                   "carries the sheet id and every completed wizard; without the token and without "
                   "a login both are refused (403); and the sanitized log export carries "
-                  "system/commissioning.json, parseable, with the same sheet id and no panel token.")
+                  "system/setup.json, parseable, with the same sheet id and no panel token.")
 def record_export(ctx):
     import gzip
     import io
@@ -1544,7 +1544,7 @@ def record_export(ctx):
     ctx.check(st == 200 and "text/html" in (hdrs.get("content-type") or ""), "GET /wiz/record.html -> %s %s",
               st, hdrs.get("content-type"))
     ctx.check("<script" not in page.lower(), "the printable page carries a script")
-    ctx.check(sid in page and "commissioning record" in page, "the page lacks the sheet id or its title")
+    ctx.check(sid in page and "setup record" in page, "the page lacks the sheet id or its title")
     titles = {z["id"]: z["title"] for z in w.get("wizards") or []}
     missing = [d for d in done if titles.get(d) and ("<h3>" + titles[d]) not in page]
     ev["missing_on_page"] = missing
@@ -1565,11 +1565,11 @@ def record_export(ctx):
     try:
         tf = tarfile.open(fileobj=io.BytesIO(gzip.decompress(data)))
         for m in tf.getmembers():
-            if m.isfile() and m.name.endswith("system/commissioning.json"):
+            if m.isfile() and m.name.endswith("system/setup.json"):
                 member = tf.extractfile(m).read()
     except (OSError, tarfile.TarError, EOFError) as e:
         ctx.fail("export is not a readable tar.gz: %s", e)
-    ctx.check(member is not None, "the bundle lacks system/commissioning.json")
+    ctx.check(member is not None, "the bundle lacks system/setup.json")
     if member is not None:
         try:
             inside = json.loads(member.decode("utf-8"))
@@ -1587,12 +1587,12 @@ def record_export(ctx):
     ctx.log("record %d wizards; page %d bytes; bundle carries the record", len(done), ev["page_bytes"])
 
 
-@test("commission.mirror", title="One browser drives a check; a second one follows",
-      subsystem="commission", kind="auto", est_min=2, hardware="takeover",
+@test("setup.mirror", title="One browser drives a check; a second one follows",
+      subsystem="setup", kind="auto", est_min=2, hardware="takeover",
       covers=[("forgectrl", "src/wizdark.*"), ("forgectrl", "src/wizcalc.*"), ("forgectrl", "src/wiz.*"),
               ("forgectrl", "src/session.*"), ("forgectrl", "src/ui/wizard.js"),
               ("forgectrl", "src/ui/wizard.html"), ("forgectrl", "src/ui/wizard.css")],
-      requires=["forgectrl.auth", "commission.account-login", "commission.check-sensors"],
+      requires=["forgectrl.auth", "setup.account-login", "setup.check-sensors"],
       description="With a temporary account (made and removed as the login test does) and two "
                   "login sessions: the first session starts the sensors check; GET /wiz/dark "
                   "reports the run as owned and its own to the first session, not to the second, "

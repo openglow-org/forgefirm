@@ -152,7 +152,7 @@ def auth(ctx):
     # HTTPS the route itself refuses the peer (403 loopback only). Neither
     # request follows the redirect, and the self-signed certificate is
     # not verified.
-    from .commission import request, decode
+    from .setup import request, decode
     ip = lan_ip()
     ev["lan_ip"] = ip
     ctx.check(ip, "cannot determine the board's LAN address")

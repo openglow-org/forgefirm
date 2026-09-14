@@ -1,4 +1,4 @@
-"""commission.sheet - the setup's sheet (the live wizards) in one run,
+"""setup.sheet - the setup's sheet (the live wizards) in one run,
 driven the way the page drives them: POST /wiz/<id>/start, GET /wiz/dark
 polled, the prompts answered from here, each burn armed by a press, the
 result judged, and every setting a wizard wrote put back as found. One
@@ -18,13 +18,13 @@ restored. The page is where the real numbers go in.
 import re
 
 from ..catalog import test
-from .commission_dark import run_check, Restore
+from .setup_dark import run_check, Restore
 
 SHEET_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/wizrun.h"),
                 ("forgectrl", "src/lens.*"), ("forgectrl", "src/sheet.*"),
                 ("forgectrl", "src/font_hershey.*"), ("forgectrl", "src/jobstream.*"),
                 ("forgectrl", "src/curverec.*"), ("forgectrl", "src/wizdark.*"),
-                ("forgectrl", "src/wiz.*"), ("forgectrl", "src/commission.*"),
+                ("forgectrl", "src/wiz.*"), ("forgectrl", "src/setup.*"),
                 ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.*"),
                 ("forgectrl", "src/super.c"),
                 ("forgectrl", "src/status.c"), ("forgectrl", "src/cool.c"),
@@ -222,10 +222,10 @@ def burn(ctx, wid, answers, want):
     file_card(ctx, wid)
 
 
-@test("commission.sheet", title="The commissioning sheet: the placement, the frame, and the five cards",
-      subsystem="commission", kind="live", hardware="takeover", mode="grbl", est_min=35,
+@test("setup.sheet", title="The setup sheet: the placement, the frame, and the five cards",
+      subsystem="setup", kind="live", hardware="takeover", mode="grbl", est_min=35,
       covers=SHEET_COVERS,
-      requires=["forgectrl.auth", "commission.check-motion", "laser.emission-witness", "cooling.flow-verify"],
+      requires=["forgectrl.auth", "setup.check-motion", "laser.emission-witness", "cooling.flow-verify"],
       actions=["button"], hands=["scrap"],
       steps=["A piece of wood at least 200 x 150 mm (8 x 6 in) on the bed, pushed as far left as "
              "it goes with its top edge at the top of the cut area (the head's home corner); "

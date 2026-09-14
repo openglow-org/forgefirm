@@ -891,7 +891,7 @@ CRASH_GATES = ["crash_abort", "crash_x_alert", "crash_y_alert"]
                   "read as the three crash gates off by value (gates_off names them) with the "
                   "session OK; a threshold past the register range is refused; restored, the "
                   "gates read ok. The tiers themselves (BUMP, CRASH) trip only on a physical "
-                  "knock inside an armed window and are commissioned at the bench, not here.")
+                  "knock inside an armed window and are proven at the bench, not here.")
 def crash_watch_plumbing(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence

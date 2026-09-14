@@ -1,4 +1,4 @@
-"""commission.check-* - the setup's checks (the dark wizards), driven the
+"""setup.check-* - the setup's checks (the dark wizards), driven the
 way the page drives them: POST /wiz/<id>/start, GET /wiz/dark polled,
 the prompts answered from here (the bench fixture works the lid and the
 button; a confirmation is answered yes once the snapshot exists), the
@@ -12,7 +12,7 @@ import time
 from ..catalog import test
 from .. import hw
 from ..baseline import read_position
-from .commission import wiz, Restore  # noqa: F401 - Restore is re-exported for the sheet
+from .setup import wiz, Restore  # noqa: F401 - Restore is re-exported for the sheet
 
 POLL_S = 1.0
 # What the machine's own press prompt says, used when it sends no text.
@@ -22,7 +22,7 @@ PRESS_TEXT = "The button is lit white. Press it now: the laser fires after your 
 # (74) for the first seconds and settles near 630.
 PURGE_SPINUP_S = 30
 DARK_COVERS = [("forgectrl", "src/wizdark.*"), ("forgectrl", "src/wizcalc.*"),
-               ("forgectrl", "src/wiz.*"), ("forgectrl", "src/commission.*"),
+               ("forgectrl", "src/wiz.*"), ("forgectrl", "src/setup.*"),
                ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.*")]
 
 
@@ -113,8 +113,8 @@ def run_check(ctx, wid, on_prompt, timeout_s):
     return last
 
 
-@test("commission.check-switches", title="The switches check follows the lid and the button",
-      subsystem="commission", kind="operator", est_min=3,
+@test("setup.check-switches", title="The switches check follows the lid and the button",
+      subsystem="setup", kind="operator", est_min=3,
       covers=DARK_COVERS + [("forgectrl", "src/status.c")],
       requires=["forgectrl.auth"], actions=["lid", "button"],
       description="POST /wiz/switches/start; the check asks for the lid to open and close and for "
@@ -148,30 +148,40 @@ def check_switches(ctx):
     ctx.log("switches: %s", json.dumps(r))
 
 
-@test("commission.check-sensors", title="The sensors check reads a plausible machine at rest",
-      subsystem="commission", kind="auto", est_min=2,
+@test("setup.check-sensors", title="The sensors check reads a plausible machine at rest",
+      subsystem="setup", kind="auto", est_min=2,
       covers=DARK_COVERS + [("forgectrl", "src/status.c"), ("forgectrl", "src/accel.c"),
                             ("forgectrl", "src/cool.c")],
       requires=["forgectrl.auth"],
-      description="POST /wiz/sensors/start; ten seconds of readings, then the room-temperature "
-                  "prompt, answered Skip so no offset is written. The result carries both coolant "
-                  "temperatures, the chassis and SoC, the lid IR maxima, the accelerometer event "
-                  "count, the supply power-good, the HV current, and the idle fan speeds; the "
-                  "record carries sensors at version 1 and cool_temp_offset_c reads as before.")
+      description="POST /wiz/sensors/start; ten seconds of readings and no question asked. The "
+                  "result carries both coolant temperatures, the chassis and SoC, the lid IR "
+                  "maxima, the accelerometer event count, the supply power-good, the HV current, "
+                  "and the idle fan speeds; the record carries sensors at version 1 and the "
+                  "settings read as before (the check writes none).")
 def check_sensors(ctx):
-    with Restore(ctx, ["cool_temp_offset_c"]):
-        last = run_check(ctx, "sensors", lambda p: "Skip" if p.get("id") == "room-temp" else None, 120)
-        r = last.get("result") or {}
-        for k in ("coolant_down_c", "coolant_up_c", "lid_ir_max", "laser_pgood", "hv_current_max",
-                  "exhaust_rpm_idle", "intake_rpm_idle"):
-            ctx.check(k in r, "the result lacks %s: %s", k, r)
-        ctx.check(r.get("laser_pgood") == 1, "power-good read %s", r.get("laser_pgood"))
-        ctx.log("sensors: coolant %s/%s C, IR %s, HV %s", r.get("coolant_down_c"), r.get("coolant_up_c"),
-                r.get("lid_ir_max"), r.get("hv_current_max"))
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    before = fc.settings() or {}
+    ev["settings_before"] = dict(before)
+
+    def on_prompt(p):
+        ctx.fail("the sensors check asked a question: %s", p)
+    last = run_check(ctx, "sensors", on_prompt, 120)
+    r = last.get("result") or {}
+    for k in ("coolant_down_c", "coolant_up_c", "lid_ir_max", "laser_pgood", "hv_current_max",
+              "exhaust_rpm_idle", "intake_rpm_idle"):
+        ctx.check(k in r, "the result lacks %s: %s", k, r)
+    ctx.check(r.get("laser_pgood") == 1, "power-good read %s", r.get("laser_pgood"))
+    after = fc.settings() or {}
+    changed = {k: (before.get(k), after.get(k)) for k in set(before) | set(after)
+               if before.get(k) != after.get(k)}
+    ctx.check(not changed, "the sensors check wrote a setting: %s", changed)
+    ctx.log("sensors: coolant %s/%s C, IR %s, HV %s", r.get("coolant_down_c"), r.get("coolant_up_c"),
+            r.get("lid_ir_max"), r.get("hv_current_max"))
 
 
-@test("commission.check-airflow", title="The airflow check measures the fans and sets the floors",
-      subsystem="commission", kind="auto", hardware="takeover", est_min=3,
+@test("setup.check-airflow", title="The airflow check measures the fans and sets the floors",
+      subsystem="setup", kind="auto", hardware="takeover", est_min=3,
       covers=DARK_COVERS + [("forgectrl", "src/cool.c"), ("forgectrl", "src/airflow.*"),
                             ("forgectrl", "src/gates.c"), ("forgectrl", "src/super.c")],
       requires=["forgectrl.auth", "cooling.fan-gate-trips"],
@@ -229,8 +239,8 @@ def check_airflow(ctx):
     ctx.check(ok is not None, "the controller did not come back after the check")
 
 
-@test("commission.check-cameras", title="The cameras check captures both cameras",
-      subsystem="commission", kind="operator", est_min=2,
+@test("setup.check-cameras", title="The cameras check captures both cameras",
+      subsystem="setup", kind="operator", est_min=2,
       covers=DARK_COVERS + [("forgectrl", "src/cam.c")],
       requires=["forgectrl.auth", "camera.snapshot"], actions=["lid"],
       description="POST /wiz/cameras/start with the lid closed: a lid snapshot, the question, a "
@@ -264,8 +274,8 @@ def check_cameras(ctx):
             shots.get("lid", {}).get("bytes", 0), shots.get("head", {}).get("bytes", 0))
 
 
-@test("commission.check-motion", title="The motion check proves the rail, the lens reference, and the jogs",
-      subsystem="commission", kind="auto", hardware="takeover", est_min=5,
+@test("setup.check-motion", title="The motion check proves the rail, the lens reference, and the jogs",
+      subsystem="setup", kind="auto", hardware="takeover", est_min=5,
       covers=DARK_COVERS + [("forgectrl", "src/super.c"), ("forgectrl", "src/liveness.c"),
                             ("forgectrl", "src/lenshome.*"),
                             ("forgectrl", "src/accel.c"), ("forgectrl", "src/cool.c")],
@@ -305,8 +315,8 @@ def check_motion(ctx):
             r.get("rest"), {k: (v.get("p2p_lp_x"), v.get("p2p_lp_y")) for k, v in moves.items()})
 
 
-@test("commission.check-flow-verify", title="The flow check runs as a setup check",
-      subsystem="commission", kind="auto", hardware="takeover", est_min=5,
+@test("setup.check-flow-verify", title="The flow check runs as a setup check",
+      subsystem="setup", kind="auto", hardware="takeover", est_min=5,
       covers=DARK_COVERS + [("forgectrl", "src/diag.c")],
       requires=["forgectrl.auth", "cooling.aa-offset-calibrate", "cooling.flow-verify"],
       description="POST /wiz/cooling.flow-verify/start drives the flow-verify diagnostic through the "
@@ -323,8 +333,8 @@ def check_flow_verify(ctx):
             r.get("flow_rise"), r.get("noflow_rise"), r.get("thin_margin"))
 
 
-@test("commission.cloud-header-capture", title="The cloud header check takes one print's envelope",
-      subsystem="commission", kind="operator", hardware="takeover", mode="grbl", est_min=8,
+@test("setup.cloud-header-capture", title="The cloud header check takes one print's envelope",
+      subsystem="setup", kind="operator", hardware="takeover", mode="grbl", est_min=8,
       covers=DARK_COVERS + [("forgectrl", "src/super.c"),
                             ("python3-gfhardware", "gfhardware/machine.py"),
                             ("python3-gfhardware", "forgefirm-app/gfcloud.py"),

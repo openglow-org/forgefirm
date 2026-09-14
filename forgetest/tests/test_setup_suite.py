@@ -1,4 +1,4 @@
-"""The commission.* suite on the host: the registration (ids, kinds, the
+"""The setup.* suite on the host: the registration (ids, kinds, the
 takeover tests, the operator tests' hands), the record builders, the
 machine's name, the cookie parsing, the LED cue, the settle rule for a
 gated supervisor, and the cloud-off surface test driven end to end
@@ -12,15 +12,15 @@ import unittest
 import helpers
 from forgetest import baseline, catalog
 from forgetest.runner import Context, Run
-from forgetest.suite import commission
+from forgetest.suite import setup
 
-IDS = ("commission.gate-blocks-controllers", "commission.override-until-reboot",
-       "commission.advisories-rehash", "commission.account-login", "commission.https-only-writes",
-       "commission.ssh-until-reboot", "commission.cloud-disabled-surface",
-       "commission.factory-return", "commission.machine-name", "commission.first-run-flow",
-       "commission.first-run-page", "commission.what-changed", "commission.record-export",
-       "commission.mirror")
-OPERATOR = ("commission.first-run-flow", "commission.first-run-page")
+IDS = ("setup.gate-blocks-controllers", "setup.override-until-reboot",
+       "setup.advisories-rehash", "setup.account-login", "setup.https-only-writes",
+       "setup.ssh-until-reboot", "setup.cloud-disabled-surface",
+       "setup.factory-return", "setup.machine-name", "setup.first-run-flow",
+       "setup.first-run-page", "setup.what-changed", "setup.record-export",
+       "setup.mirror")
+OPERATOR = ("setup.first-run-flow", "setup.first-run-page")
 
 
 class RegistrationTests(unittest.TestCase):
@@ -35,49 +35,49 @@ class RegistrationTests(unittest.TestCase):
         for tid in IDS:
             if tid not in OPERATOR:
                 self.assertEqual(kinds[tid], "auto", tid)
-        self.assertNotIn("commission.root-ssh-refused", self.reg)     # folded into ssh-until-reboot
-        self.assertNotIn("commission.wizard-first-run", self.reg)     # split into the flow and the page
+        self.assertNotIn("setup.root-ssh-refused", self.reg)     # folded into ssh-until-reboot
+        self.assertNotIn("setup.wizard-first-run", self.reg)     # split into the flow and the page
 
     def test_the_record_swapping_tests_are_takeovers(self):
-        for tid in ("commission.gate-blocks-controllers", "commission.advisories-rehash",
-                    "commission.first-run-flow", "commission.first-run-page",
-                    "commission.what-changed", "commission.mirror"):
+        for tid in ("setup.gate-blocks-controllers", "setup.advisories-rehash",
+                    "setup.first-run-flow", "setup.first-run-page",
+                    "setup.what-changed", "setup.mirror"):
             self.assertEqual(self.reg[tid].hardware, "takeover", tid)
-        self.assertEqual(self.reg["commission.record-export"].hardware, "api")
+        self.assertEqual(self.reg["setup.record-export"].hardware, "api")
 
     def test_the_lifecycle_tests_cover_their_files(self):
-        changed = set(self.reg["commission.what-changed"].covers)
-        export = set(self.reg["commission.record-export"].covers)
-        mirror = set(self.reg["commission.mirror"].covers)
+        changed = set(self.reg["setup.what-changed"].covers)
+        export = set(self.reg["setup.record-export"].covers)
+        mirror = set(self.reg["setup.mirror"].covers)
         self.assertIn(("forgectrl", "src/ui/panel.js"), changed)
         self.assertIn(("forgectrl", "src/recordhtml.*"), export)
         self.assertIn(("forgectrl", "src/logs.*"), export)
         self.assertIn(("forgectrl", "src/wizdark.*"), mirror)
-        self.assertIn("commission.check-sensors", self.reg["commission.mirror"].requires)
+        self.assertIn("setup.check-sensors", self.reg["setup.mirror"].requires)
 
     def test_flag_of_reads_the_status_document(self):
         w = {"required": ["airflow", {"id": "laser.floor", "reason": "the tube was replaced"}],
              "recommended": [{"id": "laser.focus", "reason": "the tray was replaced"}]}
-        self.assertEqual(commission.flag_of(w, "required", "laser.floor"), "the tube was replaced")
-        self.assertEqual(commission.flag_of(w, "recommended", "laser.focus"), "the tray was replaced")
-        self.assertIsNone(commission.flag_of(w, "required", "airflow"))       # a plain id is the table, not a flag
-        self.assertIsNone(commission.flag_of(w, "required", "laser.focus"))
-        self.assertIsNone(commission.flag_of({}, "recommended", "x"))
+        self.assertEqual(setup.flag_of(w, "required", "laser.floor"), "the tube was replaced")
+        self.assertEqual(setup.flag_of(w, "recommended", "laser.focus"), "the tray was replaced")
+        self.assertIsNone(setup.flag_of(w, "required", "airflow"))       # a plain id is the table, not a flag
+        self.assertIsNone(setup.flag_of(w, "required", "laser.focus"))
+        self.assertIsNone(setup.flag_of({}, "recommended", "x"))
 
     def test_the_first_run_flow_runs_unattended_with_the_fixture_and_the_page_walk_does_not(self):
-        flow = self.reg["commission.first-run-flow"]
+        flow = self.reg["setup.first-run-flow"]
         self.assertEqual(list(flow.actions), ["button"])
         self.assertFalse(flow.hands)
         self.assertTrue(flow.fixture_runnable(("button", "lid", "interlock")))
-        page = self.reg["commission.first-run-page"]
+        page = self.reg["setup.first-run-page"]
         self.assertTrue(page.hands)
         self.assertFalse(page.fixture_runnable(("button", "lid", "interlock")))
-        self.assertIn("commission.first-run-flow", page.requires)
+        self.assertIn("setup.first-run-flow", page.requires)
 
     def test_the_first_run_split_keeps_the_backend_and_the_page_apart(self):
-        flow = set(self.reg["commission.first-run-flow"].covers)
-        page = set(self.reg["commission.first-run-page"].covers)
-        for want in (("forgectrl", "src/wiz.*"), ("forgectrl", "src/commission.*"), ("forgectrl", "src/users.*"),
+        flow = set(self.reg["setup.first-run-flow"].covers)
+        page = set(self.reg["setup.first-run-page"].covers)
+        for want in (("forgectrl", "src/wiz.*"), ("forgectrl", "src/setup.*"), ("forgectrl", "src/users.*"),
                      ("forgectrl", "src/button.*"), ("forgectrl", "src/led.*"), ("forgectrl", "src/advisories.*")):
             self.assertIn(want, flow, want)
             self.assertNotIn(want, page, want)
@@ -85,17 +85,17 @@ class RegistrationTests(unittest.TestCase):
             self.assertIn(want, page, want)
 
     def test_the_only_attended_tests_need_a_workstation_or_the_sheet(self):
-        # With the bench actuator up, three commissioning tests keep a
+        # With the bench actuator up, three setup tests keep a
         # person: the page walk, the print from the Glowforge app, and
         # the sheet. Everything else runs from the queue.
-        attended = sorted(tid for tid, t in self.reg.items() if tid.startswith("commission.")
+        attended = sorted(tid for tid, t in self.reg.items() if tid.startswith("setup.")
                           and t.kind != "auto" and not t.fixture_runnable(("button", "lid", "interlock")))
-        self.assertEqual(attended, ["commission.cloud-header-capture", "commission.first-run-page",
-                                    "commission.sheet"])
+        self.assertEqual(attended, ["setup.cloud-header-capture", "setup.first-run-page",
+                                    "setup.sheet"])
 
     def test_the_factory_return_never_runs_the_return(self):
         import inspect
-        t = self.reg["commission.factory-return"]
+        t = self.reg["setup.factory-return"]
         src = inspect.getsource(t.fn)
         self.assertNotIn('"confirm": "1"', src)         # the only argument that starts the return
         self.assertIn('"confirm": "0"', src)
@@ -103,15 +103,15 @@ class RegistrationTests(unittest.TestCase):
         self.assertFalse(t.hands)
 
     def test_the_machine_name_covers_nothing_by_design(self):
-        self.assertEqual(self.reg["commission.machine-name"].covers, ())
+        self.assertEqual(self.reg["setup.machine-name"].covers, ())
 
     def test_the_login_test_makes_its_own_account(self):
         # No bench credentials, no precheck: the test installs a temporary
         # account under a takeover and restores the real one.
-        t = self.reg["commission.account-login"]
+        t = self.reg["setup.account-login"]
         self.assertIsNone(getattr(t, "precheck", None))
         self.assertEqual(t.hardware, "takeover")
-        with open(commission.__file__) as f:
+        with open(setup.__file__) as f:
             src = f.read()
         for k in ("FORGETEST_LOGIN_NAME", "FORGETEST_LOGIN_PASSWORD"):
             self.assertNotIn(k, src)
@@ -124,8 +124,8 @@ class RecordTests(unittest.TestCase):
               "wizards": [{"id": "advisories", "version": 1}, {"id": "account", "version": 1},
                           {"id": "machine", "version": 2}]}
 
-    def test_complete_record_counts_as_commissioned(self):
-        rec = commission.complete_record(self.STATUS)
+    def test_complete_record_counts_as_set_up(self):
+        rec = setup.complete_record(self.STATUS)
         self.assertEqual(rec["schema"], 1)
         self.assertEqual(rec["advisories"]["safety-and-risk"]["hash"], "a" * 64)
         self.assertEqual(rec["advisories"]["safety-and-risk"]["method"], "typed")
@@ -139,16 +139,16 @@ class RecordTests(unittest.TestCase):
     def test_complete_record_keeps_the_base_account_and_machine(self):
         base = {"account": {"name": "owner", "uid": 1000, "created": "x"}, "machine": {"model": "pro"},
                 "sheet_id": "KKKKK-LLLLL", "created": "then"}
-        rec = commission.complete_record(self.STATUS, base)
+        rec = setup.complete_record(self.STATUS, base)
         self.assertEqual(rec["account"]["name"], "owner")
         self.assertEqual(rec["machine"], {"model": "pro"})
         self.assertEqual(rec["sheet_id"], "KKKKK-LLLLL")
         self.assertEqual(rec["created"], "then")
 
     def test_without_wizards_keeps_consent_and_account(self):
-        rec = commission.complete_record(self.STATUS)
+        rec = setup.complete_record(self.STATUS)
         rec["flags"] = {"machine": {"level": "required", "reason": "x"}}
-        out = commission.record_without_wizards(rec)
+        out = setup.record_without_wizards(rec)
         self.assertEqual(out["wizards"], {})
         self.assertEqual(out["flags"], {})
         self.assertEqual(out["advisories"], rec["advisories"])
@@ -158,14 +158,14 @@ class RecordTests(unittest.TestCase):
     def test_write_file_and_remove(self):
         tmp = tempfile.mkdtemp(prefix="forgetest-comm-")
         try:
-            p = os.path.join(tmp, "sub", "commissioning.json")
-            commission.write_file(p, b"{}\n")
-            self.assertEqual(commission.read_file(p), b"{}\n")
+            p = os.path.join(tmp, "sub", "setup.json")
+            setup.write_file(p, b"{}\n")
+            self.assertEqual(setup.read_file(p), b"{}\n")
             if os.name == "posix":              # a mode means nothing on a Windows host
                 self.assertEqual(oct(os.stat(p).st_mode & 0o777), oct(0o600))
-            commission.write_file(p, None)
-            self.assertIsNone(commission.read_file(p))
-            commission.write_file(p, None)          # a second remove is silent
+            setup.write_file(p, None)
+            self.assertIsNone(setup.read_file(p))
+            setup.write_file(p, None)          # a second remove is silent
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -173,10 +173,10 @@ class RecordTests(unittest.TestCase):
         os.environ["FORGECTRL_DATA_DIR"] = "/tmp/ffdata"
         os.environ["GF_RUN_DIR"] = "/tmp/ffrun"
         try:
-            self.assertEqual(commission.record_path(), "/tmp/ffdata/commissioning.json")
-            self.assertEqual(commission.users_path(), "/tmp/ffdata/users")
-            self.assertEqual(commission.override_path(), "/tmp/ffrun/commissioning-override")
-            self.assertEqual(commission.ssh_flag_path(), "/tmp/ffrun/ssh-enabled")
+            self.assertEqual(setup.record_path(), "/tmp/ffdata/setup.json")
+            self.assertEqual(setup.users_path(), "/tmp/ffdata/users")
+            self.assertEqual(setup.override_path(), "/tmp/ffrun/setup-override")
+            self.assertEqual(setup.ssh_flag_path(), "/tmp/ffrun/ssh-enabled")
         finally:
             os.environ.pop("FORGECTRL_DATA_DIR", None)
             os.environ.pop("GF_RUN_DIR", None)
@@ -188,14 +188,14 @@ class MachineNameTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def _net(self, **devs):
-        """A /sys/class/net tree; commission.mac_suffix reads it through
-        commission.read_file, which takes an absolute path."""
+        """A /sys/class/net tree; setup.mac_suffix reads it through
+        setup.read_file, which takes an absolute path."""
         for dev, mac in devs.items():
             d = os.path.join(self.root, dev)
             os.makedirs(d)
             with open(os.path.join(d, "address"), "w") as f:
                 f.write(mac + "\n")
-        real = commission.read_file
+        real = setup.read_file
 
         def read(path):
             head = "/sys/class/net/"
@@ -203,52 +203,52 @@ class MachineNameTests(unittest.TestCase):
                 return real(os.path.join(self.root, path[len(head):]))
             return real(path)
 
-        commission.read_file = read
-        self.addCleanup(setattr, commission, "read_file", real)
+        setup.read_file = read
+        self.addCleanup(setattr, setup, "read_file", real)
 
     def test_the_wifi_address_names_the_machine(self):
         self._net(wlan0="2C:6B:7D:0D:B0:0A", eth0="00:11:22:33:44:55")
-        self.assertEqual(commission.mac_suffix(), "b00a")
+        self.assertEqual(setup.mac_suffix(), "b00a")
 
     def test_a_machine_with_no_wifi_falls_back_to_the_wired_address(self):
         self._net(eth0="00:11:22:33:44:55")
-        self.assertEqual(commission.mac_suffix(), "4455")
+        self.assertEqual(setup.mac_suffix(), "4455")
 
     def test_an_unread_address_is_no_address(self):
         self._net(wlan0="00:00:00:00:00:00")
-        self.assertEqual(commission.mac_suffix(), "")
+        self.assertEqual(setup.mac_suffix(), "")
 
     def test_no_interface_is_no_address(self):
         self._net()
-        self.assertEqual(commission.mac_suffix(), "")
+        self.assertEqual(setup.mac_suffix(), "")
 
 
 class SmallHelpersTests(unittest.TestCase):
     def test_cookie_parsing(self):
         sid = "ab" * 32
         value = "ffsid=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=43200" % sid
-        self.assertEqual(commission.session_from_cookie(value), sid)
-        self.assertEqual(commission.cookie_flags(value), {"path", "httponly", "secure", "samesite", "max-age"})
-        self.assertIsNone(commission.session_from_cookie("ffsid=; Path=/; Max-Age=0"))
-        self.assertIsNone(commission.session_from_cookie(""))
+        self.assertEqual(setup.session_from_cookie(value), sid)
+        self.assertEqual(setup.cookie_flags(value), {"path", "httponly", "secure", "samesite", "max-age"})
+        self.assertIsNone(setup.session_from_cookie("ffsid=; Path=/; Max-Age=0"))
+        self.assertIsNone(setup.session_from_cookie(""))
 
     def test_the_teal_breathe_cue(self):
-        self.assertTrue(commission.breathes_teal({"target": [0, 180, 200], "pulse_on": [0, 1400, 1400],
+        self.assertTrue(setup.breathes_teal({"target": [0, 180, 200], "pulse_on": [0, 1400, 1400],
                                                   "pulse_off": [0, 1400, 1400]}))
-        self.assertFalse(commission.breathes_teal({"target": [0, 255, 40], "pulse_on": [0, 0, 0],
+        self.assertFalse(setup.breathes_teal({"target": [0, 255, 40], "pulse_on": [0, 0, 0],
                                                    "pulse_off": [0, 0, 0]}))          # solid green
-        self.assertFalse(commission.breathes_teal({"target": [200, 200, 200], "pulse_on": [1800, 1800, 1800],
+        self.assertFalse(setup.breathes_teal({"target": [200, 200, 200], "pulse_on": [1800, 1800, 1800],
                                                    "pulse_off": [1800] * 3}))         # white
-        self.assertFalse(commission.breathes_teal({"target": [None, None, None], "pulse_on": [None] * 3}))
-        self.assertFalse(commission.breathes_teal({}))
+        self.assertFalse(setup.breathes_teal({"target": [None, None, None], "pulse_on": [None] * 3}))
+        self.assertFalse(setup.breathes_teal({}))
 
     def test_decode(self):
-        self.assertEqual(commission.decode(b'{"a": 1}'), {"a": 1})
-        self.assertEqual(commission.decode(b"cloud mode is not enabled"), "cloud mode is not enabled")
+        self.assertEqual(setup.decode(b'{"a": 1}'), {"a": 1})
+        self.assertEqual(setup.decode(b"cloud mode is not enabled"), "cloud mode is not enabled")
 
 
 class GatedSettleTests(unittest.TestCase):
-    """A supervisor that reports the commissioning gate closed is settled:
+    """A supervisor that reports the setup gate closed is settled:
     it spawns nothing until the gate opens, so a takeover that installs
     a gating record must not wait the whole settle timeout for it."""
 
@@ -261,7 +261,7 @@ class GatedSettleTests(unittest.TestCase):
 
     def test_gated_returns_at_once(self):
         self.fake.state["mode"] = {"mode": "grbl", "controller": "gated", "pid": 0, "motion": "unverified",
-                                   "gated": True, "why": "commissioning required: machine"}
+                                   "gated": True, "why": "setup required: machine"}
         lines = []
         body = baseline.Baseline(lines.append).wait_settled(timeout=8)
         self.assertEqual(body["controller"], "gated")
@@ -284,7 +284,7 @@ class FirstRunSeedTests(unittest.TestCase):
                 "advisories": {"safety-and-risk": {"hash": "x"}}, "acceptance": {"pressed_at": "t"},
                 "account": {"name": "scott", "uid": 1000}, "flags": {"flow_thin": True},
                 "wizards": {"advisories": {"version": 1}, "switches": {"version": 1, "result": {"lid": True}}}}
-        rec = commission.first_run_record(self.STATUS, base)
+        rec = setup.first_run_record(self.STATUS, base)
         self.assertNotIn("completed", rec)
         self.assertNotIn("acceptance", rec)
         self.assertNotIn("account", rec)
@@ -296,7 +296,7 @@ class FirstRunSeedTests(unittest.TestCase):
         self.assertEqual(rec["wizards"]["motion"]["version"], 2)                 # written at the catalog version
 
     def test_without_a_base_record(self):
-        rec = commission.first_run_record(self.STATUS, None)
+        rec = setup.first_run_record(self.STATUS, None)
         self.assertEqual(sorted(rec["wizards"]), ["motion", "sheet.frame", "switches"])
         self.assertEqual(rec["wizards"]["sheet.frame"]["version"], 1)
 
@@ -312,7 +312,7 @@ class SshdPolicyTests(unittest.TestCase):
         real = hw.run
         hw.run = fake_run
         try:
-            self.assertEqual(commission.sshd_policy(), {"permitrootlogin": "no", "passwordauthentication": "yes",
+            self.assertEqual(setup.sshd_policy(), {"permitrootlogin": "no", "passwordauthentication": "yes",
                                                         "permitemptypasswords": "no"})
         finally:
             hw.run = real
@@ -323,7 +323,7 @@ class SshdPolicyTests(unittest.TestCase):
         real = hw.run
         hw.run = lambda cmd, timeout=60: (1, "sshd: no hostkeys available")
         try:
-            self.assertEqual(commission.sshd_policy(), {"error": "sshd: no hostkeys available"})
+            self.assertEqual(setup.sshd_policy(), {"error": "sshd: no hostkeys available"})
         finally:
             hw.run = real
 
@@ -375,7 +375,7 @@ class CloudDisabledSurfaceTests(unittest.TestCase):
         self.fake.stop()
 
     def run_test(self):
-        t = catalog.load_suite()["commission.cloud-disabled-surface"]
+        t = catalog.load_suite()["setup.cloud-disabled-surface"]
         run = Run("test", t.id, t.title)
         t.fn(Context(run, None, t))
         return run

@@ -396,7 +396,7 @@ def lid_privacy(ctx):
                   "authorizes a write; a rotation from the panel route stops the old key and "
                   "the new one reads. The setting is put back after.")
 def key_read(ctx):
-    from .commission import request
+    from .setup import request
     from .forgectrl import lan_ip
     fc = ctx.forgectrl
     ev = ctx.evidence

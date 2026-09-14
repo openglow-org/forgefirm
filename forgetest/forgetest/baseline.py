@@ -321,7 +321,7 @@ class Baseline:
     def wait_settled(self, timeout=SETTLE_S, unreachable_s=10):
         """Block until forgectrl reports a settled supervisor: motion
         verified (the probe passed), motion-fault (the ladder exhausted),
-        standby (the manual stop lever), or gated (the commissioning gate
+        standby (the manual stop lever), or gated (the setup gate
         is closed: no controller spawns until it opens). Gives up after
         unreachable_s without an answer. Returns the last /mode body (None
         if unreachable)."""
