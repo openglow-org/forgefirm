@@ -764,10 +764,13 @@ def _return_x(ctx, delta_mm):
                   "locked); the process resumed from the hang recovers on a soft reset and an unlock "
                   "(the alarm is critical, so $X alone is refused; the reset acknowledges the "
                   "fault to the stream and clears the stale ring) and moves again without a "
-                  "restart. forgectrl "
-                  "restart mid-move: the busy controller finishes the move unmanaged and the new "
-                  "daemon retakes supervision at idle. After each drill the head is jogged back "
-                  "by the kernel-measured distance.")
+                  "restart. A short SIGSTOP (100 ms, inside the kernel's 200 ms queue) mid-move: "
+                  "no underrun, but the step producer comes back later than its lead and its "
+                  "late events clamp; unarmed that is a warning in the controller's log and the "
+                  "move completes with every step (the armed case faults, proven on the host). "
+                  "forgectrl restart mid-move: the busy controller finishes the move unmanaged "
+                  "and the new daemon retakes supervision at idle. After each drill the head is "
+                  "jogged back by the kernel-measured distance.")
 def deadman(ctx):
     import os as _os
     import signal as _signal
@@ -897,6 +900,47 @@ def deadman(ctx):
     x1 = _kernel_x_mm(ctx)
     _return_x(ctx, (x1 - x0) if (x0 is not None and x1 is not None) else None)
 
+    # ---- 2b. a short hang (inside the kernel queue): late events clamp, a warning, the move completes
+    m2 = wait_running(10)
+    pid2 = m2["pid"]
+    x0 = _kernel_x_mm(ctx)
+    underruns0 = hw.sysfs_int("cnc/underruns", 0)
+    log0 = _log_offset(GRBLHAL_LOG)
+    with ctx.grbl() as g:
+        clean_slate(ctx, g)
+        g.command("G91")
+        g.command("G1X30F300", timeout=0.5)     # ~6 s of motion
+        ctx.sleep(1.0)
+        _os.kill(pid2, _signal.SIGSTOP)
+        time.sleep(0.1)
+        _os.kill(pid2, _signal.SIGCONT)
+        ctx.log("SIGSTOP 100 ms sent to controller pid %d mid-move", pid2)
+        peak, states, st = wait_idle(ctx, g, 30)
+        g.command("G90")
+    machine_idle(ctx)                           # the kernel's tail plays out behind grbl's Idle
+    warned = None
+    t0 = time.time()
+    while time.time() - t0 < 5 and not warned:
+        lines = _log_lines(GRBLHAL_LOG, log0, "late events clamped")
+        warned = lines[-1] if lines else None
+        if not warned:
+            ctx.sleep(0.5)
+    x1 = _kernel_x_mm(ctx)
+    ev["short_stall"] = {"states": states, "underruns": hw.sysfs_int("cnc/underruns", 0) - underruns0,
+                         "warning": warned, "kernel_dx_mm": round((x1 - x0), 3) if (x0 is not None and x1 is not None) else None,
+                         "state_after": (st or {}).get("state")}
+    ctx.log("short stall: states %s, underruns +%s, warning %r, kernel dx %s mm", states,
+            ev["short_stall"]["underruns"], warned, ev["short_stall"]["kernel_dx_mm"])
+    ctx.check("TIMEOUT" not in states and str((st or {}).get("state", "")).startswith("Idle"),
+              "the move did not complete after the short stall (states %s)", states)
+    ctx.check(ev["short_stall"]["underruns"] == 0, "the short stall drained the ring (underruns +%s)",
+              ev["short_stall"]["underruns"])
+    ctx.check(warned, "the controller did not warn about the clamped events after the short stall")
+    ctx.check(ev["short_stall"]["kernel_dx_mm"] is not None and abs(ev["short_stall"]["kernel_dx_mm"] - 30.0) < 0.3,
+              "the kernel counted %s mm for a 30 mm move after the short stall", ev["short_stall"]["kernel_dx_mm"])
+    ctx.check(latch_locked(), "latch unlocked after the short stall")
+    _return_x(ctx, (x1 - x0) if (x0 is not None and x1 is not None) else None)
+
     # ---- 3. forgectrl restart mid-move: the move finishes, supervision retaken at idle
     m2 = wait_running(10)
     pid2 = m2["pid"]
@@ -934,8 +978,79 @@ def deadman(ctx):
     x1 = _kernel_x_mm(ctx)
     _return_x(ctx, (x1 - x0) if (x0 is not None and x1 is not None) else None)
     machine_idle(ctx)
-    ctx.log("PASS: kill respawned in %s s, hang -> underrun in %s s, restart retook supervision (pid %s)",
-            respawn_s, halt_s, m3.get("pid"))
+    ctx.log("PASS: kill respawned in %s s, hang -> underrun in %s s, short stall warned and completed, "
+            "restart retook supervision (pid %s)", respawn_s, halt_s, m3.get("pid"))
+
+
+@test("motion.soft-limits", title="After a home the bed is the X/Y envelope",
+      subsystem="motion", kind="auto", mode="grbl", est_min=3,
+      covers=_MOTION_COVERS, requires=["motion.jog-roundtrip", "cloud.mode-switch"],
+      steps=["Bed clear, lid closed. The test homes the machine through the web service if it is "
+             "not homed (about a minute), then sends moves the controller must refuse."],
+      description="The machine has no limit switches, so the core's $20 cannot be turned on and "
+                  "the X/Y soft limits are the driver's: off while the position is not trusted, on "
+                  "after a home, when the envelope is the bed ($130 by $131 from the home corner). "
+                  "Homed, a program move 5 mm past X max or Y max, or past the near edge, raises "
+                  "ALARM:2 before any motion (the kernel counters do not move), a jog past the bed "
+                  "is refused with error 15, and a move inside the bed runs. The Z envelope is the "
+                  "lens window, as before.")
+def soft_limits(ctx):
+    from .cloud import gfhome_homing
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    with ctx.grbl() as g:
+        clean_slate(ctx, g)
+        if not fc.status().get("homed"):
+            gfhome_homing(ctx, ev, g)
+        ctx.check(fc.status().get("homed"), "the machine is not homed")
+        x_travel = float(grbl_setting(g, "$130"))
+        y_travel = float(grbl_setting(g, "$131"))
+        ev["travel"] = {"x": x_travel, "y": y_travel}
+        k0 = kernel_xy_mm(ctx)
+
+        def refused(cmd):
+            lines = g.command(cmd, timeout=2)
+            ctx.sleep(0.5)
+            text = "\n".join(lines) + g.drain()
+            k1 = kernel_xy_mm(ctx)
+            moved = max(abs(k1[0] - k0[0]), abs(k1[1] - k0[1]))
+            st = g.status_report()["state"]
+            rec = {"cmd": cmd, "reply": lines, "alarm": "ALARM:2" in text, "moved_mm": round(moved, 3), "state": st}
+            ctx.log("%s", rec)
+            ctx.check(rec["alarm"], "%s was not refused with ALARM:2: %s", cmd, lines)
+            ctx.check(moved < 0.05, "%s moved the kernel %.3f mm before the alarm", cmd, moved)
+            g.realtime(0x18)
+            ctx.sleep(1.5)
+            g.drain()
+            unlock = g.command("$X")
+            ctx.check(unlock and unlock[-1] == "ok", "$X after the soft-limit alarm: %s", unlock)
+            st = g.status_report()["state"]
+            ctx.check(st.startswith("Idle"), "controller is %s after the recovery", st)
+            return rec
+
+        ev["refused"] = [refused("G90 G1 X%.1f F600" % (x_travel + 5)),
+                         refused("G90 G1 Y%.1f F600" % (y_travel + 5)),
+                         refused("G90 G1 X-1 F600")]
+        # Homed still: the soft-limit alarm and its reset keep the reference.
+        ctx.check(fc.status().get("homed"), "the soft-limit alarm and the reset un-homed the machine")
+        jog = g.command("$J=G91X%.1fF1200" % (x_travel + 5))
+        ev["jog"] = jog
+        ctx.check(any(l.startswith("error:15") for l in jog), "a jog past the bed was not refused with error 15: %s", jog)
+        # The core answers the line after an error with that error again
+        # until an empty line clears it (the sender's acknowledgment).
+        g.command("")
+        g.command("G90 G1 X10 Y10 F600", timeout=0.5)
+        peak, states, st = wait_idle(ctx, g, 20)
+        ev["inside"] = states
+        ctx.check("TIMEOUT" not in states, "a move inside the bed did not run")
+        g.command("G90 G1 X0 Y0 F600", timeout=0.5)
+        wait_idle(ctx, g, 20)
+        k1 = kernel_start(ctx)                  # at rest: grbl's Idle leads the kernel's tail
+        ev["kernel_back_mm"] = [round(k1[0] - k0[0], 3), round(k1[1] - k0[1], 3)]
+        ctx.check(max(abs(k1[0] - k0[0]), abs(k1[1] - k0[1])) < 0.1, "the head did not come back to the corner: %s",
+                  ev["kernel_back_mm"])
+    ctx.log("PASS: X max, Y max and X min refused with ALARM:2 and no motion, the jog refused with "
+            "error 15, a move inside the bed ran")
 
 
 # ------------------------------------------------- lid / button (the factory's)

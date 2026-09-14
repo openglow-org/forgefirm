@@ -227,6 +227,11 @@ def gfhome_homing(ctx, ev, g):
     # homed: the counters are re-anchored at the corner, where the head stays
     ctx.counters_rezeroed()
     ctx.check(ctx.forgectrl.wait_idle(15, abort=ctx.aborted), "machine not idle after homing")
+    # The driver answers $H when the session ends; that ok (and the
+    # session's messages) sit in the buffer behind the status reports and
+    # would pass for the reply to the caller's next command.
+    ack = " | ".join(ln.strip() for ln in g.drain().splitlines() if ln.strip())
+    ctx.log("$H acknowledged: %s", ack[:160] or "(nothing buffered)")
 
 
 @test("cloud.mode-switch", title="Controller mode switch grbl -> cloud -> grbl, the connect-time hunt "

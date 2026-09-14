@@ -217,17 +217,25 @@ def read_position():
         return None
 
 
-def position_quantized(was, now):
+def counter_steps_per_mm():
+    """The scale of the X/Y position counters: the kernel counts the
+    microsteps of the mode it runs (cnc/x_mode), so x16 and x32 count two
+    and four times the x8 steps for the same millimeter. The x8 scale when
+    the attribute is unreadable."""
+    return XY_STEPS_PER_MM_OF.get(hw.sysfs_int("cnc/x_mode"), XY_STEPS_PER_MM)
+
+
+def position_quantized(was, now, spm=XY_STEPS_PER_MM):
     """True when two step-counter readings differ by no more than the
     dead band on X and Y and not at all on Z: the step quantization of a
     move that landed where it meant to, rather than a leftover. A cancel
     that returns the head to the job start lands within a few hundredths
     of a millimeter, which is a step or four, and whether that rounds to
-    the same integer is chance."""
+    the same integer is chance. spm is the counters' scale (the mode's)."""
     if was is None or now is None or now[2] != was[2]:
         return False
-    return (abs(now[0] - was[0]) / XY_STEPS_PER_MM <= POSITION_DEADBAND_MM and
-            abs(now[1] - was[1]) / XY_STEPS_PER_MM <= POSITION_DEADBAND_MM)
+    return (abs(now[0] - was[0]) / spm <= POSITION_DEADBAND_MM and
+            abs(now[1] - was[1]) / spm <= POSITION_DEADBAND_MM)
 
 
 def read_ring_residue():
@@ -450,6 +458,9 @@ class Baseline:
         preserved state to hand back (post) - None compares nothing."""
         left = []
         self.mode = None
+        # the counters' scale is the mode the run counted under, read
+        # before the kernel side puts the settings' mode back
+        self._counter_spm = counter_steps_per_mm()
         self._forgectrl_side(left, captured)
         self._kernel_side(left)
         self._lamp_side(left)
@@ -693,13 +704,14 @@ class Baseline:
                 self.log("leds/%s: target 0, brightness %s; the fade from a level the machine "
                          "itself ended, not a leftover" % (name, read_led(name, "brightness")))
 
-    def _return_head(self, was, now):
+    def _return_head(self, was, now, spm=XY_STEPS_PER_MM):
         """Jog the head back along its own path by the kernel-measured X/Y
-        delta (Z is never touched), through the GRBL controller. Bounded:
-        beyond RETURN_MAX_MM per axis, or without a running GRBL
-        controller, the counters are reported and left."""
-        dx = (now[0] - was[0]) / XY_STEPS_PER_MM
-        dy = (now[1] - was[1]) / XY_STEPS_PER_MM
+        delta (Z is never touched), through the GRBL controller. spm is
+        the counters' scale (the mode's). Bounded: beyond RETURN_MAX_MM
+        per axis, or without a running GRBL controller, the counters are
+        reported and left."""
+        dx = (now[0] - was[0]) / spm
+        dy = (now[1] - was[1]) / spm
         if abs(dx) < 0.02 and abs(dy) < 0.02:
             return "unrestorable (Z only)" if now[2] != was[2] else "restored"
         if abs(dx) > RETURN_MAX_MM or abs(dy) > RETURN_MAX_MM:
@@ -787,8 +799,9 @@ class Baseline:
         was = captured.get("position")
         now = read_position()
         if was is not None and now is not None and now != was and not self.cloud_mode():
-            act = self._return_head(was, now)
-            if position_quantized(was, now):
+            spm = self._counter_spm
+            act = self._return_head(was, now, spm)
+            if position_quantized(was, now, spm):
                 self.log("position: %s (expected %s) -> %s; inside the %.2f mm dead band, "
                          "not a leftover" % (now, was, act, POSITION_DEADBAND_MM))
             else:

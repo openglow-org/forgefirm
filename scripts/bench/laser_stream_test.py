@@ -107,6 +107,17 @@ over TCP, then checks the dumps against the kernel feeder contract:
      clock between two of its file reads, lit to the stop like rule 24:
      no dark cut runs out while the client waits for its next read; the
      engine's return resumes the cut lit
+ 28. a scheduling stall of the step producer (GFSINK_STALL_MS: the
+     producer is kept off the CPU longer than its lead) maps events
+     behind the ship cursor. Inside an armed window that is a fault:
+     ALARM:17, the window closed, the stream ended dark, and no step
+     burst shipped (the clamped events are never compressed onto later
+     bytes). Unarmed it is a warning in the log and the move completes
+     with every step in the stream, compressed
+ 29. a stall of the kernel write (GFSINK_WRITE_STALL_MS: the sink holds
+     the write the way a full ring holds it) stalls nothing but the
+     shipper: the producer keeps mapping at wall pace behind it, so the
+     job completes lit with no clamp, no burst, and a dark end
 
 The analog sessions select the reference mode through the config; on
 hardware the controller ignores it (density is the only product model -
@@ -462,13 +473,15 @@ def publish_verdicts(path, stop):
 
 
 def run_session(name, steps, conf=None, workdir=None, keep=False,
-                arm_required=True):
+                arm_required=True, env_extra=None):
     """Launch the controller, run the job steps, return the dump bytes.
 
     Pass workdir + keep to chain launches over one settings file: the
     core precomputes the spindle PWM mapping once, when the spindle is
     enabled, so a $35 written at runtime only takes effect on the next
-    controller start."""
+    controller start. env_extra adds to the controller's environment
+    (the host stall knobs). The controller's log (stderr) is kept in
+    run_session.err."""
     if workdir is None:
         workdir = tempfile.mkdtemp(prefix="laser-test-")
     dump = os.path.join(workdir, "stream.bin")
@@ -476,6 +489,7 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
     latch_log = os.path.join(workdir, "latch.log")
     env = dict(os.environ, GFSINK_DUMP=dump, GF_VERDICT_FILE=verdict,
                GFSINK_LATCH_LOG=latch_log, FFLOG_STDERR="1")
+    env.update(env_extra or {})
     # The lens reference the daemon leaves before a controller starts:
     # forgectrl sweeps the carriage onto the hall edge and marks it, and
     # the controller opens the Z envelope on that mark. Without one Z
@@ -558,6 +572,10 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
             proc.wait(5)
         except subprocess.TimeoutExpired:
             proc.kill()
+        try:
+            run_session.err = (proc.stderr.read() or b"").decode(errors="replace")
+        except (OSError, ValueError):
+            run_session.err = ""
         stop.set()
         pub.join(2)
         VERDICT_MODE["mode"] = "clean"
@@ -1362,6 +1380,89 @@ def main():
     print("PASS [verdict-stale]: the expired cache held the job lit to %d ticks (%.0f ms) "
           "before the stop, lit after the return (%d fire ticks), latch %s"
           % (lit_lead, lit_lead * 1e3 / MACHINE_TICK_HZ, lit_after, seq))
+
+    # --- rules 28 and 29: the stalls -------------------------------------
+    # The step density the job plans: F3000 at 53.333 steps/mm is 2667
+    # steps/s, 9.5 per 100 ticks. A clamp compresses the late events onto
+    # consecutive bytes, which is what the window count catches.
+    STALL_JOB = ["G90", "G21", "G1 X150 F3000"]
+    ARMED_STALL_JOB = ["G90", "G21", "M3 S500", "G1 X150 F3000"]
+    PLANNED_PER_100 = 3000.0 / 60.0 * STEPS_PER_MM / MACHINE_TICK_HZ * 100.0
+    BURST_LIMIT = int(PLANNED_PER_100 * 1.3) + 1
+
+    def max_steps_per_window(ticks, win=100):
+        worst = 0
+        for i in range(0, max(1, len(ticks) - win), win // 2):
+            worst = max(worst, sum(1 for t in ticks[i:i + win] if t & 0x01))
+        return worst
+
+    # 28a: the armed stall is a fault. The job ends in ALARM:17; a reset
+    # and an unlock bring the controller back so the session can end.
+    steps = ARMED_STALL_JOB + [("wait_state", "Alarm", 6.0), ("expect_text", "laser disarmed", 3.0),
+                               ("rt", b"\x18"), ("sleep", 1.0), "$X"]
+    data = run_session("stall-armed", steps, conf=DENSITY_CONF_FLOORED,
+                       env_extra={"GFSINK_STALL_MS": "300"})
+    text, err = run_session.text, run_session.err
+    if "ALARM:17" not in text:
+        fail("[stall-armed] a producer stall inside the armed window did not fault (no ALARM:17)")
+    if "late events while the laser is armed" not in err:
+        fail("[stall-armed] the fault was not named in the log")
+    ticks = tick_bytes(data)
+    burst = max_steps_per_window(ticks)
+    if burst > BURST_LIMIT:
+        fail("[stall-armed] %d steps in a 100-tick window (planned %.1f): the clamped events "
+             "were shipped as a burst" % (burst, PLANNED_PER_100))
+    check_termination("stall-armed", data)
+    seq = latch_transitions(run_session.latch)
+    if seq != ["unlock", "lock"]:
+        fail("[stall-armed] latch ownership sequence %s, expected unlock (arm), lock (the fault)" % seq)
+    print("PASS [stall-armed]: a 300 ms producer stall while armed faulted with ALARM:17, "
+          "%d steps per 100 ticks at most (planned %.1f), ends dark, latch %s"
+          % (burst, PLANNED_PER_100, seq))
+
+    # 28b: unarmed, the same stall is a warning and the move completes with
+    # every step, compressed.
+    data = run_session("stall-unarmed", STALL_JOB, conf=DENSITY_CONF_FLOORED,
+                       arm_required=False, env_extra={"GFSINK_STALL_MS": "300"})
+    text, err = run_session.text, run_session.err
+    if "ALARM" in text:
+        fail("[stall-unarmed] an unarmed stall raised an alarm")
+    if "late events clamped" not in err:
+        fail("[stall-unarmed] the clamp was not warned about in the log")
+    ticks = tick_bytes(data)
+    total = sum(1 for t in ticks if t & 0x01)
+    want = round(150 * STEPS_PER_MM)
+    if abs(total - want) > 2:
+        fail("[stall-unarmed] %d X steps in the stream, expected %d: steps were lost" % (total, want))
+    burst = max_steps_per_window(ticks)
+    if burst <= BURST_LIMIT:
+        fail("[stall-unarmed] no step burst in the stream (%d per 100 ticks): the stall knob "
+             "did not stall the producer" % burst)
+    print("PASS [stall-unarmed]: the same stall unarmed was warned, the move completed with "
+          "all %d steps, the clamp visible as %d steps per 100 ticks" % (total, burst))
+
+    # 29: a write stall stalls only the shipper. The producer keeps its
+    # pace behind it, so nothing clamps and nothing bursts.
+    data = run_session("write-stall", ARMED_STALL_JOB + [WAIT_IDLE, "M5"], conf=DENSITY_CONF_FLOORED,
+                       env_extra={"GFSINK_WRITE_STALL_MS": "300"})
+    text, err = run_session.text, run_session.err
+    if "ALARM" in text:
+        fail("[write-stall] a write stall raised an alarm")
+    if "clamped" in err:
+        fail("[write-stall] a write stall clamped producer events: the back-off held the lock")
+    ticks = tick_bytes(data)
+    total = sum(1 for t in ticks if t & 0x01)
+    if abs(total - want) > 2:
+        fail("[write-stall] %d X steps in the stream, expected %d" % (total, want))
+    burst = max_steps_per_window(ticks)
+    if burst > BURST_LIMIT:
+        fail("[write-stall] %d steps in a 100-tick window (planned %.1f): a burst" % (burst, PLANNED_PER_100))
+    lit = count_fire(data)
+    if lit < 0.8 * want:
+        fail("[write-stall] the cut ran dark through the stall (%d fire ticks)" % lit)
+    check_termination("write-stall", data)
+    print("PASS [write-stall]: a 300 ms write stall left the producer on pace: all %d steps, "
+          "%d per 100 ticks at most, %d fire ticks, ends dark" % (total, burst, lit))
 
     # --- rule 22: a jog never fires, whatever the modal spindle says ----
     # The arm flow runs on the M3 (window open), the modal spindle is on

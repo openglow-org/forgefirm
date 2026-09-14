@@ -126,6 +126,21 @@ class BaselineTests(unittest.TestCase):
         self.assertTrue(items["position"].action.startswith("unrestorable"), items["position"].action)
         self.assertEqual(items["position"].found, [1000, 0, 0])
 
+    def test_the_counters_are_read_at_the_modes_scale(self):
+        # 6400 steps is 30 mm at x32 (a return within the bound; on the
+        # host it stops at the missing controller) and 120 mm at x8
+        # (beyond the bound). Read at the x8 scale, an x32 machine's
+        # displaced head is never jogged back.
+        b = self.bl()
+        cap = b.capture()
+        self._attr("cnc/x_mode", "32")
+        self._pos(6400, 0, 0)
+        items = {x.item: x for x in b.enforce("post", captured=cap)}
+        self.assertEqual(items["position"].action, "unrestorable: no running GRBL controller")
+        self._attr("cnc/x_mode", "8")
+        items = {x.item: x for x in b.enforce("post", captured=cap)}
+        self.assertEqual(items["position"].action, "unrestorable: 120.0/0.0 mm exceeds 100 mm")
+
     def test_a_held_controller_is_reset_before_the_return_jog(self):
         # a pause test that failed while held leaves the controller in
         # Hold, which refuses a jog: the baseline resets out of it first
@@ -433,6 +448,13 @@ class PositionDeadbandTests(unittest.TestCase):
         over = int(baseline.POSITION_DEADBAND_MM * baseline.XY_STEPS_PER_MM) + 2
         self.assertFalse(baseline.position_quantized([0, 0, 0], [over, 0, 0]))
         self.assertFalse(baseline.position_quantized([0, 0, 0], [0, over, 0]))
+
+    def test_the_dead_band_scales_with_the_counters(self):
+        # the same step count is a quarter of the distance at x32
+        over = int(baseline.POSITION_DEADBAND_MM * baseline.XY_STEPS_PER_MM) + 2
+        x32 = baseline.XY_STEPS_PER_MM_OF[32]
+        self.assertTrue(baseline.position_quantized([0, 0, 0], [over, 0, 0], x32))
+        self.assertFalse(baseline.position_quantized([0, 0, 0], [4 * over, 0, 0], x32))
 
     def test_z_is_exact_because_the_return_never_moves_it(self):
         self.assertFalse(baseline.position_quantized([0, 0, 0], [0, 0, 1]))

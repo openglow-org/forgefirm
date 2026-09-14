@@ -38,6 +38,17 @@ settings and places the edge on its step grid:
      wider window runs to its ends, two half-steps past either alarms
   9. a stop count out of range (41) falls back on its side alone
 
+The X and Y soft limits are the driver's as well: off while the
+position is not trusted (the core's $20 cannot be turned on with $22
+off), on after a home, when the envelope is the bed. A scripted home
+(homing_mode = gfcloud with a runner that exits 0, the host hook) sets
+them:
+
+ 10. after the home a program move past X or Y max raises ALARM:2
+     before any motion, a jog past it is refused with error 15, and a
+     move inside the bed runs; a stream fault or a controller start
+     drops them again with the reference
+
 The binary keeps its settings in EEPROM.DAT in the working directory, so
 each run starts from defaults in a temporary directory and leaves
 nothing behind.
@@ -255,6 +266,51 @@ def referenced_cases():
         s.close()
 
 
+def homed_cases():
+    """After a scripted gfcloud home the bed is the X/Y envelope."""
+    conf = {"lens_hall_edge_z_mm": "3.35", "homing_mode": "gfcloud", "gfcloud_home_cmd": "true"}
+    s = Session(conf=conf, referenced=True)
+    try:
+        free_in_xy(s, "before the home")
+        x_travel = float(s.setting("$130"))
+        y_travel = float(s.setting("$131"))
+        reply = s.send("$H", 5.0)
+        if "ok" not in reply:
+            fail("the scripted home was refused: %r" % reply)
+        s.wait_idle()
+        st = s.send("?")
+        m = re.search(r"MPos:(-?[\d.]+),(-?[\d.]+)", st)
+        check(m and abs(float(m.group(1))) < 0.01 and abs(float(m.group(2))) < 0.01,
+              "homed: X and Y sit at the origin", "homed: X/Y are not at the origin: %r" % st)
+        check(s.move("G90 G0 X%.1f" % (x_travel + 5)), "homed: X past the bed alarms",
+              "homed: a move past X max ran")
+        s.wait_idle()
+        check(s.move("G90 G0 Y%.1f" % (y_travel + 5)), "homed: Y past the bed alarms",
+              "homed: a move past Y max ran")
+        s.wait_idle()
+        check(s.move("G90 G0 X-1"), "homed: X past the near edge alarms",
+              "homed: a move past X min ran")
+        s.wait_idle()
+        reply = s.send("$J=G91X%.1fF1200" % (x_travel + 5), 1.5)
+        check("error:15" in reply, "homed: a jog past the bed is refused with error 15",
+              "homed: a jog past the bed was not refused with error 15: %r" % reply)
+        # The core answers the line after an error with that error again
+        # until an empty line (or a $ command) clears it: the sender's
+        # acknowledgment at compatibility level 0.
+        s.send("", 1.0)
+        check(not s.move("G90 G0 X10 Y10"), "homed: a move inside the bed runs",
+              "homed: a move inside the bed was blocked")
+        s.wait_idle()
+        # A settings write does not drop them: the driver re-applies the
+        # mask after the core clears it.
+        s.write_setting("$20=0")
+        check(s.move("G90 G0 X%.1f" % (x_travel + 5)), "homed: X past the bed still alarms after a $20 write",
+              "homed: a $20 write freed X")
+        s.wait_idle()
+    finally:
+        s.close()
+
+
 def main():
     if not os.path.isfile(BIN):
         fail("no controller binary at %s" % BIN)
@@ -285,6 +341,7 @@ def main():
     finally:
         s.close()
     referenced_cases()
+    homed_cases()
     print("PASS z_envelope_test")
 
 
