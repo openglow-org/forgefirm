@@ -914,22 +914,63 @@ class CloudSuiteTests(unittest.TestCase):
         self.assertEqual(self.fc.posts, [])
         self.assertTrue(any("PASS: lid open at the button prompt" in l for l in run.lines))
 
-    # -- the cooling verdict: the armed print waits on the warm-up ------------
-    def test_verdict_hold_on_the_bench_excerpt(self):
-        self.in_offline()
-        self.fc.state["status"]["coolant"] = {"up_c": 21.5, "down_c": 21.4}
-        self.fc.state["settings"].update({"cool_temp_min": "5", "cool_temp_start": "16"})
-        self.fc.state["cool"].update({"verdict": "OK", "hold": False, "fire_ok": True, "armed": False})
+    # -- the cooling verdict: locked until the run, a hold that never clears --
+    def dark_parts(self):
+        """(the print prologue through the button prompt, the run and the
+        print's end with no pause in it)."""
         lines = fixture("pause")
         pre, rest = cut(lines, "waiting for button")
         pre = pre + [rest[0]]
-        # the run and the print's end, without the pause in the middle
         _, run = cut(rest, "machine:_run_loop starting run")
         run = [l for l in run if "paus" not in l and "resum" not in l]
-        stamp = "2026-08-17T09:44:14.%06d+00:00 gfcloud[1927] INFO machine:_verdict_wait "
-        wait = [stamp % 100000 + "waiting on the cooling engine: WARMUP (WARM-UP: coolant 21.5 C under "
-                "the 22.5 C start gate - heater on, hold)"]
-        release = [stamp % 200000 + "cooling verdict clean after WARMUP; starting the run"]
+        return pre, run
+
+    def test_dark_print_on_the_bench_excerpt(self):
+        self.in_offline()
+        self.fc.state["cool"].update({"verdict": "OK", "hold": False, "fire_ok": True, "armed": False})
+        pre, run = self.dark_parts()
+        self.offline_print_hooks(pre)
+
+        def press():
+            # the run: the client unlocks the latch right before it, and
+            # relocks when the job ends
+            self._attr("cnc/interlock_circuit", "37")
+            self.append(run[:1], delay=0.05)
+
+            def ended():
+                self._attr("cnc/interlock_circuit", "45")
+                self.append(run[1:], delay=0.0)
+            threading.Timer(2.0, ended).start()
+        hooks = {"press it. The print runs dark": press}
+        run_ = self.run_test(cloud.dark_print, hooks=hooks, test_id="cloud.dark-print")
+        ev = run_.evidence
+        self.assertTrue(ev["latch_locked_at_button"])
+        self.assertFalse(ev["latch_locked_in_run"])
+        self.assertTrue(ev["latch_locked_after"])
+        self.assertIn(":completed", ev["print finished"])
+        self.assertTrue(any("PASS: locked at the button" in l for l in run_.lines))
+
+    def test_dark_print_fails_when_the_latch_is_open_at_the_button(self):
+        self.in_offline()
+        pre, run = self.dark_parts()
+        self._attr("cnc/interlock_circuit", "37")          # unlocked before the press
+        self.offline_print_hooks(pre)
+        hooks = {"press it. The print runs dark": lambda: self.append(run, delay=0.05)}
+        self.assertFails(cloud.dark_print, "the latch is unlocked at the button wait", hooks=hooks)
+
+    def test_verdict_refuse_on_the_bench_excerpt(self):
+        self.in_offline()
+        self.fc.state["status"]["coolant"] = {"up_c": 21.5, "down_c": 21.4}
+        self.fc.state["settings"].update({"cool_temp_min": "5", "cool_temp_start": "16",
+                                          "cloud_hold_max_s": ""})
+        self.fc.state["cool"].update({"verdict": "OK", "hold": False, "fire_ok": True, "armed": False})
+        pre, run = self.dark_parts()
+        stamp = "2026-08-17T09:44:14.%06d+00:00 gfcloud[1927] %s machine:_verdict_wait "
+        wait = [stamp % (100000, "INFO") + "waiting on the cooling engine: WARMUP (WARM-UP: coolant "
+                "21.5 C under the 29.5 C start gate - heater on, hold)"]
+        refuse = [stamp % (200000, "WARNING") + "cooling hold held 60 s - relocking the laser",
+                  "2026-08-17T09:44:15.000000+00:00 gfcloud[1927] INFO basemachine:_finish_action print "
+                  "[9006]: finished with event \":cancelled\""]
 
         def on_post(path, form):
             if path == "/settings" and form.get("cool_temp_start") not in (None, "0", "16"):
@@ -942,37 +983,44 @@ class CloudSuiteTests(unittest.TestCase):
         def press():
             self.append(wait, delay=0.05)
 
-            def released():
+            def refused():
                 self.fc.state["cool"].update({"verdict": "OK", "hold": False, "fire_ok": True,
-                                              "armed": False, "phase": "run"})
-                self.append(release + run, delay=0.0)
-            threading.Timer(3.0, released).start()
-        hooks = {"press it. The print then waits": press}
-        run_ = self.run_test(cloud.verdict_hold, hooks=hooks, test_id="cloud.verdict-hold")
+                                              "armed": False, "phase": "idle"})
+                self.append(refuse, delay=0.0)
+            threading.Timer(2.5, refused).start()
+        hooks = {"press it. Nothing runs": press}
+        run_ = self.run_test(cloud.verdict_refuse, hooks=hooks, test_id="cloud.verdict-refuse")
         ev = run_.evidence
-        self.assertEqual(ev["gate"], 22.5)
-        self.assertEqual(ev["warmup"]["verdict"], "WARMUP")
-        self.assertTrue(ev["log"]["cooling verdict clean after WARMUP; starting the run"])
-        self.assertIn(":completed", ev["print finished"])
-        posted = [f for p, f in self.fc.posts if p == "/settings"]
-        self.assertEqual(posted[0]["cool_temp_start"], "22.5")
-        self.assertEqual(posted[-1], {"cool_temp_min": "5", "cool_temp_start": "16"})
-        self.assertTrue(any("PASS: the armed print waited" in l for l in run_.lines))
+        self.assertEqual(ev["gate"], 29.5)
+        self.assertTrue(ev["latch_locked_at_button"])
+        self.assertEqual(ev["latch_samples"]["unlocked"], 0)
+        self.assertGreaterEqual(ev["latch_samples"]["n"], 1)
+        self.assertIn(":cancelled", ev["print finished"])
+        posted = [f for p_, f in self.fc.posts if p_ == "/settings"]
+        self.assertEqual(posted[0]["cool_temp_start"], "29.5")
+        self.assertEqual(posted[0]["cloud_hold_max_s"], "60")
+        self.assertEqual(posted[-1], {"cool_temp_min": "5", "cool_temp_start": "16", "cloud_hold_max_s": ""})
+        self.assertTrue(any("PASS: held" in l for l in run_.lines))
 
-    def test_verdict_hold_fails_when_the_print_runs_under_the_hold(self):
+    def test_verdict_refuse_fails_when_the_latch_unlocks_during_the_hold(self):
         self.in_offline()
         self.fc.state["status"]["coolant"] = {"up_c": 21.5, "down_c": 21.4}
         self.fc.state["settings"].update({"cool_temp_min": "5", "cool_temp_start": "16"})
         self.fc.state["cool"].update({"verdict": "WARMUP", "hold": True, "fire_ok": False, "armed": True})
-        lines = fixture("pause")
-        pre, rest = cut(lines, "waiting for button")
-        pre = pre + [rest[0]]
-        _, run = cut(rest, "machine:_run_loop starting run")
-        stamp = "2026-08-17T09:44:14.%06d+00:00 gfcloud[1927] INFO machine:_verdict_wait "
-        wait = [stamp % 100000 + "waiting on the cooling engine: WARMUP (no reason given)"]
+        pre, run = self.dark_parts()
+        stamp = "2026-08-17T09:44:14.%06d+00:00 gfcloud[1927] %s machine:_verdict_wait "
+        wait = [stamp % (100000, "INFO") + "waiting on the cooling engine: WARMUP (no reason given)"]
+        refuse = [stamp % (200000, "WARNING") + "cooling hold held 60 s - relocking the laser",
+                  "2026-08-17T09:44:15.000000+00:00 gfcloud[1927] INFO basemachine:_finish_action print "
+                  "[9006]: finished with event \":cancelled\""]
         self.offline_print_hooks(pre)
-        hooks = {"press it. The print then waits": lambda: self.append(wait + run[:1], delay=0.05)}
-        self.assertFails(cloud.verdict_hold, "the run started under the warm-up hold", hooks=hooks)
+
+        def press():
+            self.append(wait, delay=0.05)
+            self._attr("cnc/interlock_circuit", "37")      # unlocked under the hold
+            threading.Timer(2.5, lambda: self.append(refuse, delay=0.0)).start()
+        hooks = {"press it. Nothing runs": press}
+        self.assertFails(cloud.verdict_refuse, "the latch unlocked during the hold", hooks=hooks)
 
     # -- a paused print canceled by the lid, a running one by the app --------
     def cancel_parts(self):

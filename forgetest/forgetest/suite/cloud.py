@@ -1300,42 +1300,96 @@ def lid_during_button_wait_body(ctx, ev, off, job, offset):
 # ---------------------------------------------------------------- the cooling verdict
 
 HOLD_KEYS = ("cool_temp_min", "cool_temp_start")
-WARMUP_ABOVE_C = 1.0        # the start gate this far above the loop: a few heater minutes
-WARMUP_RELEASE_S = 720      # the flow heater warms the bulk 0.4 to 0.8 C a minute
+REFUSE_KEYS = HOLD_KEYS + ("cloud_hold_max_s",)
+HOLD_REFUSE_S = 60          # the shortest bound the client takes
+HOLD_REFUSE_LINE = "cooling hold held 60 s - relocking the laser"
 WARMUP_WAIT_LINE = "waiting on the cooling engine: WARMUP"
-WARMUP_RELEASE_LINE = "cooling verdict clean after WARMUP; starting the run"
 
 
-@test("cloud.verdict-hold", title="A cloud print armed under the warm-up gate waits for the engine",
-      subsystem="cloud", kind="operator", est_min=14,
+@test("cloud.dark-print", title="A dark cloud print: the latch locked until the run, unlocked "
+                                 "for it, locked after it",
+      subsystem="cloud", kind="operator", est_min=3,
       covers=_MACHINE_RUN + [("python3-gfhardware", "gfhardware/coolsvc.py"),
                              ("forgectrl", "src/cool.*"), ("forgectrl", "src/main.c")],
       requires=["cloud.lid-during-button-wait", "cooling.floor-and-warm-up"], actions=["button"],
       steps=[OFFLINE_STEP,
-             "Coolant at room temperature (10 to 30 C). The test sets the warm-up gate just above "
-             "the coolant and restores it. Press the button when it lights: the print then waits "
-             "for the warm-up (a few minutes with the loop heater on), runs dark, and finishes."],
-      description="The cooling-engine contract in cloud mode, on the engine itself: the start gate "
-                  "set just above the coolant makes the armed session open under the warm-up "
-                  "(WARMUP: fire blocked, hold), and the client waits it out after the button "
-                  "instead of canceling - nothing runs, the latch stays unlocked for the armed "
-                  "window - until the engine releases into run, and the release starts the print, "
-                  "which completes. The hold mid-run (the same laser-off pause as the button's, "
-                  "resumed on the engine's resume_ok) and the bound on a hold are host-tested: the "
-                  "gates apply at session open, so no setting can produce a hold mid-run here.")
-def verdict_hold(ctx):
+             "Bed clear (the job is dark: a 30 s square at S0, nothing fires). Press the button "
+             "when it lights: the print waits for the engine, runs, and finishes."],
+      description="The cooling-engine contract in cloud mode at its ordinary end, on the engine "
+                  "itself: the print arms on the press, waits for the engine's acknowledgment (the "
+                  "fans at their floors), and runs. The laser latch is locked at the button and "
+                  "through the wait, unlocks only for the run (immediately before it starts), and "
+                  "is locked again when the job ends; the print completes. A hold the engine never "
+                  "clears is cloud.verdict-refuse; the engine's own warm-up release is "
+                  "cooling.floor-and-warm-up.")
+def dark_print(ctx):
+    ev = ctx.evidence
+    fc = ctx.forgectrl
+    offset = enter_offline(ctx)
+    job = offline_job(ctx, "dark.puls", seconds=30)
+    off = Offline().__enter__()
+    try:
+        dark_print_body(ctx, ev, off, job, offset, fc)
+    finally:
+        off.__exit__(None, None, None)
+        offline_cleanup(ctx)
+
+
+def dark_print_body(ctx, ev, off, job, offset, fc):
+    off.print_ready(9005, job)
+    got = wait_log(ctx, offset, ["waiting for button"], 120)
+    ctx.check(got["waiting for button"], "the print never reached the button wait")
+    ev["latch_locked_at_button"] = latch_locked()
+    ctx.check(ev["latch_locked_at_button"], "the latch is unlocked at the button wait")
+    ctx.act("button", "press", text="The button is lit: press it. The print runs dark and finishes.",
+            until=lambda: wait_print_running(ctx, offset, 0.1) is not None, timeout=PRESS_TIMEOUT_S)
+    run = wait_print_running(ctx, offset, 60)
+    ctx.check(run is not None, "the print did not start after the press")
+    ctx.sleep(1.0)
+    ev["latch_locked_in_run"] = latch_locked()
+    ctx.check(ev["latch_locked_in_run"] is False, "the latch is locked during the run")
+    fin = wait_action_finished(ctx, offset, "print", 180)
+    ev["print finished"] = message(fin)
+    ctx.check(fin and COMPLETED in fin, "the print did not complete: %s", message(fin) or "no finish line")
+    st, cs = fc.get("/cool/status")
+    ev["armed_after"] = cs.get("armed") if isinstance(cs, dict) else None
+    ctx.check(not ev["armed_after"], "armed window still open after the print")
+    ev["latch_locked_after"] = latch_locked()
+    ctx.check(ev["latch_locked_after"], "the latch is unlocked after the print")
+    ev["events"] = offline_events(off)
+    ctx.log("PASS: locked at the button, unlocked for the run, locked after it; the print completed")
+
+
+@test("cloud.verdict-refuse", title="A cloud print held by the engine past the bound is canceled with "
+                                     "the latch never unlocked",
+      subsystem="cloud", kind="operator", est_min=4,
+      covers=_MACHINE_RUN + [("python3-gfhardware", "gfhardware/coolsvc.py"),
+                             ("forgectrl", "src/cool.*")],
+      requires=["cloud.dark-print"], actions=["button"],
+      steps=[OFFLINE_STEP,
+             "Coolant at room temperature (10 to 30 C). The test sets the warm-up gate well above "
+             "the coolant and the hold bound to its minimum, and restores both. Press the button "
+             "when it lights: nothing runs; a minute later the print cancels by itself."],
+      description="The other end of the cooling-engine contract before a run: a verdict that "
+                  "refuses fire and never clears. The start gate far above the coolant keeps the "
+                  "armed session under the warm-up for longer than the hold bound (cloud_hold_max_s "
+                  "at its minimum, 60 s). The client waits with the laser latch locked the whole "
+                  "time - it is never unlocked before the verdict passes, so there is nothing to "
+                  "relock - then cancels the print at the bound: no run, the armed window closed, "
+                  "the print ':cancelled'. Dark by construction.")
+def verdict_refuse(ctx):
     ev = ctx.evidence
     fc = ctx.forgectrl
     before = fc.settings()
-    orig = {k: before.get(k, "") for k in HOLD_KEYS}
+    orig = {k: before.get(k, "") for k in REFUSE_KEYS}
     ev["orig"] = orig
     up = (fc.status().get("coolant") or {}).get("up_c")
     ctx.check(up is not None and 10.0 <= up <= 30.0, "coolant outside the test's range (up_c %s)", up)
     offset = enter_offline(ctx)
-    job = offline_job(ctx, "hold.puls", seconds=30)
+    job = offline_job(ctx, "refuse.puls", seconds=30)
     off = Offline().__enter__()
     try:
-        verdict_hold_body(ctx, ev, off, job, offset, fc, up, orig)
+        verdict_refuse_body(ctx, ev, off, job, offset, fc, up, orig)
     finally:
         st, body = fc.post("/settings", params=orig)
         ctx.log("restore: POST /settings %s -> %s", orig, st)
@@ -1343,46 +1397,53 @@ def verdict_hold(ctx):
         offline_cleanup(ctx)
 
 
-def verdict_hold_body(ctx, ev, off, job, offset, fc, up, orig):
-    gate = round(up + WARMUP_ABOVE_C, 1)
+def verdict_refuse_body(ctx, ev, off, job, offset, fc, up, orig):
+    gate = round(up + 8.0, 1)           # eight degrees: the heater cannot get there in a minute
     st, body = fc.post("/settings", params={"cool_temp_start": str(gate),
-                                            "cool_temp_min": orig["cool_temp_min"]})
-    ctx.check(st == 200, "POST /settings cool_temp_start=%s -> %s %s", gate, st, body)
+                                            "cool_temp_min": orig["cool_temp_min"],
+                                            "cloud_hold_max_s": str(HOLD_REFUSE_S)})
+    ctx.check(st == 200, "POST /settings cool_temp_start=%s cloud_hold_max_s=%s -> %s %s",
+              gate, HOLD_REFUSE_S, st, body)
     ev["gate"] = gate
-    off.print_ready(9005, job)
+    off.print_ready(9006, job)
     got = wait_log(ctx, offset, ["waiting for button"], 120)
     ctx.check(got["waiting for button"], "the print never reached the button wait")
-    ctx.act("button", "press", text="The button is lit: press it. The print then waits for the warm-up.",
+    ev["latch_locked_at_button"] = latch_locked()
+    ctx.check(ev["latch_locked_at_button"], "the latch is unlocked at the button wait")
+    ctx.act("button", "press", text="The button is lit: press it. Nothing runs; the print cancels "
+            "itself a minute later.",
             until=lambda: log_has(offset, WARMUP_WAIT_LINE), timeout=PRESS_TIMEOUT_S)
     got = wait_log(ctx, offset, [WARMUP_WAIT_LINE], 30)
     ctx.check(got[WARMUP_WAIT_LINE], "the armed print did not wait on the warm-up")
-    st, c = fc.get("/cool/status")
-    ev["warmup"] = c
-    ctx.check(isinstance(c, dict) and c.get("verdict") == "WARMUP" and c.get("hold") is True
-              and c.get("fire_ok") is False,
-              "the engine is not holding the armed session on the warm-up: %s", c)
-    ctx.check(wait_print_running(ctx, offset, 2) is None, "the run started under the warm-up hold")
-    ctx.notice("Warm-up: the loop heater brings the coolant to the gate; a few minutes. Do nothing.")
+    t0 = time.time()
+    samples = []
+    ctx.notice("The engine holds the print; the client gives up at the bound. Do nothing.")
     try:
-        t0 = time.time()
-        run = wait_print_running(ctx, offset, WARMUP_RELEASE_S)
+        while time.time() - t0 < HOLD_REFUSE_S + 30:
+            ctx.checkpoint()
+            samples.append(latch_locked())
+            if log_has(offset, HOLD_REFUSE_LINE):
+                break
+            ctx.sleep(2)
     finally:
         ctx.clear_notice()
-    ev["release_s"] = round(time.time() - t0)
-    got = wait_log(ctx, offset, [WARMUP_RELEASE_LINE], 5)
-    ev["log"] = {WARMUP_WAIT_LINE: True, WARMUP_RELEASE_LINE: bool(got[WARMUP_RELEASE_LINE])}
-    ctx.check(got[WARMUP_RELEASE_LINE], "the warm-up did not release into the run within %d s",
-              WARMUP_RELEASE_S)
-    ctx.check(run is not None, "the print did not start after the warm-up")
-    fin = wait_action_finished(ctx, offset, "print", 180)
+    ev["hold_s"] = round(time.time() - t0)
+    ev["latch_samples"] = {"n": len(samples), "unlocked": samples.count(False)}
+    ctx.check(log_has(offset, HOLD_REFUSE_LINE), "the client did not cancel at the hold bound (%d s)",
+              ev["hold_s"])
+    ctx.check(all(samples), "the latch unlocked during the hold (%d of %d samples)",
+              samples.count(False), len(samples))
+    ctx.check(wait_print_running(ctx, offset, 1) is None, "the run started under the refused verdict")
+    fin = wait_action_finished(ctx, offset, "print", 120)
     ev["print finished"] = message(fin)
-    ctx.check(fin and COMPLETED in fin, "the print did not complete after the warm-up: %s",
+    ctx.check(fin and CANCELLED in fin, "the held print did not end ':cancelled': %s",
               message(fin) or "no finish line")
     st, cs = fc.get("/cool/status")
     ev["armed_after"] = cs.get("armed") if isinstance(cs, dict) else None
-    ctx.check(not ev["armed_after"], "armed window still open after the print")
+    ctx.check(not ev["armed_after"], "armed window still open after the cancel")
+    ctx.check(latch_locked(), "the latch is unlocked after the cancel")
     ev["events"] = offline_events(off)
-    ctx.log("PASS: the armed print waited %s s on the warm-up, then ran and completed", ev["release_s"])
+    ctx.log("PASS: held %s s with the latch locked throughout, then canceled at the bound", ev["hold_s"])
 
 
 @test("cloud.pause-resume", title="Button pauses and resumes a cloud print (factory backtrack + lead)",
