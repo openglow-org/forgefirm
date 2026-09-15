@@ -45,6 +45,8 @@ contributor is welcome to read it too: it is the same set of rules.
   chain of others.
 - Never exercise a gate or a limit through the `GFCOOL_*` environment
   overrides in a test. Use the settings API, and restore it in the teardown.
+- A silence-while-armed injection and a crash during `$H` are catalog
+  drills, not one-off bench scripts.
 
 ### CI couplings that set the push order
 
@@ -186,6 +188,9 @@ does.
   test with the fix, in the same commit, never after.
 - Position counters, homing anchors, and a homed flag are not proof of
   physical motion. The head accelerometer is, and so are the operator's eyes.
+- Unreadable is fail-closed. A failed read of a safety input, a state file,
+  or a verdict is never treated as "still running" or "keep waiting" without
+  a bound.
 
 ### Proof before done
 
