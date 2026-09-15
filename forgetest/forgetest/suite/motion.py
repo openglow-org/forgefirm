@@ -136,7 +136,66 @@ def clean_slate(ctx, g):
             ctx.log("unlock: %s", g.command("$X"))
     st = g.status_report()
     ctx.check(st["state"].startswith("Idle"), "controller is %s, expected Idle", st["state"])
+    clear_error(ctx, g)
     return st
+
+
+def clear_error(ctx, g):
+    """Clear a latched line error before the test's first move.
+
+    Soft limits are armed after a home (the driver's, since the bed has
+    no switches), so a jog past the bed is refused with error:15 - and
+    grblHAL then answers error:15 to every following G-code line, across
+    a fresh connection, until a blank line acknowledges it ($ commands
+    and the ? report are unaffected, so a sender that queries on connect
+    self-clears; a bare G-code stream does not). A prior test's or the
+    baseline hand-back's rejected jog would otherwise make this test's
+    first move fail with a stale error unrelated to the move. A blank
+    line clears it and returns ok. Harmless and idempotent at Idle."""
+    r = g.command("")
+    ctx.check(r and r[-1] == "ok" and not any(x.startswith("error") for x in r),
+              "the controller answered %s to a blank line at the start - not a clean parser", r)
+
+
+MOVE_START_S = 2.0      # Run is there within 100 ms; a loaded board gets this long
+
+
+def start_move(ctx, g, line):
+    """Start a travel job with `line` and see the controller in Run. The
+    wait is bounded, not a fixed sleep. When Run never comes, the failure
+    names what happened instead: the reply (a refused block answers
+    error), the state the controller sits in (Hold, Door, Alarm, or an
+    Idle that never took the block), every line it said meanwhile, and
+    the machine as forgectrl sees it - the evidence a bare "did not
+    start" leaves out. Recorded in the evidence either way."""
+    reply = g.command(line, timeout=1.0)
+    end = time.time() + MOVE_START_S
+    t0 = time.time()
+    said = ""
+    st = None
+    while time.time() < end:
+        ctx.checkpoint()
+        st = g.status_report()
+        if st["state"].startswith("Run"):
+            break
+        said += g.drain()
+        time.sleep(0.1)
+    rec = {"line": line, "reply": reply, "state": st["state"] if st else None,
+           "after_s": round(time.time() - t0, 2)}
+    ctx.evidence.setdefault("move_start", []).append(rec)
+    if st is not None and st["state"].startswith("Run"):
+        return st
+    msgs = [ln.strip() for ln in said.splitlines() if ln.strip()]
+    rec["said"] = msgs
+    s = ctx.forgectrl.status() or {}
+    gr = ((s.get("grbl") or {}).get("report") or {})
+    rec["forgectrl"] = {"state": s.get("state"), "switches": s.get("switches"),
+                        "laser_locked": s.get("laser_locked"), "grbl": gr.get("state"),
+                        "alarm": gr.get("alarm"), "sender": (gr.get("sender") or {}).get("connected")}
+    ctx.check(False, "the move did not start: %s answered %s; controller %s %.1f s later, said %s; "
+                     "forgectrl sees kernel %s, grbl %s (alarm %s), switches %s, laser locked %s",
+              line, reply, st["state"] if st else "no report", rec["after_s"], msgs or "nothing",
+              s.get("state"), gr.get("state"), gr.get("alarm"), s.get("switches"), s.get("laser_locked"))
 
 
 @test("motion.pacing", title="Protocol-loop pacing (idle, parked, moving) and hold/resume position",
@@ -1334,9 +1393,7 @@ def button_hold_resume(ctx):
                   "moves; the job holds and the test sees it.")
         g.command("M5")
         g.command("G91")
-        g.command("G1X40F300", timeout=0.5)               # an 8 s move
-        ctx.sleep(0.5)
-        ctx.check(g.status_report()["state"].startswith("Run"), "the move did not start")
+        start_move(ctx, g, "G1X40F300")               # an 8 s move
         g.drain()                                     # the message window opens here
         w = Watch(g)
         ctx.act("button", "press", until=w.in_state("Hold"), timeout=12, fail=False)
@@ -1412,9 +1469,7 @@ def lid_cancel_home(ctx):
                   "leave it open until the head has come back on its own.")
         g.command("M5")
         g.command("G91")
-        g.command("G1X40F300", timeout=0.5)               # an 8 s move
-        ctx.sleep(0.5)
-        ctx.check(g.status_report()["state"].startswith("Run"), "the move did not start")
+        start_move(ctx, g, "G1X40F300")               # an 8 s move
         g.drain()                                     # the message window opens here
         ctx.act("lid", "open", text="Leave it open until the head has come back.", timeout=12)
         drift = expect_cancel_and_return(ctx, g, ev, start, k0, "lid opened", "running")
@@ -1507,9 +1562,7 @@ def interlock_cancel_home(ctx):
                   "moves and leave it open until the head has come back on its own.")
         g.command("M5")
         g.command("G91")
-        g.command("G1X60F300", timeout=0.5)               # a 12 s move
-        ctx.sleep(0.5)
-        ctx.check(g.status_report()["state"].startswith("Run"), "the move did not start")
+        start_move(ctx, g, "G1X60F300")               # a 12 s move
         g.drain()
         ctx.act("interlock", "open", text="Leave it open until the head has come back.", timeout=16)
         sw = (ctx.forgectrl.status().get("switches") or {})
@@ -1571,9 +1624,7 @@ def lid_policy_hold(ctx):
                       "the job parks in the door state and waits.")
             g.command("M5")
             g.command("G91")
-            g.command("G1X40F300", timeout=0.5)           # an 8 s move
-            ctx.sleep(0.5)
-            ctx.check(g.status_report()["state"].startswith("Run"), "the move did not start")
+            start_move(ctx, g, "G1X40F300")           # an 8 s move
             g.drain()
             ctx.act("lid", "open", timeout=12)
             st, text = wait_state_text(ctx, g, "Door", 8)

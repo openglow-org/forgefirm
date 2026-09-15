@@ -746,7 +746,7 @@ FIRE_WAIT_S = 25            # settings re-read at run start, two-tick breach, 1 
 
 @test("cooling.fire-watch-tiers", title="The lid-IR fire watch pauses at its alert and fails at its critical",
       subsystem="cooling", kind="auto", mode="grbl", est_min=6,
-      covers=_COOL_COVERS, requires=["kernel.latch-locked-idle"],
+      covers=_COOL_COVERS + [("forgectrl", "src/super.*")], requires=["kernel.latch-locked-idle"],
       steps=["Machine idle, lid closed, lid lamp at its resting level. The test moves the flame "
              "thresholds under the lamp's own reading and restores them; three M8/M9 sessions, "
              "no fire."],
@@ -759,6 +759,7 @@ FIRE_WAIT_S = 25            # settings re-read at run start, two-tick breach, 1 
                   "read as the four flame gates off and the watch reads watch. Restored, the "
                   "watch reads armed at OK.")
 def fire_watch_tiers(ctx):
+    from .motion import FORGECTRL_LOG, _log_lines, _log_offset
     fc = ctx.forgectrl
     ev = ctx.evidence
     before = fc.settings()
@@ -810,7 +811,16 @@ def fire_watch_tiers(ctx):
             ctx.check(c.get("verdict") == "OK", "the alert survived into a fresh session: %s", c)
 
             # Leg 2: the fail tier. The q1 critical under the lamp reading
-            # stops the session and latches FIRE until it ends.
+            # latches FIRE and locks the laser; the fail tier then stops
+            # the controller through the supervisor and starts it again,
+            # so no run start can relight what was locked and the sender
+            # sees the job end. The Grbl socket dies with the restart -
+            # FIRE is read from the engine, the latch from sysfs, the stop
+            # from the supervisor's log, and a fresh session is opened for
+            # the legs that follow.
+            st, m0 = fc.get("/mode")
+            pid0 = m0.get("pid") if isinstance(m0, dict) else None
+            off = _log_offset(FORGECTRL_LOG)
             _set_gates(ctx, fc, {"cool_fire_q1_critical": str(max(2, q1 - 5)),
                                  "cool_fire_q1_alert": str(max(1, q1 - 10))})
             grbl.command("M8")
@@ -821,19 +831,38 @@ def fire_watch_tiers(ctx):
                 c = _cool(fc)
                 if c.get("verdict") == "FIRE":
                     break
+            ilk = hw.sysfs_int("cnc/interlock_circuit")
             ev["critical"] = c
-            ctx.log("critical leg: verdict %s fire_watch %s", c.get("verdict"), c.get("fire_watch"))
+            ev["interlock_circuit"] = ilk
+            ctx.log("critical leg: verdict %s fire_watch %s interlock_circuit %s",
+                    c.get("verdict"), c.get("fire_watch"), ilk)
             ctx.check(c.get("verdict") == "FIRE", "q1 critical under the lamp did not latch FIRE: %s", c)
             ctx.check(c.get("fire_watch") == "ALARM", "fire_watch %r during FIRE, expected ALARM", c.get("fire_watch"))
-            ilk = hw.sysfs_int("cnc/interlock_circuit")
-            ev["interlock_circuit"] = ilk
             ctx.check(ilk is not None and (ilk & 8), "the laser latch is not locked under FIRE (interlock_circuit=%s)", ilk)
             ctx.check(_tail_wait(ctx, fc, "LID IR FIRE SIGNAL (quartiles "),
                       "the FIRE line is missing from the forgectrl log")
+            # the fail tier stops the controller and starts it again; the
+            # Grbl socket dies with it. Wait out the restart, prove the
+            # supervisor logged the stop, restore the thresholds, and open
+            # a fresh session on the new controller.
+            grbl.close()
+            m1 = None
+            t0 = time.time()
+            while time.time() - t0 < 60:
+                st, m1 = fc.get("/mode")
+                if isinstance(m1, dict) and m1.get("controller") == "running" and m1.get("pid") != pid0:
+                    break
+                ctx.sleep(0.5)
+            ev["restart"] = {"pid_before": pid0, "mode_after": m1}
+            ctx.log("after FIRE: %s", ev["restart"])
+            ctx.check(m1 and m1.get("controller") == "running" and m1.get("pid") != pid0,
+                      "the controller was not stopped and started again after FIRE: %s", m1)
+            ctx.check(_log_lines(FORGECTRL_LOG, off, "lid IR fire signal - the controller is stopped"),
+                      "the supervisor did not log the fail-tier stop after FIRE")
             _set_gates(ctx, fc, {"cool_fire_q1_critical": orig["cool_fire_q1_critical"],
                                  "cool_fire_q1_alert": orig["cool_fire_q1_alert"]})
-            grbl.command("M9")
-            _session_ended(ctx, fc, "critical leg")
+            ctx.check(fc.wait_idle(30, abort=ctx.aborted), "machine not idle after the FIRE restart")
+            grbl.connect()      # a fresh session on the restarted controller
 
             # Leg 3: all four at zero: the watch off, said so, session OK.
             _set_gates(ctx, fc, {k: "0" for k in FIRE_KEYS})
