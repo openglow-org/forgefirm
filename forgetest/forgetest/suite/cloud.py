@@ -87,6 +87,9 @@ FORGECTRL_LOG = "/data/log/forgefirm/forgectrl/forgectrl.log"
 LIMITS_MARK = "job limits from the header: "
 EFFECTIVE_MARK = "effective limits: coolant ceiling "
 SESSION_MARKS = ("authenticate_machine SUCCESS", "ws_connect ESTABLISHED")
+# The service's connect-time hunt, as the client logs its request: a few
+# seconds after the controller starts, right behind the session.
+HUNT_REQUEST = "service action request: hunt"
 RETURN_MAX_MM = 600.0       # the head comes back from the home corner across the bed
 
 
@@ -145,7 +148,7 @@ def return_head(ctx, feed=2400):
               "head not back at the start after the return jog: %s", pos)
 
 
-def wait_mode(ctx, fc, want_mode, want_controller="running", timeout=90):
+def wait_mode(ctx, fc, want_mode, want_controller="running", timeout=90, poll=1.0):
     t0 = time.time()
     last = None
     while time.time() - t0 < timeout:
@@ -157,7 +160,7 @@ def wait_mode(ctx, fc, want_mode, want_controller="running", timeout=90):
                 return m
             if m.get("controller") == "motion-fault":
                 break
-        time.sleep(1)
+        time.sleep(poll)
     return last
 
 
@@ -240,17 +243,22 @@ def gfhome_homing(ctx, ev, g):
       covers=_HOMING_PATH + [("forgectrl", "src/cool.*"), ("forgectrl", "src/airflow.*"),
                              ("grblhal-glowforge", "src/**")],
       requires=["forgectrl.auth", "motion.pacing"], actions=["lid"],
-      steps=["Bed clear; cloud credentials configured; the machine on the network. The test "
-             "turns cloud mode and the gfcloud homing on itself when they are off, and puts "
-             "the settings back at the end.",
-             "Open the lid when told and leave it open through the cloud client's connect and its "
-             "hunt; close it when told. Nothing else: the switch back and the $H homing run on "
-             "their own, and the head ends parked at the home corner."],
+      steps=["Bed clear, lid closed; cloud credentials configured; the machine on the network. "
+             "The test turns cloud mode and the gfcloud homing on itself when they are off, and "
+             "puts the settings back at the end.",
+             "Open the lid the moment you are told, with a hand ready on it: the cloud client's "
+             "first hunt begins a few seconds after its controller starts and must find the lid "
+             "open. Leave it open through the connect and the hunt; close it when told. Nothing "
+             "else: the switch back and the $H homing run on their own, and the head ends parked "
+             "at the home corner."],
       description="One round trip with the two service-driven motions on it. POST /mode switches "
-                  "to the cloud controller: gfcloud comes up under supervision, authenticates and "
+                  "to the cloud controller with the lid closed (no controller starts with the "
+                  "enclosure open): gfcloud comes up under supervision, authenticates and "
                   "establishes its service session (its own log lines are the evidence; the "
-                  "connect-time firmware probe is recorded when configured). Its connect-time hunt "
-                  "runs with the lid OPEN, as the factory's does - it completes, nothing before its "
+                  "connect-time firmware probe is recorded when configured). The lid is opened the "
+                  "moment the controller is up, before the client requests its connect-time hunt "
+                  "(a hunt requested before the lid was open fails the test), so the hunt runs "
+                  "with the lid OPEN, as the factory's does - it completes, nothing before its "
                   "end is refused for the lid, the lens homes - and with the extraction fans off it "
                   "is measured by the airflow gates but not judged (no AIRFLOW, the exhaust row "
                   "reads unjudged); the camera service survives the switch. The lid closed, the "
@@ -275,17 +283,32 @@ def mode_switch(ctx):
     except OSError:
         pass
     lamp0 = hw.sysfs_read("pic/lid_led")
+    ctx.check(ctx.switch("lid") is True, "close the lid first: no controller starts with it open")
 
-    ctx.act("lid", "open", text="Leave it open: the cloud client connects and hunts with the lid open.")
+    # The switch is made with the enclosure closed (the supervisor holds
+    # every spawn until it is). The lid opens the moment the controller is
+    # up: the client requests its connect-time hunt a few seconds after
+    # its start, right behind its session, and the hunt must find the lid
+    # open. The poll is tight so the window is not spent waiting.
     log_offset = log_size(GFCLOUD_LOG)
     st, body = fc.post("/mode", data={"controller": "cloud"})
     ctx.log("POST /mode controller=cloud -> %s %s", st, body)
     ctx.check(st == 200, "mode switch to cloud refused: %s %s", st, body)
-    m = wait_mode(ctx, fc, "cloud", timeout=90)
+    m = wait_mode(ctx, fc, "cloud", timeout=90, poll=0.2)
     ev["mode_cloud"] = m
     ctx.log("mode after switch: %s", m)
     ctx.check(m and m.get("mode") == "cloud" and m.get("controller") == "running",
               "cloud controller did not come up: %s", m)
+    ctx.act("lid", "open", text="Now, at once: the cloud client's first hunt begins a few seconds "
+            "after its controller starts and must find the lid open. Leave it open through the "
+            "connect and the hunt.")
+    # The order is the proof: the hunt's request is not in the log yet
+    # when the lid reads open.
+    ev["hunt_before_lid_open"] = log_has(log_offset, HUNT_REQUEST)
+    ctx.check(not ev["hunt_before_lid_open"],
+              "the client requested its hunt before the lid was open (the hunt follows the "
+              "controller's start by a few seconds): the lid opened too late, so a hunt with the "
+              "lid open is not proven")
     # the client's own session lines are the evidence of a live cloud session
     session = wait_session(ctx, log_offset)
     probe = None

@@ -558,12 +558,16 @@ class CloudSuiteTests(unittest.TestCase):
     HUNT_RUN_SAMPLE = {"phase": "run", "verdict": "ok", "armed": False,
                        "fan_gates": {"exhaust": {"state": "unjudged", "reading": 0, "floor": 500}}}
 
-    def mode_switch_setup(self, hunt_lines=None, home_complete=True):
+    def mode_switch_setup(self, hunt_lines=None, home_complete=True, lid_late=False):
         """The fakes a mode-switch run needs: grbl to answer $H, the lid
         lamp attr, homing_mode = gfcloud, the service lines landing on
-        the switch to cloud (the hunt reads as a run to the cooling
-        engine while it lasts), the re-hunt on the lid close, and gfhome
-        finishing the homing after $H."""
+        the switch to cloud - the client's start at once, its session and
+        hunt once the lid reads open, as on the bench where the lid opens
+        behind the controller's start and ahead of the hunt (the hunt
+        reads as a run to the cooling engine while it lasts) - the re-hunt
+        on the lid close, and gfhome finishing the homing after $H. With
+        lid_late the hunt is requested before the lid opens: the race the
+        test must call."""
         self.grbl = helpers.FakeGrbl().start()
         os.makedirs(self.sysfs + "pic", exist_ok=True)
         self._attr("pic/lid_led", "236")
@@ -575,21 +579,34 @@ class CloudSuiteTests(unittest.TestCase):
             hunt_part = hunt_lines(hunt_part)
         fc = self.fc
 
+        def hunt():
+            self.append(hunt_part, delay=0.0)
+            time.sleep(4.0)          # the hunt outlasts the session wait on the bench
+            fc.state["cool"] = {"phase": "idle", "armed": False, "hold": False}
+
         def on_post(path, form):
             if path == "/mode" and form.get("controller") == "cloud":
                 fc.state["cool"] = dict(self.HUNT_RUN_SAMPLE)
 
                 def land():
                     self.append(pre, delay=0.0)
+                    if lid_late:
+                        return
+                    t0 = time.time()
+                    while fc.state["status"]["switches"]["lid"] and time.time() - t0 < 5:
+                        time.sleep(0.02)
                     time.sleep(0.3)
-                    self.append(hunt_part, delay=0.0)
-                    time.sleep(4.0)          # the hunt outlasts the session wait on the bench
-                    fc.state["cool"] = {"phase": "idle", "armed": False, "hold": False}
+                    hunt()
                 threading.Thread(target=land, daemon=True).start()
             elif path == "/mode" and form.get("controller") == "grbl":
                 self.grbl.state = "Idle"
             return None
         self.fc.on_post = on_post
+
+        def lid_opened():
+            if lid_late:
+                self.append(hunt_part, delay=0.0)
+            self.lid(False)
 
         def lid_closed():
             self.lid(True)
@@ -605,7 +622,7 @@ class CloudSuiteTests(unittest.TestCase):
                     f.write(b"2026-08-17T09:46:00.000000+00:00 gfhome[2300] INFO homing complete "
                             b"(service quiet 8s, 3 motion windows)\n")
         self.home_hook = homing
-        return {"Open the lid.": lambda: self.lid(False), "Close the lid.": lid_closed}
+        return {"Open the lid.": lid_opened, "Close the lid.": lid_closed}
 
     def wait_home_command(self):
         while "$H" not in self.grbl.sent:
@@ -632,6 +649,29 @@ class CloudSuiteTests(unittest.TestCase):
         self.assertEqual([r["state"] for r in ev["actions"]], ["open", "close"])
         self.assertEqual(self.script.asked, [])
         self.assertTrue(any("PASS:" in l for l in run.lines), run.lines[-5:])
+
+    def test_mode_switch_opens_the_lid_behind_the_controller_and_ahead_of_the_hunt(self):
+        # No controller starts with the enclosure open: the switch is made
+        # lid closed, the lid opens once the controller is up, and the
+        # hunt's request lands after that - the order the test records.
+        hooks = self.mode_switch_setup()
+        threading.Thread(target=self.wait_home_command, daemon=True).start()
+        run = self.run_test(cloud.mode_switch, hooks=hooks, test_id="cloud.mode-switch")
+        self.assertFalse(run.evidence["hunt_before_lid_open"])
+        acts = [(a["channel"], a["state"]) for a in run.evidence["actions"]]
+        self.assertEqual(acts, [("lid", "open"), ("lid", "close")])
+        i_post = next(i for i, l in enumerate(run.lines) if "POST /mode controller=cloud" in l)
+        i_open = next(i for i, l in enumerate(run.lines) if "ACT lid open" in l)
+        self.assertLess(i_post, i_open)
+
+    def test_mode_switch_refuses_to_start_with_the_lid_open(self):
+        hooks = self.mode_switch_setup()
+        self.lid(False)
+        self.assertFails(cloud.mode_switch, "close the lid first", hooks=hooks)
+
+    def test_mode_switch_fails_when_the_hunt_was_requested_before_the_lid_opened(self):
+        hooks = self.mode_switch_setup(lid_late=True)
+        self.assertFails(cloud.mode_switch, "before the lid was open", hooks=hooks)
 
     def test_mode_switch_fails_when_the_hunt_is_refused_for_the_lid(self):
         def refused(hunt_part):
