@@ -861,7 +861,16 @@ def verdict_cut(ctx):
     import signal as _signal
     ev = ctx.evidence
     fc = ctx.forgectrl
-    PAUSE_S = 3.5
+    # The daemon is frozen long enough for the verdict the controller
+    # caches to expire (VERDICT_MAX_AGE 2.0 s), so the driver's pause tier
+    # holds the job - but not so long that the engine's report dead-man
+    # trips on resume. That dead-man locks the laser latch when the
+    # controller's report is older than REPORT_TIMEOUT_S (5.0 s) while
+    # armed, which is exactly the "latch stayed locked" this test refuses.
+    # The last report is up to 1 s old when the freeze starts, so the
+    # freeze must stay under 4.0 s; 3.0 s clears the stale floor with room
+    # to see the hold and stays a full second under the dead-man.
+    PAUSE_S = 3.0
     pids = hw.pidof("forgectrl")
     ctx.check(pids, "no forgectrl process found to pause")
     ev["daemon_pids"] = pids
