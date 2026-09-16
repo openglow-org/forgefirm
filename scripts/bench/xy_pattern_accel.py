@@ -23,7 +23,7 @@ through the pattern. Reports, per leg and overall, the cruise-window
 RMS and peak-to-peak of X and Y with the mean removed, the leg times,
 the kernel counters against home, and cnc/underruns; JSON with the raw
 trace to the bench data directory. Releases the hold and puts the
-accelerometer back on every exit path. Ends at x8.
+accelerometer back on every exit path. Ends at x32.
 
 Needs the controller in GRBL mode, homed and standing at home, the lid
 closed, no other Grbl client, and the bed clear across the pattern.
@@ -156,10 +156,7 @@ def fail(msg):
 
 
 def set_mode(mode):
-    if mode == 8:
-        st, body = forgectrl_post("/settings", params={"xy_microsteps": ""})
-    else:
-        st, body = forgectrl_post("/settings", data={"xy_microsteps": str(mode)})
+    st, body = forgectrl_post("/settings", data={"xy_microsteps": str(mode)})
     if st != 200:
         fail("settings write refused: %s %s" % (st, body))
     time.sleep(3)
@@ -397,9 +394,9 @@ def main():
             json.dump(rec, f)
         print("  record: %s" % path)
         results.append(rec)
-    if modes[-1] != 8:
-        print("=== restore x8 ===")
-        set_mode(8)
+    if modes[-1] != 32:
+        print("=== restore x32 ===")
+        set_mode(32)
     print("\n=== summary (cruise RMS with the mean removed, raw counts; CTRL4 0x%02x) ==="
           % results[0].get("ctrl4", 0))
     print("%-6s %10s %10s %10s %10s %8s" % ("mode", "x rms", "x p2p", "y rms", "y p2p", "result"))

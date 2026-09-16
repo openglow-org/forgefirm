@@ -655,7 +655,7 @@ def drill_pthresh(g):
 DLADDER_PCT = (1, 2, 5, 10, 20, 40, 70, 100)
 DLADDER_LEN = 25.0                      # mm of burn per rung
 DLADDER_PITCH = 3.0                     # mm between rungs
-STREAM_RATE_HZ = 28160                  # machine tick (GFSINK_RATE default)
+STREAM_RATE_HZ = 28160                  # the 28160 Hz laser reference tick (the same at every microstep mode)
 PWM_PERIOD = 127                        # 7-bit power byte against PWMSAR
 CONF = os.environ.get('GFHOME_CONF') or '/data/forgefirm/forgefirm.conf'
 PULSE_MIN_KEY = 'laser_pulse_min_ticks'

@@ -68,7 +68,7 @@ def cpu_ticks(pid):
 
 
 def set_mode(mode):
-    r = fc("/settings?xy_microsteps=", {}) if mode == 8 else fc("/settings", {"xy_microsteps": str(mode)})
+    r = fc("/settings", {"xy_microsteps": str(mode)})
     if "http" in r:
         raise SystemExit("settings write refused: %s" % r)
     time.sleep(3)
@@ -214,9 +214,9 @@ def main():
         print("=== x%d ===" % mode)
         set_mode(mode)
         verdicts[mode] = raster(mode)
-    if MODES[-1] != 8:
-        print("=== restore x8 ===")
-        set_mode(8)
+    if MODES[-1] != 32:
+        print("=== restore x32 ===")
+        set_mode(32)
     print("settings xy_microsteps:", repr(fc("/settings").get("xy_microsteps")))
     print("RESULT:", " ".join("x%d=%s" % (m, "PASS" if v else "FAIL") for m, v in verdicts.items()))
     return 0 if all(verdicts.values()) else 1

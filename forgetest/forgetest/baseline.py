@@ -48,7 +48,7 @@ from .log import now_ts
 # in the pulse path (a job's Z moves the lens; the driver's Z soft limit
 # guards it), step_freq its machine tick and ramp_rate the kernel stop
 # ramp, both derived from the XY microstep mode (the values here are the
-# x8 default's; fixed_sysfs() gives the mode's); streaming is only ever 1
+# x8 base; fixed_sysfs() gives the mode's); streaming is only ever 1
 # inside a live job; the head white LED is a camera lamp, off at idle; the
 # loop heater and TEC are the diagnostics' tools, off at idle.
 FIXED_SYSFS = [
@@ -147,11 +147,12 @@ RETURN_MAX_MM = 100.0               # a displaced head is jogged back at most th
 POSITION_DEADBAND_MM = 0.1
 
 # The XY microstep mode (the xy_microsteps setting: 8, 16 or 32; unset =
-# 8). The GRBL controller reads it at its start and derives its scale,
+# 32). The GRBL controller reads it at its start and derives its scale,
 # its machine tick and the kernel stop ramp from it (boards/glowforge.h):
 # the fixed values of x/y_mode, step_freq and ramp_rate are the mode's.
 XY_MODES = (8, 16, 32)
-XY_MODE_DEFAULT = 8
+XY_MODE_BASE = 8                                                 # the factory x8 reference the tick and ramp scale from
+XY_MODE_DEFAULT = 32                                             # the mode an unset or invalid setting reads as
 XY_STEPS_PER_MM_OF = {8: 53.333, 16: 106.667, 32: 213.333}     # $100/$101 per mode
 XY_TICK_X8_HZ = 28160                                            # the x8 machine tick
 XY_RAMP_X8_HZ_PER_S = 125000                                     # the kernel stop ramp at it
@@ -175,7 +176,7 @@ def fixed_sysfs(mode=XY_MODE_DEFAULT):
     """FIXED_SYSFS with the mode's own x/y_mode, step_freq and ramp_rate:
     the tick and the ramp scale with the mode (x16 doubles both, x32
     quadruples them)."""
-    k = mode // XY_MODE_DEFAULT
+    k = mode // XY_MODE_BASE
     own = {"cnc/x_mode": str(mode), "cnc/y_mode": str(mode),
            "cnc/step_freq": str(XY_TICK_X8_HZ * k),
            "cnc/ramp_rate": str(XY_RAMP_X8_HZ_PER_S * k)}

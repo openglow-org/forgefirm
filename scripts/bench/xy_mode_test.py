@@ -145,13 +145,13 @@ def expect_log(log, needle, what):
 def case_default():
     s = Session()
     try:
-        expect_scale(s, 8, 53.333)
+        expect_scale(s, 32, 213.333)
         rate = s.setting("$110")
-        check(near(rate, 12000.0), "$110=%.0f stands at x8" % rate,
-              "$110 is %.3f at x8, want 12000" % rate)
+        check(near(rate, 12000.0), "$110=%.0f stands at x32" % rate,
+              "$110 is %.3f at x32, want 12000" % rate)
     finally:
         log = s.close()
-    expect_log(log, "x8 microsteps, 28160 Hz machine tick", "no key: x8, the 28160 Hz tick")
+    expect_log(log, "x32 microsteps, 112640 Hz machine tick", "no key: x32, the 112640 Hz tick")
 
 
 def case_x16():
@@ -184,11 +184,11 @@ def case_x32():
 def case_invalid():
     s = Session("xy_microsteps = 24\n")
     try:
-        expect_scale(s, 8, 53.333)
+        expect_scale(s, 32, 213.333)
     finally:
         log = s.close()
     expect_log(log, "xy_microsteps '24' is not 8, 16 or 32", "a value that is not a mode is refused with a warning")
-    expect_log(log, "x8 microsteps, 28160 Hz machine tick", "and the machine runs at x8")
+    expect_log(log, "x32 microsteps, 112640 Hz machine tick", "and the machine runs at x32")
 
 
 def case_low_tick():
