@@ -11,6 +11,7 @@ name: fixture-ci
 
 on:
   push:
+    branches: [master]
     paths:
       - 'fixture/**'
       - '.github/workflows/fixture-ci.yml'
