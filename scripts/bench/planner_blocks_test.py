@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Host-side verification that a deep planner buffer starts.
 
 $398 (planner buffer blocks) is a reboot-required setting with a range of

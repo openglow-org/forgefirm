@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 DESCRIPTION = "grblHAL motion controller for the Glowforge factory board"
 HOMEPAGE = "https://github.com/openglow-org/grblHAL-glowforge"
 

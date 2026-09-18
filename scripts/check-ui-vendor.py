@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """The files forgetest's page shares with forgectrl's panel, byte for byte.
 
 theme.css (the OpenGlow theme on Bootstrap) and the vendored Bootstrap

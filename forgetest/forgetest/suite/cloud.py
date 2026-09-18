@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """cloud.* - the controller mode switch and the optional Glowforge web-service
 mode (gfcloud daemon, gfhome homing runner). The mode-switch test makes the
 grbl -> cloud -> grbl round trip with the connect-time hunt run lid-open and

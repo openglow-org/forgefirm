@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Characterize the coolant flow signature using the FACTORY temperature
 curve, and recommend flow-fault thresholds.
 

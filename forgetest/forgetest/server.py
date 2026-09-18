@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """HTTP: the page, the JSON API, and the access rules.
 
 Access follows forgectrl's panel (auth.c): the Host header must be an

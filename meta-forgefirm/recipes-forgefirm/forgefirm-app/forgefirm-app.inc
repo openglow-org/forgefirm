@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # Shared fetch for the ForgeFIRM web-service apps (gfhome, python3-ffmachine,
 # gfcloud). Their sources live in the forgefirm-app/ directory of the
 # python3-gfhardware repository.

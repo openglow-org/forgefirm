@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Resume dark-lead characterization (runs ON the board, as root).
 
 Measures what the safety chain does across a pause and a resume, at pad

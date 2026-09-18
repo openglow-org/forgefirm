@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Hold LASER_PWM at one duty value for a measurement window, then restore.
 Usage: pwm_hold.py [sar] [seconds]  (defaults: 8, 30)
 

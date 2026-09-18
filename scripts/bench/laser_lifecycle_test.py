@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Host-side verification of the operator-armed window lifecycle.
 
 Runs the native grblHAL_glowforge binary in null-sink mode (no

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "ForgeFIRM operator accounts: record render and the root shell warning"
 DESCRIPTION = "Renders the account record (/data/forgefirm/users, written \
 by forgectrl) into the system account files at boot and on reload. The \

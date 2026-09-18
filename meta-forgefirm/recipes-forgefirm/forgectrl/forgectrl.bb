@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 DESCRIPTION = "System Control Daemon for ForgeFIRM powered Glowforge"
 HOMEPAGE = "https://github.com/openglow-org/forgectrl"
 

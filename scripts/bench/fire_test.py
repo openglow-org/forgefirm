@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """FIRE-line drop-timing test - runs ON the board. Usage: fire_test.py A|B|U
 
 Stream: power(0) first byte (duty forced to ZERO before any FIRE bit -

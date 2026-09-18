@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 DESCRIPTION = "Web Framework to build REST APIs, Webservices or any HTTP endpoint in C"
 HOMEPAGE = "https://github.com/babelouest/ulfius"
 

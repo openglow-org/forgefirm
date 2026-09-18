@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """How fine an arc the one core can plan: a $12 ladder on the 9 in circle (on the board).
 
 Usage: arc_tolerance_sweep.py [--mode M] [tolerances...]

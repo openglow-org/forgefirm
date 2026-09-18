@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "ForgeFIRM console banner: the control panel addresses in /etc/issue"
 DESCRIPTION = "Keeps an address block in the serial-console login banner \
 (/etc/issue): one control panel URL per global address of wlan0 and eth0. \

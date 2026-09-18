@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """Runner + HTTP API end to end on localhost with a fake catalog and a
 fake bench tool. No hardware, no forgectrl."""
 import json

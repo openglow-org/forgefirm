@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """scripts/manifest-from-tree.py - the workstation/CI mirror of the image
 manifest: recipe pins are read through their pin files, and a layer's
 content hash leaves the pin files out (a component bump is not a platform

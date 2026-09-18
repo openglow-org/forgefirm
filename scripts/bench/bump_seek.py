@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Accelerometer bump-seek prototype: creep toward a rail in bounded jog
 segments, detect the contact jolt on the head LIS2HH12, jog-cancel at once,
 back off. This is the homing-cycle detection loop, run standalone.

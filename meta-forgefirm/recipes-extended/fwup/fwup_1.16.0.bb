@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "Configurable embedded Linux firmware update creator and runner"
 DESCRIPTION = "Applies and creates signed .fw firmware archives. ForgeFIRM \
 uses the factory's own update format: fwup applies ForgeFIRM upgrades and \

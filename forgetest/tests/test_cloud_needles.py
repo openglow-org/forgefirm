@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """Every phrase the cloud suite greps for in the gfcloud log must be a
 phrase the pinned cloud app can actually log.
 

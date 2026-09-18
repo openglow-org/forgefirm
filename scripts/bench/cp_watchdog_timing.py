@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Charge-pump watchdog timing (runs ON the board, as root).
 
 Measures the HV watchdog one-shot (U1-1, SN74AHC123A) directly from the

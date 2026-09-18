@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """cooling.fans-quiet-after-motion and cooling.gate-off replayed host-side
 under the real runner Context against a scripted machine: a fake
 forgectrl (/status fans, /cool/status phase and verdict, /settings with

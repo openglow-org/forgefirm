@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Fan/coolant bench: snapshots the fan PWMs, tachs and coolant readings,
 drives M8 (cut-profile fans), then M9 (cooldown -> idle), and prints
 each snapshot for the tach readbacks to be judged. Needs the controller

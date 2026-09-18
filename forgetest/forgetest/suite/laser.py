@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """laser.* - LIVE laser tests, ported from `scripts/bench/live_fire_drills.py`.
 
 Every test here can emit, except `laser.power-floor`, which only reads

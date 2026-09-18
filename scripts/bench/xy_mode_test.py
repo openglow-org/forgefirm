@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Host-side verification of the XY microstep mode wiring.
 
 The XY microstep mode is one number in the shared config, xy_microsteps

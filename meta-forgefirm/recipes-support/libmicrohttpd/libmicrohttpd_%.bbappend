@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # forgectrl serves HTTPS on 443 with a self-signed certificate through
 # this library, so the https option (GnuTLS) is on; curl is the poky
 # default (it builds the library's own test client). libgcrypt is a

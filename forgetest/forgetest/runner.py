@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The runner: executes one acceptance test or one bench tool at a time.
 
 Acceptance tests run in a worker thread with a Context: log lines, an

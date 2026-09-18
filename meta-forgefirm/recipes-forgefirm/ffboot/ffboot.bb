@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "Boot-slot selection and inventory for Glowforge factory hardware"
 DESCRIPTION = "Inventories the bootable partitions (ffboot -l) and switches \
 the boot target by rewriting the saved U-Boot environment with read-back \

@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """scripts/source-bundle.py - the source that a release publishes.
 
 The bundle must hold the source of every recipe of the image whose license

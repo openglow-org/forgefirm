@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "ForgeFIRM boot state on /data: the timestamp and the random seed"
 DESCRIPTION = "The two files the poky init scripts keep across boots, \
 pointed at /data/forgefirm because the rootfs is read-only: the boot \

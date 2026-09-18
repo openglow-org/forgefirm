@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Kernel platform drills - runs ON the board, with forgectrl stopped
 (/etc/init.d/forgectrl stop) so the pulse device is free. Restart forgectrl
 afterward. Usage: platform_drills.py deadman|rmmod|decay|led|all

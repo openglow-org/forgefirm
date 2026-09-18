@@ -5,5 +5,14 @@ the associated recipe (.bb file) unless otherwise stated.
 See:
 COPYING.MIT (MIT)
 
+The code in this repository that is not layer metadata is MIT licensed:
+
+  forgetest/    the release acceptance tool (see forgetest/LICENSE)
+  scripts/      the release, install and bench scripts
+  fixture/      the bench actuator firmware, excluding
+                fixture/managed_components/, which carries its own licenses
+
+Every file in those directories states MIT in its own header.
+
 License information for any other files is either explicitly stated
 or defaults to GPL version 2.

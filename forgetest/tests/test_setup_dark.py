@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The setup's checks in the catalog: registered as automatic tests with
 no precheck, the takeover ones marked so, every covers map naming the
 check runner; and the check driver itself against the fake daemon: a

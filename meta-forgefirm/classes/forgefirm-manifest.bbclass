@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # forgefirm-manifest.bbclass - source fingerprint of one ForgeFIRM component
 #
 # A component recipe that inherits this class records what source it was

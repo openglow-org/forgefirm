@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The setup.* suite on the host: the registration (ids, kinds, the
 takeover tests, the operator tests' hands), the record builders, the
 machine's name, the cookie parsing, the LED cue, the settle rule for a

@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The dwell-gap verdict of laser.emission-witness over synthetic trails:
 the button latch judged from the first emission through every sample
 whose readback word shows the laser latch unlocked, both bits from that

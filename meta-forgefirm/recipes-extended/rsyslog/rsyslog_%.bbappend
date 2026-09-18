@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # rsyslog is the ForgeFIRM system logger: the only log writer, one
 # directory per logger under /data/log/forgefirm. This appends the
 # ForgeFIRM /etc/rsyslog.conf (inputs, line format, and the include of

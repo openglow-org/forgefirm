@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # NXP distributes the i.MX VPU/EPDC firmware blobs under its firmware EULA
 # (accepted with ACCEPT_FSL_EULA), so an image carrying those blobs has to
 # carry the license text with them.

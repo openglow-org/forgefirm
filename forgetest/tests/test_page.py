@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The page assembly: the ui/ files inlined in order, the gzipped install
 (what the dev image carries) assembling to the same bytes as a checkout,
 the token placeholder carried exactly once, and a missing marker refused

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # ForgeFIRM image manifest: kernel identity (forgefirm-image-manifest.bbclass
 # collects it from DEPLOY_DIR_IMAGE). The kernel tree is too large to list
 # per file and every acceptance test depends on it anyway, so the entry

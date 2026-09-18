@@ -1,4 +1,9 @@
 /*
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
+ * SPDX-License-Identifier: MIT
+ */
+/*
  * feeder.c - prove no-underrun continuous live feeding of the glowforge.ko
  * SDMA pulse ring under load.
  *

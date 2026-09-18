@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 # ForgeFIRM: an interactive root shell (the serial console, or SSH on
 # the dev image) starts with a warning. Non-interactive shells (scp,
 # rsync, ssh with a command) print nothing.

@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The fresh-boot idle state: what every test starts from and leaves behind.
 
 The runner checks the machine against this baseline before a run and

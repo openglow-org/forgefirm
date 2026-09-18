@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # The release version, and nothing else.
 #
 # This file is metadata, not platform content: the image manifest leaves

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Lens stop detection by the head accelerometer: a bench drill.
 
 Steps the lens one half-step at a time from the hall's rising edge toward

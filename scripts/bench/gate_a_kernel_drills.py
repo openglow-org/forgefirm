@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """GATE A kernel drills - runs ON the board. Usage: gate_a_kernel_drills.py K1|K2|K3
 
 The pulse device must be free: stop forgectrl first

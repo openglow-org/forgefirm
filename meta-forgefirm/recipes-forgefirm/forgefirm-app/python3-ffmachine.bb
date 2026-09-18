@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 DESCRIPTION = "Shared ForgeFIRM web-service hardware-machine glue (gfhome + gfcloud)"
 
 require forgefirm-app.inc

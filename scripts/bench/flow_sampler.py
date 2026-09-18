@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Board-side coolant sampler: prints 'elapsed,raw_down,raw_up' lines.
 Usage: flow_sampler.py <duration_s> <interval_s>
 Kept on the board so sampling cadence is not at the mercy of ssh

@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The image manifest and the domain fingerprint.
 
 /etc/forgefirm-manifest.json (written by forgefirm-image-manifest.bbclass)

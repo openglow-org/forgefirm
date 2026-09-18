@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "ForgeFIRM hostname: forgefirm-<xxxx> from the MAC address"
 DESCRIPTION = "Names the machine forgefirm-<xxxx>, where xxxx is the last \
 four hex digits of the wlan0 MAC address (eth0 on a machine with no WiFi). \

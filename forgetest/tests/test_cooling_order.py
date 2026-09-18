@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """cooling.aa-offset-calibrate is registered before the heater tools, so
 a queue runs it first: a heater trial leaves a warm slug circulating past
 the coolant sensors for minutes, and the tool's edges read it as

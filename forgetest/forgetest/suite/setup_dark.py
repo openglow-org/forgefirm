@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """setup.check-* - the setup's checks (the dark wizards), driven the
 way the page drives them: POST /wiz/<id>/start, GET /wiz/dark polled,
 the prompts answered from here (the bench fixture works the lid and the

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Bench drill for the flow-check suspicion/confirmation state machine.
 
 Runs ON THE BOARD (scp it over, then: python3 flow_confirm_drill.py).

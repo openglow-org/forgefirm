@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # forgefirm-app pin (python3-gfhardware repository, forgefirm-app/ tree).
 # Bump deliberately (AUTOREV is not reproducible); keep only SRCREV and PV
 # here - the image manifest leaves *-pin.inc out of the layer content hash

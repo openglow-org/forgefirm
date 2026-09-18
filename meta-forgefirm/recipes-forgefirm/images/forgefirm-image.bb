@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 require recipes-glowforge/images/glowforge-image.bb
 
 # /etc/forgefirm-manifest.json: the build-input identity the acceptance tool

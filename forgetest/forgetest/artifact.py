@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The release artifact (acceptance.json / acceptance.md) and its verification.
 
 The exporter serializes the campaign state with, for every catalog test,

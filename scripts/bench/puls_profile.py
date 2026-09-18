@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Extract motion profiles from Glowforge pulse files.
 
 Decodes a factory .puls byte stream (one byte per machine tick) and reports

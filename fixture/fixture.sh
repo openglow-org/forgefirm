@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 # forgefixture: build, flash and watch the bench actuator's firmware.
 #
 #   ./fixture.sh env              fixture.env from the example, with a fresh API key

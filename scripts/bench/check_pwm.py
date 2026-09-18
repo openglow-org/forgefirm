@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Software check: laser PWM carrier frequency from PWM2 registers.
 
 Expected with the fsl,extra-prescale=<13> fix: PWMCR prescaler divider = 13,

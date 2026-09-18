@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 DESCRIPTION = "Logging library for C applications (babelouest)"
 HOMEPAGE = "https://github.com/babelouest/yder"
 

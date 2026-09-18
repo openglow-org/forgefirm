@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Does the coolant reading hold still when the run airflow comes on?
 
 With cool_aa_offset_counts at the machine's value the engine takes the

@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The setup's sheet in the catalog: one live test on the button with a
 piece of wood at hand, its covers map naming the live runner, the
 renderer, the sender, the page, and the driver's laser module; and the

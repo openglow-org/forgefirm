@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # ForgeFIRM image manifest: source fingerprint of glowforge.ko.
 #
 # kernel-module-split packages the .ko into a versioned package that the

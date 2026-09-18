@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Bench drill for the starved-re-check escalation path.
 
 Runs ON THE BOARD with the controller running. The cooling engine's

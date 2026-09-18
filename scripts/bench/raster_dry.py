@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """A dry raster at top speed at each XY microstep mode (on the board).
 
 Usage: raster_dry.py [modes...]        (default: 8 16 32)

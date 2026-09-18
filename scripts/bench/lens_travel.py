@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Lens travel drill: where the carriage's stops sit against the hall edge.
 
 Runs on the board with the controller stopped (through forgectrl, so the

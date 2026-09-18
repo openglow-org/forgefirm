@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Fast direct-I2C sampler for the two LIS2HH12s on the head bus (i2c-3).
 
 Unbinds st_accel from both for the capture (rebinds after), programs

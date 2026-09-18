@@ -1,4 +1,8 @@
 #!/bin/bash
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 # Cross-compiles grblHAL-glowforge (the sibling driver repo) for the
 # factory board, borrowing the Yocto cross toolchain from the ulfius
 # recipe work directory. Regenerate a cleaned toolchain path with:

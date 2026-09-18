@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """The XY microstep modes by the head accelerometer, the machine silent (on the board).
 
 Usage: xy_pattern_accel.py [modes...]        (default: 8 16 32)

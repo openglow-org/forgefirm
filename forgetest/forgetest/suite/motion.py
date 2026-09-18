@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """motion.* - the motion controller under grblHAL: dry motion, no emission.
 
 Ported from `scripts/bench/pacing_test.py` (protocol-loop pacing) and

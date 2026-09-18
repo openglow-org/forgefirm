@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """Coverage lint: every source path in the manifest must be selected by
 some test's coverage globs, except the allowlisted non-behavioral paths,
 and every coverage glob must select at least one path of its component.

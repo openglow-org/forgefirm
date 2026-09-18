@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Milestone-2 motion-quality bench: factory-true rates/accels over TCP.
 
 Runs a bounded, return-to-start jog sequence against grblHAL on the board

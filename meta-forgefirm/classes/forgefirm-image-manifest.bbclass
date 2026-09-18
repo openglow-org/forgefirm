@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # forgefirm-image-manifest.bbclass - assemble /etc/forgefirm-manifest.json
 #
 # Inherited by the ForgeFIRM images. At rootfs postprocess it collects the

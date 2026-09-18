@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The baseline: fixed resting values are restored, preserved values are
 handed back, every deviation is a recorded leftover. Runs against a fake
 sysfs tree; forgectrl is unreachable (service-side checks skip)."""

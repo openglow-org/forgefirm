@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # urllib3's optional pyOpenSSL/cryptography backend is not used here: the cloud
 # client and the machine glue talk TLS through the standard library's ssl
 # module (nothing imports OpenSSL or cryptography). Dropping the two runtime

@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """wait_hv_off against a scripted charge-pump readback: a chain that
 releases inside the window passes, a chain held past it is the refusal,
 and a chain already off costs no wait."""

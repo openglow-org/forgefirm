@@ -1,4 +1,8 @@
 #!/bin/sh
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 # Runs ON the board. While forgectrl spawns helper children (the update
 # check's curl, the snapshot's media-ctl/v4l2-ctl), scan every child for a
 # descriptor on the pulse device. Expected: none - only the controller

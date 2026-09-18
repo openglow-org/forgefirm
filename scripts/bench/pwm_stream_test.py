@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """LASER_PWM stream-path test - runs ON the board.
 
 Streams POWER BYTES ONLY (bit 7 set) through /dev/glowforge and lets the

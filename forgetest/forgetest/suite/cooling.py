@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """cooling.* - the cooling engine: flow verification through forgectrl's
 diagnostics runner (the same check the fire gate runs), the fan profile
 returning to idle after motion, the gate settings (a value inside the

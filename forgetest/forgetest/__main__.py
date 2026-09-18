@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """forgetest daemon entry point.
 
   python3 -m forgetest [--port 8090] [--host ::] [--manifest PATH]

@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """logs.* - unified logging: the log tree, tail, and the sanitized export;
 the routing path (emitters, relays, rendered rules); the level settings."""
 import gzip

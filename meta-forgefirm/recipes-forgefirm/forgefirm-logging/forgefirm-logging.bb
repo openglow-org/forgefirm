@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "ForgeFIRM logging tree: rsyslog rules at boot, rotation"
 DESCRIPTION = "Boot-time glue for the ForgeFIRM logging tree \
 (/data/log/forgefirm/<logger>/): renders the per-logger rsyslog rules \

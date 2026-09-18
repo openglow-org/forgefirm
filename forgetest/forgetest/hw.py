@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """Hardware and service access for the suite: forgectrl's HTTP API, the
 kernel module's sysfs, the init scripts, and the Grbl TCP port.
 

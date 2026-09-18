@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """What keeps the page answering the operator instead of the timer.
 
 Two things went wrong on the bench and are pinned here:

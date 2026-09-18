@@ -1,4 +1,8 @@
 #!/bin/bash
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 # Cross-compiles forgectrl (the sibling repo) for the factory board,
 # borrowing the Yocto cross toolchain + sysroot from the forgectrl
 # recipe work directory (which carries ulfius, jansson, gnutls,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 DESCRIPTION = "Potluck with different functions for C programs (babelouest base library)"
 HOMEPAGE = "https://github.com/babelouest/orcania"
 

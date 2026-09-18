@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The cloud.* job-behavior tests against a fake forgectrl and a replayed
 gfcloud log: the real test functions run under the real runner Context,
 the operator prompts answered - and the standing notices of the machine

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 require forgefirm-image.bb
 
 DESCRIPTION = "OpenGlow/ForgeFIRM development image for Glowforge"

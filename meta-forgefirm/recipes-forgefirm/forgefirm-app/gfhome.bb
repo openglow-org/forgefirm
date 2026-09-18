@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 DESCRIPTION = "One-shot Glowforge web-service homing for ForgeFIRM"
 
 require forgefirm-app.inc

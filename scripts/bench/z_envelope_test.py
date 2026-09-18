@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Host-side verification that the Z envelope survives a settings write.
 
 The Z soft limit belongs to the driver, not to $20. glowforge_homing.c

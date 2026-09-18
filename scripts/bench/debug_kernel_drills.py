@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Debug-kernel drills: lock correctness across glowforge.ko load/unload
 and a forced -EPROBE_DEFER unwind.
 

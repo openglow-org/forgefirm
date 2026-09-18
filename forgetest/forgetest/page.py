@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The single page: acceptance tab + bench tab, assembled from ui/ into
 one self-contained response (no external assets). Bootstrap and the
 OpenGlow theme are inlined; theme.css and the vendor/ files are the same

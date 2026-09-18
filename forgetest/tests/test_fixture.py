@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The bench actuator as the tool sees it.
 
 The fixture is a box on the network that opens the lid loop, pulls the

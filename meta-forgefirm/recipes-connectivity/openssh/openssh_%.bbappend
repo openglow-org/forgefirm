@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # ForgeFIRM SSH policy, set in the installed files so the release image
 # carries it as built:
 #   PermitRootLogin no          root logs in at the serial console only

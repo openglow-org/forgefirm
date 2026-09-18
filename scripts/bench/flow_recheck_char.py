@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Characterize a SHORT periodic flow re-check for use DURING a job.
 
 Why a separate design from the job-start check: with the laser firing

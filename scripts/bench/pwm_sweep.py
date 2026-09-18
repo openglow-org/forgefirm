@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """LASER_PWM scope test - runs ON the board.
 
 check: read-only - safety-chain readbacks + PWM2 register dump.

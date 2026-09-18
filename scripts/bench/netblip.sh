@@ -1,4 +1,8 @@
 #!/bin/sh
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 # Runs ON the board while a cloud session is live: blackhole every
 # established :443 peer and break name resolution for N seconds, then
 # restore both. The cloud client must notice the dead socket, exit toward

@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """forgetest - the ForgeFIRM release acceptance tool.
 
 A daemon on the dev image (HTTP :8090) that runs the acceptance catalog

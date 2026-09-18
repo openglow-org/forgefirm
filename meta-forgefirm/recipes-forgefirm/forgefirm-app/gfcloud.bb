@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 DESCRIPTION = "Full Glowforge web-service controller daemon for ForgeFIRM (cloud mode)"
 
 require forgefirm-app.inc

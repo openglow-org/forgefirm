@@ -1,4 +1,8 @@
 #!/bin/bash
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 # Cross-compiles the bench feeder for the factory board, borrowing the
 # Yocto cross toolchain from the ulfius recipe work directory.
 #

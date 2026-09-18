@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """setup.* - the first-run setup: the record and the
 controller gate, the advisories, the account and its login, the HTTPS
 boundary, SSH, the cloud switch, the machine's name, and the factory

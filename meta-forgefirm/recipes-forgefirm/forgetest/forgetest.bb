@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "ForgeFIRM release acceptance tool (dev image)"
 DESCRIPTION = "Runs the release acceptance catalog against the machine from a \
 self-contained web page (HTTP :8090), keeps the append-only result log under \
@@ -5,7 +7,7 @@ self-contained web page (HTTP :8090), keeps the append-only result log under \
 carries the bench diagnostics page. Installed only on the dev image."
 HOMEPAGE = "https://github.com/openglow-org/forgefirm"
 LICENSE = "MIT"
-LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
+LIC_FILES_CHKSUM = "file://forgetest/LICENSE;md5=6657cce322ff8bed163c02ceffb4c60c"
 
 # The tool's canonical home is forgetest/ in this repo; the bench scripts
 # it drives live in scripts/bench/. Both are packaged from the same tree
@@ -16,6 +18,7 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/../../../:"
 # host unit tests and their caches would otherwise enter the fetch checksum
 # and rebuild the dev image after a workstation test run.
 SRC_URI = " \
+    file://forgetest/LICENSE \
     file://forgetest/forgetest/ \
     file://forgetest/forgetest.init \
     file://scripts/bench/ \

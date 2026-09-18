@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "Boot-time migration from the legacy ForgeFIRM disk layout"
 DESCRIPTION = "Reclaims the legacy ForgeFIRM eMMC partition (p4) and grows \
 /data back to the factory footprint. Runs before mountall; state-derived \

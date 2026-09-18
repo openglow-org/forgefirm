@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The bench registry against scripts/bench: every python tool is
 registered (or named as not-a-tool), every registered script exists,
 every argument spec builds a command line, every script compiles, and

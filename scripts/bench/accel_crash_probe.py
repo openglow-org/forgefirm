@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """De-risk drill for the head-accelerometer crash detector.
 
 The LIS2HH12 on the head bus (i2c-3 @0x1e) carries an on-chip interrupt

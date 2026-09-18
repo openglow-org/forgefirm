@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 SUMMARY = "Firmware verification public keys"
 DESCRIPTION = "Trust anchors for firmware archive verification: the \
 ForgeFIRM release-signing public key (verifies release downloads and \

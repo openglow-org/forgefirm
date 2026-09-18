@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """Shared fixtures for the forgetest unit tests: synthetic manifests and
 catalog entries that never touch hardware."""
 import hashlib

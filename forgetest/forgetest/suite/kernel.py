@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """kernel.* - glowforge.ko safety readbacks and the pulse-engine drills.
 
 The drills are the bench scripts `scripts/bench/gate_a_kernel_drills.py`

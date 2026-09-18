@@ -1,3 +1,8 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+
 """The bench actuator (forgefixture): the box on the bench network that
 opens the lid loop, pulls the interlock loop and presses the button on
 request, so an operator test can run with nobody in the room.

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Fan floor measurement: the numbers the airflow gates ship with.
 
 Two modes, both sampling the four tachometers (/status fans, rpm) and the

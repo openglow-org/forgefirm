@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Coolant-sensor offset probe: which actuator moves both thermistors?
 
 The coolant ADC reads about 1 C low on both sensors while the run airflow
