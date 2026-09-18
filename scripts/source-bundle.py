@@ -396,6 +396,40 @@ revision of each one.
 The build documentation is at
 https://docs.forgefirm.org/developers/building/.
 
+## How to install a build of your own
+
+This is the Installation Information that GPLv3 section 6 asks for. The
+machine runs firmware you built yourself, and no key is needed to install
+it.
+
+The boot loader is the factory U-Boot and verifies no signature, the
+kernel loads unsigned modules, and the signature check on a firmware
+archive is a ForgeFIRM policy that an operator at the machine can waive.
+
+- **From the control panel.** Upload the `.fw` on the System tab. An
+  archive no key on the machine verifies is reported as unsigned and
+  installs when you hold the machine button while confirming it.
+- **From a root shell.** The serial console gives a root shell with no
+  password, and `fwup` is stock upstream. Write the archive to the slot
+  the machine is not running from and select it:
+
+      fwup -a -d /dev/mmcblk2p2 -i my-build.fw -t upgrade.b
+      ffboot b
+
+  `upgrade.a` writes slot A (`/dev/mmcblk2p1`), `upgrade.b` writes slot B
+  (`/dev/mmcblk2p2`); `ffboot -l` says which slot is running.
+- **From an SD card.** Write `forgefirm-image-glowforge.rootfs.wic.gz` to
+  a card and boot from it.
+
+The trust anchor is replaceable. `/etc/forgefirm/keys` holds public keys
+only, as ordinary world-readable files. Put your own public key in
+`forgefirm-release.pub` and the automatic paths verify against your key
+instead; sign your builds with `fwup -S` and they install with no button
+held.
+
+The same information, with the panel screens, is at
+https://docs.forgefirm.org/install/updating/#installing-your-own-build.
+
 ## The ForgeFIRM components
 
 The components that OpenGlow writes are in this archive too. Their
