@@ -83,4 +83,5 @@ before you install.
 **This is experimental software. Use of it could seriously maim or kill you or
 others, and it may void your warranty. Use it at your own risk.**
 
-This project is not affiliated with or endorsed by Glowforge.
+Glowforge is a trademark of Glowforge, Inc. This project is not affiliated
+with, authorized by, or endorsed by Glowforge, Inc.
