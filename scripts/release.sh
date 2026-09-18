@@ -145,11 +145,16 @@ if [ "$MODE" = "dev" ]; then
   build_images
   resolve_ext4
   # The dev archive carries the dev image (forgetest, the bench tools), not
-  # the release rootfs: what the panel's upload path installs on the bench
-  # is what the bench runs.
+  # the release rootfs: what the bench installs is what the bench runs.
+  #
+  # No size gate here. The dev rootfs is about 368 MiB - forgetest and the
+  # bench tools - so it does not fit a 200 MiB eMMC slot and is never
+  # installed into one. It goes on an SD card, which the boot selector
+  # carries as a first-class location, either as the .wic.gz written to the
+  # card or by pointing fwup at the card rather than a slot. check_size
+  # guards the slot, so it applies to the release rootfs alone.
   EXT4="${EXT4/forgefirm-image-glowforge/forgefirm-image-dev-glowforge}"
   [ -f "$EXT4" ] || die "dev rootfs not found: $EXT4"
-  check_size
   REL=$(sed -n 's/^FORGEFIRM_RELEASE ?= "\(.*\)"/\1/p' "$RELEASE_INC")
   DEVVER="v${REL}-dev-$(date +%Y%m%d%H%M%S)"
   OUT="$DEPLOY/forgefirm-dev.fw"
