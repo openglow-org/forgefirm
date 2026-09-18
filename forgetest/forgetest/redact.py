@@ -35,7 +35,7 @@ REDACT_KEYS = frozenset((
     "hostname", "hostname_file", "host",
     "ssid", "psk", "passphrase", "password", "passwd",
     "token", "panel_token", "secret", "api_key", "key",
-    "mac", "macaddr", "wlan0", "eth0",
+    "mac", "macaddr", "mac_suffix", "wlan0", "eth0",
     "gf_username", "gf_password", "username", "user", "email",
 ))
 
@@ -53,7 +53,11 @@ _CLASSES = (
     ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
     ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
     ("MAC", re.compile(r"\b(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b")),
-    ("IP6", re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b")),
+    # Three or more colons, or a "::" run: two colons is a clock time, and
+    # tagging every timestamp would make the evidence unreadable.
+    ("IP6", re.compile(
+        r"(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}"
+        r"|[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{1,4})*::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})*)?")),
     ("IP", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")),
     ("HEX", re.compile(r"\b[0-9A-Fa-f]{32,}\b")),
 )
@@ -62,8 +66,28 @@ _CLASSES = (
 class Redactor:
     """Stable per-export numbering, one instance per artifact."""
 
+    # A known value shorter than this is too generic to replace blind.
+    MIN_KNOWN = 4
+
     def __init__(self):
         self._n = {}
+        self._known = {}
+
+    def learn(self, obj, key=None):
+        """Collect the values held under the layer-1 keys, so they are
+        replaced wherever else they appear - a hostname in a log line is
+        the same leak as a hostname in its own field."""
+        if key is not None and key in KEEP_KEYS:
+            return
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                self.learn(v, k)
+        elif isinstance(obj, list):
+            for v in obj:
+                self.learn(v)
+        elif key in REDACT_KEYS and isinstance(obj, str) and len(obj) >= self.MIN_KNOWN:
+            if obj not in self._known:
+                self._known[obj] = self._tag("REDACTED", "%s=%s" % (key, obj))
 
     def _tag(self, cls, value):
         seen = self._n.setdefault(cls, {})
@@ -72,6 +96,9 @@ class Redactor:
         return "<%s-%d>" % (cls, seen[value])
 
     def text(self, s):
+        for known in sorted(self._known, key=len, reverse=True):
+            if known in s:
+                s = s.replace(known, self._known[known])
         for cls, rx in _CLASSES:
             def sub(m, cls=cls):
                 v = m.group(0)
@@ -87,7 +114,11 @@ class Redactor:
         if key is not None and key in KEEP_KEYS:
             return v
         if key is not None and key in REDACT_KEYS and not isinstance(v, (dict, list)):
-            return None if v is None else self._tag("REDACTED", "%s=%s" % (key, v))
+            if v is None:
+                return None
+            if isinstance(v, str) and v in self._known:
+                return self._known[v]
+            return self._tag("REDACTED", "%s=%s" % (key, v))
         if isinstance(v, dict):
             return {k: self.value(x, k) for k, x in v.items()}
         if isinstance(v, list):
@@ -99,4 +130,6 @@ class Redactor:
 
 def scrub(obj):
     """Redact a value tree with one export's numbering."""
-    return Redactor().value(obj)
+    r = Redactor()
+    r.learn(obj)
+    return r.value(obj)

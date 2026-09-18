@@ -5,6 +5,11 @@
 
 """The release artifact (acceptance.json / acceptance.md) and its verification.
 
+Every test record is redacted before it enters the artifact (redact.py), so
+the committed file carries no identity of the machine that ran the campaign.
+It happens inside build(), ahead of the self-hash, because verify() rejects a
+file edited after the fact. The gate reads none of the redacted fields.
+
 The exporter serializes the campaign state with, for every catalog test,
 the winning result record (same-campaign PASS or inherited PASS, with its
 origin) and the fingerprint it was recorded under. The gate
@@ -20,6 +25,7 @@ from . import VERSION
 from . import campaign as _campaign
 from . import manifest as _manifest
 from .log import now_ts
+from .redact import scrub
 
 FORMAT = 1
 _RESULT_KEYS = ("ts", "campaign", "test", "result", "fingerprint", "manifest_sha", "image",
@@ -52,7 +58,7 @@ def build(state, tests, manifest, records, catalog_hash):
             "fingerprint": st["fingerprint"],
             "satisfied": st["satisfied"],
             "inherited": st["status"] == "inherited",
-            "record": _record(rec) if rec else None,
+            "record": scrub(_record(rec)) if rec else None,
         })
         tests_out.append(entry)
 
