@@ -1,0 +1,27 @@
+Glowforge factory keyring
+=========================
+
+Eleven Ed25519 *public* keys, 32 raw bytes each, recovered from Glowforge
+factory firmware. They are the factory trust anchors: ForgeFIRM ships them so
+the machine can verify the signature on a factory `.fw` archive during a
+factory restore. They verify archives and nothing else.
+
+Public key material only. No private or secret key belongs in this directory,
+and nothing here can be used to sign anything. ForgeFIRM's own release-signing
+public key is `../forgefirm-release.pub`; its private half is held offline by
+the operator and is not in this repository, in CI, or in any cloud-synced
+store.
+
+Provenance and rights
+---------------------
+
+These keys are Glowforge, Inc.'s. They are bare cryptographic public keys --
+algorithm output, carrying no authorship -- so no copyright subsists in them
+and none is claimed. 514 LLC d/b/a OpenGlow asserts no rights over them and
+grants none; the recipe's `LICENSE = "MIT"` covers the recipe, not this key
+material. Glowforge has not published these keys itself, so there is no
+upstream license to point to and none is implied.
+
+For how the trust anchors are used, see "The update manager" and "Decisions"
+on the documentation site:
+https://docs.forgefirm.org/technical/forgefirm/install-and-update/
