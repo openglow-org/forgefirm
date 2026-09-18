@@ -2,7 +2,7 @@ DESCRIPTION = "grblHAL motion controller for the Glowforge factory board"
 HOMEPAGE = "https://github.com/openglow-org/grblHAL-glowforge"
 
 LICENSE = "GPL-3.0-or-later"
-LIC_FILES_CHKSUM = "file://COPYING;md5=3237e48bcef3455c7bea5c0ce16206f6"
+LIC_FILES_CHKSUM = "file://COPYING;md5=ea8d0b3d9e732587396d0345870910f0"
 
 # gitsm: the grblHAL core rides as a submodule (openglow-org/grblHAL-core, branch
 # forgefirm = upstream master + the step_us_min buffer fix pending
