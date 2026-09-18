@@ -11,12 +11,12 @@ never takes them typed: $100/$101, the machine tick, and the kernel stop
 ramp. This harness drives the native grblHAL_glowforge binary in
 null-sink mode (no hardware, no root) over TCP, one process per config:
 
-  1. no key: x8, $100/$101 = 53.333, the 28160 Hz tick
+  1. no key: x32, $100/$101 = 213.333, the 112640 Hz tick
   2. xy_microsteps = 16: 106.667, the 56320 Hz tick; a typed $100 is
      overwritten on the spot; $110 is left alone under a tick that
      carries it
   3. xy_microsteps = 32: 213.333, the 112640 Hz tick
-  4. a value that is not a mode: x8 with a warning in the log
+  4. a value that is not a mode: x32 with a warning in the log
   5. GFSINK_RATE lowered under the mode's tick: $110/$111 are held at
      the feed the tick carries, one step per tick per axis
 

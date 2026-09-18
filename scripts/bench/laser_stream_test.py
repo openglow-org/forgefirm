@@ -144,7 +144,17 @@ import time
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build-native/grblHAL_glowforge")
 PORT = 2399
-STEPS_PER_MM = 53.333
+
+# The XY microstep mode. No session below writes xy_microsteps, so every
+# one of them runs at the driver's default (boards/glowforge.h
+# XY_MICROSTEPS_DEFAULT). $100/$101 and the machine tick are the x8 base
+# scaled by the mode, so both move together and a mode change is one
+# edit here.
+XY_MICROSTEPS_BASE = 8                          # the factory x8 reference the scaling divides by
+XY_MICROSTEPS_DEFAULT = 32                      # the mode an unset xy_microsteps key reads as
+XY_SCALE = XY_MICROSTEPS_DEFAULT // XY_MICROSTEPS_BASE
+STEPS_PER_MM_X8 = 53.333                        # DEFAULT_X/Y_STEPS_PER_MM, the x8 base
+STEPS_PER_MM = STEPS_PER_MM_X8 * XY_SCALE       # $100/$101 at the mode in force
 
 # The S -> level mapping the board defaults produce: $30 = 1000, $31 = 0,
 # and a $35 floor (boards/glowforge.h DEFAULT_SPINDLE_PWM_MIN_VALUE)
@@ -163,14 +173,20 @@ def duty_for(s):
     """Duty the core computes for an S word, floor included."""
     return int(s * (PWM_PERIOD - PWM_MIN) / RPM_MAX) + PWM_MIN
 
+# The machine tick: one stream byte per tick, so byte counts are
+# durations. The factory travel tick is the x8 one (GF_TICK_X8_HZ),
+# scaled with the mode so the ticks per step stay the same.
+MACHINE_TICK_X8_HZ = 28160.0
+MACHINE_TICK_HZ = MACHINE_TICK_X8_HZ * XY_SCALE
 # Longest stepless run allowed to carry FIRE, in machine ticks. The
 # slowest legitimate between-step interval in these jobs is the first
-# step of an accel-from-rest: sqrt(2 * (1/53.333 mm) / 700 mm/s^2)
-# = 7.3 ms = ~206 ticks at 28160 Hz. 500 gives >2x margin while staying
-# far below any idle-gap pad run.
-FIRE_GAP_LIMIT_TICKS = 500
-# The machine tick: one stream byte per tick, so byte counts are durations.
-MACHINE_TICK_HZ = 28160.0
+# step of an accel-from-rest: sqrt(2 * (1/STEPS_PER_MM mm) / 700 mm/s^2),
+# which at x8 is 7.3 ms = ~206 ticks at 28160 Hz. A finer mode shortens
+# that interval by sqrt(k) but speeds the tick by k, so the interval
+# measured in ticks grows as sqrt(k): ~412 ticks at x32. The limit scales
+# with it to keep the same >2x margin while staying far below any
+# idle-gap pad run.
+FIRE_GAP_LIMIT_TICKS = int(500 * XY_SCALE ** 0.5)
 
 WAIT_IDLE = ("wait_idle",)
 
@@ -254,8 +270,15 @@ ANALOG_FLOOR_DEFAULT_PCT = 16.0
 ANALOG_CONF = ("laser_power_model = analog\n"
                "laser_dose_curve = off\n"
                "laser_floor_analog = %g\n" % PWM_MIN_PCT)
+# Both keys are in ticks of the x8 reference tick, and the stream scales
+# them to the tick in force, so the period is a time at every microstep
+# mode (glowforge_laser.c, laser_pulse_ticks). The config carries the x8
+# numbers; the burst lengths measured out of the stream are in the mode's
+# own machine ticks, so the expectations are scaled.
 DENSITY_PERIOD = 20
 DENSITY_MIN_TICKS = 3
+DENSITY_PERIOD_TICKS = DENSITY_PERIOD * XY_SCALE
+DENSITY_MIN_MACHINE_TICKS = DENSITY_MIN_TICKS * XY_SCALE
 DENSITY_CONF_BASE = ("laser_pulse_ticks = %d\n"
                      "laser_pulse_min_ticks = %d\n"
                      % (DENSITY_PERIOD, DENSITY_MIN_TICKS))
@@ -634,11 +657,12 @@ def holds_in(ticks, min_run=2000):
 
 
 # The deceleration into a hold from F3000 (50 mm/s) at the board's
-# 700 mm/s^2: 71 ms, about 2000 ticks. A gate that closes with the
-# hold darkens all of it but the producer's lead (10 ms, ~280 ticks);
-# a fire state that outlives the gate lights it to the last step.
+# 700 mm/s^2: 71 ms, about 2000 ticks at x8. A gate that closes with the
+# hold darkens all of it but the producer's lead (10 ms, ~280 ticks at
+# x8); a fire state that outlives the gate lights it to the last step.
+# Both are durations, so the tick counts scale with the mode's tick.
 DECEL_TICKS = int(50.0 / 700.0 * MACHINE_TICK_HZ)
-DECEL_DARK_MIN = DECEL_TICKS - 600
+DECEL_DARK_MIN = DECEL_TICKS - 600 * XY_SCALE
 
 
 def dark_lead(ticks, hold):
@@ -662,10 +686,11 @@ def check_decel_dark(name, ticks, hold, what):
 # A lit deceleration ends within the producer's lead (10 ms) plus one
 # shipper period (10 ms) of the stop: the gate closes when the core
 # reports the hold complete, and the bytes produced ahead of the cursor
-# by then ship dark. 1000 ticks is 35 ms, under 0.2 mm at the end of a
-# ramp from 50 mm/s; a gate that closed before the head stopped shows
-# as the whole deceleration (~2000 ticks) or more.
-DECEL_LIT_MAX = 1000
+# by then ship dark. 1000 x8 ticks is 35 ms, under 0.2 mm at the end of
+# a ramp from 50 mm/s; a gate that closed before the head stopped shows
+# as the whole deceleration (DECEL_TICKS) or more. The budget is a
+# duration, so it scales with the mode's tick.
+DECEL_LIT_MAX = 1000 * XY_SCALE
 
 
 def check_decel_lit(name, ticks, hold, what):
@@ -829,10 +854,15 @@ def check_power_ladder(name, data, expect):
     return counts
 
 
-def fire_spans(ticks, gap=500):
+RUNG_SPLIT_TICKS = 500 * XY_SCALE
+
+
+def fire_spans(ticks, gap=RUNG_SPLIT_TICKS):
     """Tick spans carrying fire, split on dark gaps (the G0 between
     rungs). Within a rung the model's own dark stretches are at most a
-    couple of base periods, far below the split."""
+    couple of base periods, far below the split. Both the G0 gap and
+    those stretches are measured in machine ticks, so the split scales
+    with the microstep mode's tick."""
     spans = []
     start = last = None
     for i, b in enumerate(ticks):
@@ -1006,8 +1036,8 @@ def main():
     # Unfloored through the config key (laser_floor_density = 0), which
     # the arm loads into $35.
     dens = run_session("density", JOB_LADDER, conf=DENSITY_CONF)
-    rendered = check_density("density", dens, DENSITY_LEVEL, DENSITY_PERIOD,
-                             DENSITY_MIN_TICKS)
+    rendered = check_density("density", dens, DENSITY_LEVEL, DENSITY_PERIOD_TICKS,
+                             DENSITY_MIN_MACHINE_TICKS)
     check_termination("density", dens)
     if "laser armed (density, floor 0 %, curve off)" not in run_session.text:
         fail("[density] the arm did not select the density model at floor 0")
@@ -1069,7 +1099,7 @@ def main():
             cur = b & 0x7F
         elif b & 0x10:
             fire_by_duty[cur] = fire_by_duty.get(cur, 0) + 1
-    want_ticks = IDLE_S_MM / (IDLE_S_FEED / 60.0) * 28160
+    want_ticks = IDLE_S_MM / (IDLE_S_FEED / 60.0) * MACHINE_TICK_HZ
     for level in IDLE_S_LEVELS:
         duty = duty_for(level)
         got = fire_by_duty.get(duty, 0)
@@ -1117,8 +1147,8 @@ def main():
     # every rung renders through it.
     floored = run_session("floor-derived", JOB_DENSITY, conf=DENSITY_CONF_FLOORED)
     expect_levels = tuple(duty_for(x) for x in LADDER_S)
-    check_density("floor-derived", floored, expect_levels, DENSITY_PERIOD,
-                  DENSITY_MIN_TICKS)
+    check_density("floor-derived", floored, expect_levels, DENSITY_PERIOD_TICKS,
+                  DENSITY_MIN_MACHINE_TICKS)
     if "laser armed (density, floor %g %%, curve off)" % PWM_MIN_PCT not in run_session.text:
         fail("[floor-derived] the arm report does not name the derived floor "
              "(text: %r)" % run_session.text[-400:])
@@ -1197,8 +1227,8 @@ def main():
     # first-window check is what pins the M3 resume, which once ran dark
     # for a segment buffer because the segments prepped while held
     # carried no spindle update.
-    HOLD_WIN = 704                                  # 25 ms at 28160 Hz
-    HOLD_EDGE = 120                                 # one pulse straddles each edge
+    HOLD_WIN = int(0.025 * MACHINE_TICK_HZ)         # 25 ms at the machine tick
+    HOLD_EDGE = int(120 * XY_SCALE)                 # one pulse straddles each edge
     for mode, job in (("m4", ["G90", "G21", "M4 S0", "G1 X150 F6000 S500"]),
                       ("m3", ["G90", "G21", "M3 S500", "G1 X150 F6000"])):
         steps = job + [("sleep", 0.7), ("rt", b"!"), ("wait_state", "Hold:0"),
@@ -1249,7 +1279,7 @@ def main():
     # and the stretch it moved in between ships dark. The clean verdict
     # then resumes the hold the client took, and the rest of the line
     # cuts lit; M2 closes the window and locks.
-    TICK_HZ = 28160
+    TICK_HZ = MACHINE_TICK_HZ
     steps = ["G90", "G21", "M3 S500", "G1 X150 F3000", ("sleep", 0.7),
              ("verdict", "hold"), ("wait_state", "Hold:0"), ("sleep", 0.5),
              ("rt", b"~"), ("sleep", 1.2), ("wait_state", "Hold:0"),
@@ -1481,8 +1511,9 @@ def main():
     # Runs sit back to back in the dump, so the three moves are told
     # apart by their steps: each is 10 mm, and the cut is the last third.
     total = sum(1 for t in ticks if t & 0x01)
-    if abs(total - 3 * 533) > 12:
-        fail("[jog-dark] %d X steps, expected about %d (three 10 mm moves)" % (total, 3 * 533))
+    want_jog = 3 * round(10 * STEPS_PER_MM)
+    if abs(total - want_jog) > 12 * XY_SCALE:
+        fail("[jog-dark] %d X steps, expected about %d (three 10 mm moves)" % (total, want_jog))
     cut_from = 2 * (total // 3) - 2              # a fire tick may lead the cut's first step
     jog_fire = cut_fire = steps = 0
     for t in ticks:

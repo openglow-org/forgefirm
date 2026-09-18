@@ -15,6 +15,11 @@ import unittest
 
 from forgetest import baseline
 
+# The fixed machine tick at the mode an unset xy_microsteps reads as.
+# Taken from baseline rather than typed, so a change to the default mode
+# moves the expectations with it.
+DEFAULT_TICK = dict(baseline.fixed_sysfs())["cnc/step_freq"]
+
 
 class BaselineTests(unittest.TestCase):
     def setUp(self):
@@ -26,8 +31,11 @@ class BaselineTests(unittest.TestCase):
         for name in baseline.BUTTON_LEDS + ("lid_led",):
             os.makedirs(self.leds + name)
             self._led(name, "0")
-        # a clean machine
-        for attr, val in baseline.FIXED_SYSFS + baseline.IDLE_READBACKS:
+        # A clean machine at the mode an unset xy_microsteps reads as:
+        # x/y_mode, step_freq and ramp_rate are the mode's, not the x8
+        # literals in FIXED_SYSFS, and that is what enforce() compares
+        # against.
+        for attr, val in baseline.fixed_sysfs() + baseline.IDLE_READBACKS:
             self._attr(attr, val)
         self._attr("cnc/interlock_circuit", "45")
         self._attr("pic/lid_led", "0")
@@ -95,7 +103,7 @@ class BaselineTests(unittest.TestCase):
         for x in left:
             self.assertEqual(x.action, "restored", str(x))
         self.assertEqual(self._read("cnc/motor_lock"), "0")
-        self.assertEqual(self._read("cnc/step_freq"), "28160")
+        self.assertEqual(self._read("cnc/step_freq"), DEFAULT_TICK)
         self.assertEqual(self._read("cnc/streaming"), "0")
         self.assertEqual(items["cnc/motor_lock"].found, "15")
         self.assertEqual(items["cnc/motor_lock"].expected, "0")
@@ -158,14 +166,16 @@ class BaselineTests(unittest.TestCase):
             dev.on_command = lambda line: self._pos(0, 0, 0) if line.startswith("$J=") else None
             b = self.bl()
             cap = b.capture()
-            self._pos(221, 0, 0)                        # 4.144 mm into the held move
+            # 4.144 mm into the held move, in the steps of the mode in force
+            held_mm = 4.144
+            self._pos(round(held_mm * baseline.xy_steps_per_mm(baseline.XY_MODE_DEFAULT)), 0, 0)
             left = b.enforce("post", captured=cap)
             items = {x.item: x for x in left}
             self.assertTrue(items["position"].action.startswith("restored"), items["position"].action)
             self.assertEqual(dev.sent[0], "^X")
             jogs = [l for l in dev.sent if l.startswith("$J=")]
             self.assertEqual(len(jogs), 1)
-            self.assertIn("X-4.144", jogs[0])
+            self.assertIn("X-%.3f" % held_mm, jogs[0])
             self.assertTrue(any("reset out of Hold:0" in l for l in self.lines), self.lines)
         finally:
             dev.stop()
@@ -250,7 +260,7 @@ class BaselineTests(unittest.TestCase):
     def test_fixed_constants_checked_against_a_dump(self):
         ref = {"sysfs": {"cnc/motor_lock": "0", "cnc/step_freq": "10000"}}
         diffs = baseline.check_fixed_against(ref, self.lines.append)
-        self.assertEqual(diffs, ["cnc/step_freq: boot=10000 constant=28160"])
+        self.assertEqual(diffs, ["cnc/step_freq: boot=10000 constant=%s" % DEFAULT_TICK])
 
 
     # -- the reference is taken after the controller applied its config -----
@@ -269,7 +279,8 @@ class BaselineTests(unittest.TestCase):
         def sleep(_s):
             calls["n"] += 1
             if calls["n"] == 3:             # the controller's init writes land
-                for attr, val in baseline.CONFIGURED_MARKERS:
+                # at the mode wait_controller_configured watches by default
+                for attr, val in baseline.configured_markers():
                     self._attr(attr, val)
         ok = baseline.wait_controller_configured(
             self.lines.append, {"controller": "running", "mode": "grbl", "motion": "verified"},
@@ -307,11 +318,15 @@ class BaselineTests(unittest.TestCase):
     def test_preconfig_reference_is_recognized(self):
         self.assertTrue(baseline.reference_preconfig(
             {"sysfs": {"cnc/motor_lock": "0", "cnc/step_freq": "10000", "cnc/y_mode": "1"}}))
+        # The markers are read at the reference's own mode, so a dump taken
+        # on an x8 machine carries the setting that says so.
         self.assertFalse(baseline.reference_preconfig(
-            {"sysfs": {"cnc/motor_lock": "8", "cnc/step_freq": "28160", "cnc/y_mode": "8"}}))
+            {"sysfs": {"cnc/motor_lock": "8", "cnc/step_freq": "28160", "cnc/y_mode": "8"},
+             "forgectrl": {"/settings": {"xy_microsteps": "8"}}}))
         # a genuinely different single constant is a machine fact, not pre-config
         self.assertFalse(baseline.reference_preconfig(
-            {"sysfs": {"cnc/motor_lock": "8", "cnc/step_freq": "10000", "cnc/y_mode": "8"}}))
+            {"sysfs": {"cnc/motor_lock": "8", "cnc/step_freq": "10000", "cnc/y_mode": "8"},
+             "forgectrl": {"/settings": {"xy_microsteps": "8"}}}))
         self.assertFalse(baseline.reference_preconfig({"sysfs": {}}))
 
     # -- the XY microstep mode drives the fixed values ------------------------
@@ -330,16 +345,18 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(x32["cnc/x_decay"], x8["cnc/x_decay"])
 
     def test_the_mode_is_read_from_the_settings_with_a_default(self):
+        # An unset or unusable key reads as the driver's default, x32.
         self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "16"}), 16)
         self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "32"}), 32)
-        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": ""}), 8)
-        self.assertEqual(baseline.xy_mode_of({}), 8)
-        self.assertEqual(baseline.xy_mode_of(None), 8)
-        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "24"}), 8)
-        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "abc"}), 8)
+        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "8"}), 8)
+        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": ""}), 32)
+        self.assertEqual(baseline.xy_mode_of({}), 32)
+        self.assertEqual(baseline.xy_mode_of(None), 32)
+        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "24"}), 32)
+        self.assertEqual(baseline.xy_mode_of({"xy_microsteps": "abc"}), 32)
         self.assertEqual(baseline.ref_xy_mode({"forgectrl": {"/settings": {"xy_microsteps": "16"}}}), 16)
-        self.assertEqual(baseline.ref_xy_mode({"forgectrl": {"/settings": None}}), 8)
-        self.assertEqual(baseline.ref_xy_mode({}), 8)
+        self.assertEqual(baseline.ref_xy_mode({"forgectrl": {"/settings": None}}), 32)
+        self.assertEqual(baseline.ref_xy_mode({}), 32)
 
     def test_fixed_constants_are_checked_at_the_reference_mode(self):
         ref = {"sysfs": {"cnc/x_mode": "16", "cnc/step_freq": "56320", "cnc/ramp_rate": "250000"},
@@ -576,7 +593,7 @@ class BaselineModeTests(BaselineTests):
         self._attr("pic/lid_led", "77")
         left = self.bl().enforce("pre", captured=None)
         self.assertEqual(sorted(x.item for x in left), ["cnc/step_freq", "pic/lid_led"])
-        self.assertEqual(self._read("cnc/step_freq"), "28160")
+        self.assertEqual(self._read("cnc/step_freq"), DEFAULT_TICK)
         self.assertEqual(self._read("pic/lid_led"), "236")
 
     def test_cloud_mode_leaves_the_clients_config_lamp_and_counters(self):
