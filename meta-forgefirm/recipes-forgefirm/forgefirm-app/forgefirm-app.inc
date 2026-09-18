@@ -9,7 +9,7 @@ HOMEPAGE = "https://github.com/openglow-org/python3-gfhardware"
 # repository's LGPL component (the Bayer decoder compiled into
 # gfhardware._cam) is not part of them; python3-gfhardware declares it.
 LICENSE = "MIT"
-LIC_FILES_CHKSUM = "file://LICENSE;md5=7029670f29302d9352647c6c89614bc2"
+LIC_FILES_CHKSUM = "file://LICENSE;md5=314d21c23b626bdadbb4801c47b16266"
 
 SRC_URI = "git://github.com/openglow-org/python3-gfhardware.git;protocol=https;branch=master"
 # SRCREV and PV live in the pin file (forgefirm-image-manifest.bbclass).
