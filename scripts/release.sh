@@ -29,7 +29,12 @@
 #   FORGEFIRM_SOURCE_SKIP  set to 1 to build a release without the source
 #                        bundle. The licenses of the software in the image
 #                        make source necessary, so this is never the
-#                        default.
+#                        default, and it is REFUSED with --publish: a
+#                        release that conveys the binaries without the
+#                        corresponding source is a license violation, which
+#                        no release flag cures. Building without publishing
+#                        is allowed; the staged release is marked a
+#                        prerelease and carries NO-SOURCE.txt.
 #   FORGEFIRM_DOCS_DIR   the forgefirm-docs checkout to tag with this
 #                        release (default: <repo>/../forgefirm-docs). The
 #                        firmware and the documentation that describes it
@@ -81,16 +86,24 @@ for ARG in "$@"; do
   esac
 done
 
-FWUP="${FWUP:-fwup}"
-command -v "$FWUP" >/dev/null || die "fwup not found (set FWUP=)"
-command -v kas >/dev/null || die "kas not found on PATH"
-
 # The source bundle belongs to a release. A --dev archive goes to one bench
 # and publishes nothing, so it builds without the archiver.
 SOURCE_BUNDLE=0
 if [ "$MODE" = release ] && [ -z "${FORGEFIRM_SOURCE_SKIP:-}" ]; then
   SOURCE_BUNDLE=1
 fi
+
+# Decided first, and refused before any tool or key is looked for, because it
+# needs neither. A rootfs no campaign authorized is a quality problem that the
+# prerelease flag can label; conveying the GPL binaries of this image with no
+# corresponding source is a license violation, and no release flag cures one.
+if [ "$MODE" = release ] && [ "$SOURCE_BUNDLE" != 1 ] && [ "$PUBLISH" = 1 ]; then
+  die "FORGEFIRM_SOURCE_SKIP cannot be combined with --publish: a published release must carry its source"
+fi
+
+FWUP="${FWUP:-fwup}"
+command -v "$FWUP" >/dev/null || die "fwup not found (set FWUP=)"
+command -v kas >/dev/null || die "kas not found on PATH"
 
 build_images () {
   CFG="kas/forgefirm-glowforge.yml"
@@ -322,7 +335,7 @@ fi
 # The source bundle. It is packed from the license manifests of THIS
 # rootfs, and source-bundle.py stops the release when a recipe of the image
 # has no source (see the site, Developers, "Release flow").
-rm -f "$STAGE"/forgefirm-source-v*.tar.gz
+rm -f "$STAGE"/forgefirm-source-v*.tar.gz "$STAGE/NO-SOURCE.txt"
 if [ "$SOURCE_BUNDLE" = 1 ]; then
   echo "== source bundle =="
   python3 "$REPO/scripts/source-bundle.py" "$VERSION" \
@@ -332,6 +345,18 @@ if [ "$SOURCE_BUNDLE" = 1 ]; then
   ASSETS="$ASSETS forgefirm-source-v$VERSION.tar.gz"
 else
   warn "source bundle SKIPPED by FORGEFIRM_SOURCE_SKIP - this release publishes no source"
+  cat > "$STAGE/NO-SOURCE.txt" <<NOTE
+ForgeFIRM v$VERSION was built with the source bundle skipped
+(FORGEFIRM_SOURCE_SKIP). The image contains GPL and other copyleft
+software whose licenses require the corresponding source to accompany
+the binaries, and this staging directory does not carry it.
+
+Do not publish these assets as they stand. Rebuild without
+FORGEFIRM_SOURCE_SKIP, or attach the matching source bundle before the
+binaries reach anyone.
+NOTE
+  ASSETS="$ASSETS NO-SOURCE.txt"
+  PRERELEASE="--prerelease"
 fi
 
 # Every attached file is bound to the release by the sums, the artifact
