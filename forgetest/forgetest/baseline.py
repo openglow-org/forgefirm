@@ -138,6 +138,7 @@ BOOT_MAX_AGE_S = 600                # a boot reference is taken only this soon a
 SETTLE_S = 150                      # the supervisor's probe + rail-off ladder
 CAM_IDLE_S = 20                     # camera engine idle stop is 10 s
 COOL_IDLE_S = 120                   # cooldown after motion
+COOL_PUBLISH_S = 2.5                # the engine publishes once a tick (1 Hz): two ticks and a margin
 IDLE_S = 30                         # cnc/state back to idle after a job
 GRBL_PORT_S = 30                    # the Grbl port after the supervisor reports grblHAL running
 
@@ -613,36 +614,60 @@ class Baseline:
                 except OSError as e:
                     act = "failed: %s" % e
                 left.append(Leftover("laser_locked", False, True, act))
-        # cooling engine idle, unarmed
+        self._cool_side(left)
+
+    def _cool_side(self, left):
+        """The cooling engine idle, unarmed, holding nothing."""
         st, c = self.fc_get("/cool/status")
-        if st == 200 and isinstance(c, dict):
-            if c.get("phase") != "idle" or c.get("armed") or c.get("hold"):
+        if st != 200 or not isinstance(c, dict):
+            return
+        if c.get("phase") == "idle" and not c.get("armed") and not c.get("hold"):
+            return
+        found = "%s/armed=%s/hold=%s" % (c.get("phase"), c.get("armed"), c.get("hold"))
+        idle = lambda: (lambda x: x.get("phase") == "idle" and not x.get("armed")     # noqa: E731
+                        and not x.get("hold"))(self.fc_get("/cool/status")[1] or {})
+        # The engine publishes once a tick (1 Hz). A read inside the tick
+        # after a run ended still shows the run: a diagnostic's hold until
+        # the engine has the hardware back, a fail tier's hold until the
+        # session ends with the controller. What the engine's next tick
+        # clears was never left behind, so an arm or a hold is read again
+        # past that tick before it is called the run's doing. One that a
+        # run did leave stands for a job that is never coming back, and it
+        # is still there.
+        if c.get("armed") or c.get("hold"):
+            free = lambda: (lambda x: bool(x) and not x.get("armed")                  # noqa: E731
+                            and not x.get("hold"))(self.fc_get("/cool/status")[1] or {})
+            if self._wait("cool publish", free, COOL_PUBLISH_S) is not None:
+                st, c2 = self.fc_get("/cool/status")
+                c = c2 if st == 200 and isinstance(c2, dict) else {}
+                self.log("cool: %s was the engine's last word on the run; its next tick reads "
+                         "%s/armed=%s/hold=%s" % (found, c.get("phase"), c.get("armed"), c.get("hold")))
+                if c.get("phase") == "idle":
+                    return
                 found = "%s/armed=%s/hold=%s" % (c.get("phase"), c.get("armed"), c.get("hold"))
-                idle = lambda: (lambda x: x.get("phase") == "idle" and not x.get("armed")     # noqa: E731
-                                and not x.get("hold"))(self.fc_get("/cool/status")[1] or {})
-                # Armed, or holding, is the run's doing. A phase alone is
-                # not: the engine clears smoke at run duty after an armed
-                # session and cools down after a hot one, both timed and
-                # both ending on their own. Waiting for that is right;
-                # calling it a leftover is not, because nothing was left -
-                # the machine was still finishing.
-                dirt = bool(c.get("armed") or c.get("hold"))
-                w = self._wait("cool idle", idle, COOL_IDLE_S)
-                if w is not None and not dirt:
-                    self.log("cool: %s ended on its own after %.0f s; the engine's own post-job "
-                             "work, not a leftover" % (found, w))
-                else:
-                    # The engine holds for a job. A run that ended without
-                    # ending its job leaves one alive, and no amount of
-                    # waiting ends it: stand the machine down and let the
-                    # supervisor bring the controller back clean.
-                    act = "waited"
-                    if w is None:
-                        self.stand_down("the cooling engine is still %s" % found)
-                        w = self._wait("cool idle", idle, COOL_IDLE_S)
-                        act = "restored (stood the machine down)"
-                    left.append(Leftover("cool", found, "idle/unarmed/no hold",
-                                         act if w is not None else "failed: still %s" % found))
+        # Armed, or holding, is the run's doing. A phase alone is
+        # not: the engine clears smoke at run duty after an armed
+        # session and cools down after a hot one, both timed and
+        # both ending on their own. Waiting for that is right;
+        # calling it a leftover is not, because nothing was left -
+        # the machine was still finishing.
+        dirt = bool(c.get("armed") or c.get("hold"))
+        w = self._wait("cool idle", idle, COOL_IDLE_S)
+        if w is not None and not dirt:
+            self.log("cool: %s ended on its own after %.0f s; the engine's own post-job "
+                     "work, not a leftover" % (found, w))
+            return
+        # The engine holds for a job. A run that ended without
+        # ending its job leaves one alive, and no amount of
+        # waiting ends it: stand the machine down and let the
+        # supervisor bring the controller back clean.
+        act = "waited"
+        if w is None:
+            self.stand_down("the cooling engine is still %s" % found)
+            w = self._wait("cool idle", idle, COOL_IDLE_S)
+            act = "restored (stood the machine down)"
+        left.append(Leftover("cool", found, "idle/unarmed/no hold",
+                             act if w is not None else "failed: still %s" % found))
 
     def _lamp_side(self, left):
         """The lid lamp at forgectrl's idle level (the lid_lamp_idle setting).

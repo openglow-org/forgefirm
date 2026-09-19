@@ -437,6 +437,81 @@ class TransientNotLeftoverTests(BaselineTests):
         self.assertEqual(items[0].found, "1014")
 
 
+class CoolPublishTests(unittest.TestCase):
+    """The cooling engine publishes once a tick. A status read inside the
+    tick after a run ended is the engine's last word on the run, not the
+    machine as the run left it. Found on the bench reference: a diagnostic
+    that finished clean (cooling.aa-offset-calibrate) and a fail tier that
+    did its work (cooling.fail-tier-stop) both failed their hand-back on a
+    hold the engine's next tick cleared."""
+
+    IDLE = {"phase": "idle", "armed": False, "hold": False}
+
+    def setUp(self):
+        self.lines = []
+
+    def bl(self, statuses):
+        """A baseline whose /cool/status answers play in order (the last
+        one repeats) and whose waits count reads, not seconds: three for
+        the engine's next tick, as the real wait makes, and enough for the
+        cooldown to let a slow script run out."""
+        b = baseline.Baseline(self.lines.append)
+        seq = list(statuses)
+        b.fc_get = lambda path: (200, dict(seq.pop(0) if len(seq) > 1 else seq[0]))
+
+        def wait(what, pred, timeout):
+            for i in range(3 if what == "cool publish" else 50):
+                if pred():
+                    return float(i)
+            return None
+        b._wait = wait
+        b.stood_down = []
+        b.stand_down = b.stood_down.append
+        return b
+
+    def test_a_diagnostic_hold_the_next_tick_clears_is_not_a_leftover(self):
+        left = []
+        b = self.bl([{"phase": "diag", "armed": False, "hold": True}, self.IDLE])
+        b._cool_side(left)
+        self.assertEqual(left, [])
+        self.assertTrue(any("last word on the run" in ln for ln in self.lines), self.lines)
+
+    def test_a_fail_tier_hold_clears_into_the_engines_own_post_job_phase(self):
+        left = []
+        b = self.bl([{"phase": "run", "armed": False, "hold": True},
+                     {"phase": "smoke", "armed": False, "hold": False},
+                     {"phase": "smoke", "armed": False, "hold": False}, self.IDLE])
+        b._cool_side(left)
+        self.assertEqual(left, [])
+        self.assertTrue(any("not a leftover" in ln for ln in self.lines), self.lines)
+
+    def test_a_hold_that_outlives_the_tick_is_the_runs_doing(self):
+        left = []
+        b = self.bl([{"phase": "run", "armed": True, "hold": True}])
+        b._cool_side(left)
+        self.assertEqual([x.item for x in left], ["cool"])
+        self.assertEqual(left[0].found, "run/armed=True/hold=True")
+        self.assertTrue(left[0].action.startswith("failed: still"), left[0].action)
+        self.assertEqual(len(b.stood_down), 1)
+
+    def test_a_hold_that_clears_only_later_is_still_recorded(self):
+        left = []
+        held = {"phase": "run", "armed": False, "hold": True}
+        b = self.bl([held] * 10 + [self.IDLE])
+        b._cool_side(left)
+        self.assertEqual([x.item for x in left], ["cool"])
+        self.assertEqual(left[0].action, "waited")
+        self.assertEqual(b.stood_down, [])
+
+    def test_an_idle_engine_and_a_silent_daemon_leave_nothing(self):
+        left = []
+        self.bl([self.IDLE])._cool_side(left)
+        b = baseline.Baseline(self.lines.append)
+        b.fc_get = lambda path: (None, None)
+        b._cool_side(left)
+        self.assertEqual(left, [])
+
+
 class CloudOwnedSysfsTests(unittest.TestCase):
     """In cloud mode the cloud client configures the machine from the
     pulse header it is playing, the lens included: z_mode comes from
