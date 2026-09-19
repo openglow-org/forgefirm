@@ -14,12 +14,19 @@
 # the archive directory; the active factory slot stays bootable.
 #
 # Usage: install-forgefirm.sh [local-forgefirm.fw]
-#   With no argument the latest release .fw is downloaded from GitHub.
+#   With no argument the latest release .fw is downloaded from GitHub. The
+#   download resumes and retries; every run appends its steps to the
+#   install log in the ForgeFIRM log tree, which the panel's log export
+#   carries.
 
 RELEASE_FW_URL="https://github.com/openglow-org/forgefirm/releases/latest/download/forgefirm.fw"
 ARCHIVE_DIR="/data/forgefirm/archive"
 FW_FILE="/data/forgefirm/forgefirm.fw"
 MIN_DATA_FREE_KB=300000
+LOG_DIR="/data/log/forgefirm/install"
+LOG_FILE="$LOG_DIR/install.log"
+DL_ATTEMPTS=5                   # download tries before the install gives up
+DL_DELAYS="5 15 30 60"          # seconds to wait before tries 2, 3, 4, 5
 
 # ForgeFIRM release-signing public key (raw 32-byte Ed25519, the format the
 # factory's fwup 0.14.2 expects).
@@ -31,7 +38,19 @@ BRIGHT="\033[1;39m"
 RESET="\033[0m"
 ASTERISK="${LIGHTRED}✺${RESET}"
 
+# log <SEVERITY> <message>: one line in the log tree's own format
+# (timestamp, program[pid], severity, message). The log is appended
+# across runs, so a run that failed is still on the machine after the run
+# that worked. Logging never fails the install: with no writable log the
+# lines go nowhere.
+log () {
+  [ -n "$LOG_OK" ] || return 0
+  { echo "$(date -u '+%Y-%m-%dT%H:%M:%S+00:00') install[$$] $1 $2" >> "$LOG_FILE"; } 2>/dev/null
+  return 0
+}
+
 die () {
+  log ERR "install failed: $1"
   echo
   echo -e "${LIGHTRED}!! INSTALL FAILED:${RESET} $1"
   echo -e "${LIGHTRED}!! No boot change was made unless stated otherwise. Fix and re-run.${RESET}"
@@ -190,6 +209,82 @@ set_env () {
   env_verify "$1" "$2" "$3" "$4"
 }
 
+# curl_why <exit-code>: why a download attempt failed, in words.
+curl_why () {
+  case "$1" in
+    5|6)      echo "the host name did not resolve (DNS)" ;;
+    7)        echo "the connection was refused or unreachable" ;;
+    18|52|55|56) echo "the connection dropped mid-transfer" ;;
+    22)       echo "the server answered HTTP $2" ;;
+    23)       echo "the file could not be written" ;;
+    28)       echo "the connection timed out or stalled" ;;
+    35|51|60) echo "the TLS handshake failed (a wrong clock does this: $(date -u '+%Y-%m-%d %H:%M') UTC)" ;;
+    *)        echo "curl error $1" ;;
+  esac
+}
+
+# net_snapshot: what the network looked like when an attempt failed - the
+# address, the default route, the resolver, whether the release host
+# resolves - into the install log only.
+net_snapshot () {
+  log INFO "net: wlan0 $(ip -4 addr show dev wlan0 2>/dev/null | sed -n 's/^ *inet \([^ ]*\).*/\1/p' | head -n 1)"
+  log INFO "net: route $(ip route 2>/dev/null | grep '^default' | head -n 1)"
+  log INFO "net: resolver $(grep '^nameserver' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')"
+  if nslookup github.com >/dev/null 2>&1; then
+    log INFO "net: github.com resolves"
+  else
+    log WARNING "net: github.com does not resolve"
+  fi
+}
+
+# download_fw: fetch the release into $FW_FILE. A home network drops, a
+# resolver hiccups, a transfer stalls: each try resumes the partial file
+# where the last one stopped, and the tries are spaced out. The file
+# lands as <file>.part and takes its name only when curl finished, and
+# the signature check that follows is what vouches for its content. Two
+# failures end the tries at once, because waiting cannot fix them: a full
+# disk, and a release that is not there (HTTP 404).
+download_fw () {
+  PART="$FW_FILE.part"
+  rm -f "$PART"
+  TRY=1
+  set -- $DL_DELAYS
+  while :; do
+    log INFO "download: try $TRY of $DL_ATTEMPTS, clock $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
+    HTTP=$(curl -fL -C - --connect-timeout 20 --speed-limit 1024 --speed-time 30 \
+                -w '%{http_code}' --output "$PART" "$RELEASE_FW_URL")
+    RC=$?
+    if [ "$RC" = "0" ]; then
+      mv "$PART" "$FW_FILE" || return 1
+      log INFO "download: complete on try $TRY, $(wc -c < "$FW_FILE") bytes"
+      return 0
+    fi
+    WHY=$(curl_why "$RC" "$HTTP")
+    SOFAR=0
+    [ -f "$PART" ] && SOFAR=$(wc -c < "$PART")
+    log WARNING "download: try $TRY failed: curl exit $RC, HTTP ${HTTP:-none}: $WHY ($SOFAR bytes so far)"
+    net_snapshot
+    # A partial file the server will not resume (no range support, or a
+    # range past its end) starts over rather than failing every try.
+    case "$RC:$HTTP" in 33:*|36:*|22:416) rm -f "$PART" ;; esac
+    if [ "$RC" = "23" ] || [ "$RC:$HTTP" = "22:404" ] || [ "$TRY" -ge "$DL_ATTEMPTS" ]; then
+      rm -f "$PART"
+      DL_WHY="$WHY"
+      return 1
+    fi
+    WAIT=${1:-60}; [ $# -gt 0 ] && shift
+    echo -e "${YELLOW}!! Download failed: $WHY.${RESET} Trying again in ${WAIT}s (try $((TRY + 1)) of $DL_ATTEMPTS)..."
+    sleep "$WAIT"
+    TRY=$((TRY + 1))
+  done
+}
+
+# The install log, before anything can fail.
+mkdir -p "$LOG_DIR" 2>/dev/null && : >> "$LOG_FILE" 2>/dev/null && LOG_OK=yes
+INSTALLER_MD5=""
+[ -f "$0" ] && INSTALLER_MD5=$(md5sum "$0" 2>/dev/null | cut -d' ' -f1)
+log INFO "run start: installer md5=${INSTALLER_MD5:-unknown}, firmware source: ${1:-latest release}"
+
 echo
 echo -e "${LIGHTRED} ✺┈┈┈┈┈┈${RESET}"
 echo -e "${BRIGHT}Open${RESET}Glow ForgeFIRM Installation Tool"
@@ -217,6 +312,7 @@ done
 FREE_KB=$(df -k /data | tail -1 | awk '{print $4}')
 [ "$FREE_KB" -ge "$MIN_DATA_FREE_KB" ] 2>/dev/null \
   || die "need ${MIN_DATA_FREE_KB} KB free on /data, have ${FREE_KB:-unknown}"
+log INFO "pre-flight: factory $(cat /etc/version), booted slot $ACTIVE, target slot $TARGET, ${FREE_KB} KB free on /data, $(curl -V 2>/dev/null | head -n 1)"
 
 echo -e "${LIGHTRED}!!!!!!!!!!!!!!!!     WARNING     !!!!!!!!!!!!!!!!${RESET}"
 echo -e "${YELLOW}         THIS IS EXPERIMENTAL SOFTWARE!${RESET}"
@@ -237,6 +333,7 @@ echo
 slot_probe "$TARGET"
 TARGET_DESC=$(slot_desc)
 echo -e "Slot $TARGET currently holds: ${BRIGHT}$TARGET_DESC${RESET}"
+log INFO "slot $TARGET holds: $TARGET_DESC"
 if [ "$S_TYPE" = "factory" ]; then
   echo -e "It will be archived to /data before being overwritten."
 else
@@ -246,6 +343,7 @@ else
   read -p "Type ERASE to overwrite slot $TARGET, or anything else to abort: " erase
   echo
   if [ "$erase" != "ERASE" ]; then
+    log NOTICE "operator declined to erase slot $TARGET; no changes made"
     echo "Aborting without changes."
     exit 0
   fi
@@ -254,10 +352,12 @@ echo
 read -p "Are you sure you want to continue [N/y]? " continue
 echo
 if [ "$continue" != "y" ]; then
+  log NOTICE "operator declined to continue; no changes made"
   echo "Wise choice.  Exiting without changes."
   exit 0
 fi
 
+log INFO "operator confirmed; stopping the Glowforge services"
 stop_gf_services
 
 # --- archive factory content --------------------------------------------------
@@ -268,6 +368,7 @@ for N in 1 2; do
   ARC="$ARCHIVE_DIR/factory-rootfs-$S_VER.img.gz"
   if archived_ok "$ARC"; then
     echo -e "${ASTERISK}Slot $N (factory $S_VER) already archived."
+    log INFO "archive: slot $N (factory $S_VER) already archived"
     continue
   fi
   [ -e "$ARC" ] && echo -e "${ASTERISK}Slot $N: the archive on disk is incomplete; archiving again."
@@ -275,6 +376,7 @@ for N in 1 2; do
   archive_dev /dev/mmcblk2p$N "$ARC" \
     || { rm -f "$ARC"; die "archiving slot $N failed"; }
   echo "$(date '+%Y-%m-%d %H:%M:%S') slot$N factory $S_VER ver=${S_FWVER:-unknown} $(basename $ARC) md5=$(md5sum "$ARC" | cut -d' ' -f1)" >> "$ARCHIVE_DIR/manifest"
+  log INFO "archive: slot $N (factory $S_VER) -> $(basename "$ARC"), $(wc -c < "$ARC") bytes"
 done
 for B in 0 1; do
   ARC="$ARCHIVE_DIR/recovery-boot$B.img.gz"
@@ -283,17 +385,20 @@ for B in 0 1; do
   archive_dev /dev/mmcblk2boot$B "$ARC" \
     || { rm -f "$ARC"; die "archiving boot$B failed"; }
   echo "$(date '+%Y-%m-%d %H:%M:%S') boot$B recovery - $(basename $ARC) md5=$(md5sum "$ARC" | cut -d' ' -f1)" >> "$ARCHIVE_DIR/manifest"
+  log INFO "archive: boot$B -> $(basename "$ARC"), $(wc -c < "$ARC") bytes"
 done
 
 # --- acquire the ForgeFIRM .fw ------------------------------------------------
 mkdir -p /data/forgefirm
 if [ -n "$1" ]; then
   [ -s "$1" ] || die "local firmware file '$1' not found"
-  cp "$1" "$FW_FILE"
+  cp "$1" "$FW_FILE" || die "cannot copy '$1' to $FW_FILE"
   echo -e "${ASTERISK}Using local firmware file: $1"
+  log INFO "firmware: local file $1, $(wc -c < "$FW_FILE") bytes"
 else
   echo -e "${ASTERISK}Downloading latest OpenGlow/ForgeFIRM release:"
-  curl -fL "$RELEASE_FW_URL" --output "$FW_FILE" || die "firmware download failed"
+  download_fw \
+    || die "firmware download failed: ${DL_WHY:-unknown}. Check the network and re-run; the archives are kept, so a re-run goes straight to the download"
 fi
 
 # --- verify signature ---------------------------------------------------------
@@ -313,6 +418,7 @@ M_VERSION=$(echo "$META" | sed -n 's/^meta-version="\(.*\)"$/\1/p')
 [ "$M_PLATFORM" = "glowforge" ] \
   || { rm -f "$KEYFILE"; die "archive platform is '$M_PLATFORM', not glowforge - wrong archive"; }
 echo -e "${ASTERISK}Archive: $M_PRODUCT $M_VERSION ($M_PLATFORM)"
+log INFO "firmware: signature verified; $M_PRODUCT $M_VERSION ($M_PLATFORM)"
 
 # A validly signed OLDER release must never install silently; downgrades
 # need an explicit yes (rollback stays possible, just deliberate).
@@ -330,13 +436,14 @@ if [ -n "$INSTALLED" ] && ver_lt "$M_VERSION" "$INSTALLED"; then
   read -n1 -p "Install the downgrade anyway? [y/N] " YN
   echo
   case "$YN" in
-    y|Y) ;;
+    y|Y) log NOTICE "operator accepted the downgrade from $INSTALLED to $M_VERSION" ;;
     *) rm -f "$KEYFILE"; die "downgrade declined" ;;
   esac
 fi
 
 # --- apply to the inactive slot -----------------------------------------------
 echo -e "${ASTERISK}Writing ForgeFIRM to slot $TARGET (/dev/mmcblk2p$TARGET):"
+log INFO "apply: writing $M_VERSION to slot $TARGET"
 for M in $(sed -n "s|^/dev/mmcblk2p$TARGET \([^ ]*\).*|\1|p" /proc/mounts); do
   umount "$M" 2>/dev/null
 done
@@ -363,6 +470,7 @@ cp "$MP/usr/sbin/ffboot" /data/ffboot.new \
 umount "$MP"
 rmdir "$MP" 2>/dev/null
 echo -e "${ASTERISK}Slot $TARGET now holds ForgeFIRM $NEWVER"
+log INFO "apply: slot $TARGET holds ForgeFIRM $NEWVER; the written filesystem verified"
 
 # --- ffboot for the factory side ----------------------------------------------
 mv /data/ffboot.new /data/ffboot
@@ -372,6 +480,7 @@ chmod +x /data/ffboot
 echo -e "${ASTERISK}Setting boot to /dev/mmcblk2p$TARGET"
 set_env 1 0 "$TARGET" "/dev/mmcblk2p$TARGET" \
   || die "environment write did not verify - boot selection unchanged; run /data/ffboot -e$TARGET manually"
+log INFO "boot selection set to slot $TARGET and read back; install complete"
 
 echo
 echo -e "${BRIGHT}Installation complete.${RESET}"
@@ -379,5 +488,7 @@ echo -e "To return to factory firmware later: ${BRIGHT}/data/ffboot -e${RESET} (
 echo
 read -n1 -p "Press any key to reboot into OpenGlow/ForgeFIRM..." continue
 echo
+log INFO "rebooting into ForgeFIRM $NEWVER"
+sync
 reboot
 exit 0

@@ -27,14 +27,46 @@ def _read(path, default=None):
 _LOG_COVERS = [("forgectrl", "src/logs.*"), ("forgectrl", "src/fflog.*"), ("forgectrl", "src/sanitize.*"),
                ("forgectrl", "src/main.c")]
 
+LOGS_ROOT = "/data/log/forgefirm"
+# What the export test plants in the installer's directory: a line to find
+# again, and two addresses (documentation ranges) the sanitizer must take.
+_PROBE_MARK = "forgetest export probe"
+_PROBE_MAC = "02:00:5e:10:20:30"
+_PROBE_IP = "192.0.2.77"
+
 
 @test("logs.tree-tail-export", title="Log tree, tail, and sanitized export", subsystem="logs",
       kind="auto", est_min=1,
       covers=_LOG_COVERS, requires=["forgectrl.auth"],
       description="/logs lists the loggers with their levels and files, /logs/tail returns the "
                   "forgectrl logger's tail, and POST /logs/export streams a sanitized tar.gz "
-                  "bundle that contains neither the panel token nor the camera key.")
+                  "bundle that contains neither the panel token nor the camera key. The bundle "
+                  "also carries the installer's directory of the tree (logs/install/), which no "
+                  "logger feeds: a probe file planted there for the export comes back in the "
+                  "bundle with its addresses redacted, and an install log that the installer "
+                  "left is in the bundle too.")
 def tree_tail_export(ctx):
+    install_dir = os.path.join(LOGS_ROOT, "install")
+    probe = os.path.join(install_dir, "forgetest-probe.txt")
+    made_dir = not os.path.isdir(install_dir)
+    try:
+        os.makedirs(install_dir, exist_ok=True)
+        with open(probe, "w") as f:
+            f.write("%s from %s at %s\n" % (_PROBE_MARK, _PROBE_MAC, _PROBE_IP))
+        _tree_tail_export(ctx, probe)
+    finally:
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+        if made_dir:
+            try:
+                os.rmdir(install_dir)
+            except OSError:
+                pass
+
+
+def _tree_tail_export(ctx, probe):
     fc = ctx.forgectrl
     ev = ctx.evidence
     st, body = fc.get("/logs")
@@ -87,6 +119,21 @@ def tree_tail_export(ctx):
         ev[what.replace(" ", "_") + "_leaks"] = leaked
         ctx.check(not leaked, "the sanitized bundle contains the %s: %s", what, leaked)
 
+    # the installer's directory: no logger feeds it, the export carries it
+    by_name = dict(contents)
+    want = "logs/install/" + os.path.basename(probe)
+    got = [name for name in by_name if name.endswith(want)]
+    ev["install_members"] = sorted(name for name in by_name if "/logs/install/" in name)
+    ctx.check(got, "the bundle lacks %s: %s", want, ev["install_members"])
+    if got:
+        text = by_name[got[0]].decode("utf-8", "replace")
+        ctx.check(_PROBE_MARK in text, "the probe file came back without its line: %r", text)
+        for what, value in (("MAC address", _PROBE_MAC), ("IPv4 address", _PROBE_IP)):
+            ctx.check(value not in text, "the install directory left the sanitizer with its %s", what)
+    if os.path.isfile(os.path.join(os.path.dirname(probe), "install.log")):
+        ctx.check(any(name.endswith("logs/install/install.log") for name in by_name),
+                  "the machine has an install log and the bundle does not")
+
 
 # The routing test proves the whole path every logger takes: emitter (or
 # relay) -> /dev/log -> rsyslog rules rendered from the settings -> the
@@ -100,8 +147,7 @@ _ROUTING_COVERS = [("forgectrl", "src/logs.*"), ("forgectrl", "src/fflog.*"), ("
                    ("forgefirm-app", "forgefirm-app/ffmachine.py"), ("forgefirm-app", "forgefirm-app/gfcloud.py"),
                    ("forgefirm-app", "forgefirm-app/gfhome.py")]
 
-LOGS_ROOT = "/data/log/forgefirm"
-LOGGERS = ("forgectrl", "grblhal", "gfcloud", "gfhome", "kernel", "system")
+LOGGERS =("forgectrl", "grblhal", "gfcloud", "gfhome", "kernel", "system")
 _LINE_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?[+-]\d\d:\d\d (?P<prog>[A-Za-z0-9_.-]+)\[(?P<pid>[-\d]+)\] "
                       r"(?P<sev>EMERG|ALERT|CRIT|ERR|WARNING|NOTICE|INFO|DEBUG) (?P<msg>.*)$")
 _SEV_RANK = {"off": -1, "error": 3, "warning": 4, "notice": 5, "info": 6, "debug": 7}
