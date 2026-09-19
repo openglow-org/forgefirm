@@ -8,6 +8,7 @@ import glob
 import gzip
 import mmap
 import os
+import shutil
 import struct
 import re
 import stat
@@ -400,3 +401,140 @@ def license_bundle(ctx):
     text = bytes(body).decode("utf-8", "replace") if body else ""
     ctx.check("/system/licenses" in text and "PACKAGE NAME: " in text,
               "the Licenses page lacks the download link or the manifest")
+
+
+# ------------------------------------------------------- the network boot
+
+IFSTATE = "/var/run/ifstate"                # busybox ifupdown's state file
+INTERFACES = "/etc/network/interfaces"
+DHCP6_CLIENTS = ("udhcpc6", "dhcp6c", "odhcp6c")
+
+
+def ifstate_names(text):
+    """The interfaces ifup finished configuring: one name=name line each
+    in busybox's state file, written when ifup returns for the name."""
+    return {line.split("=", 1)[0].strip() for line in (text or "").splitlines() if "=" in line}
+
+
+def dhcp6_in_interfaces(text):
+    """The lines of an interfaces file that start a DHCPv6 client: an
+    inet6 stanza with a method that runs one, or a command that names
+    one. A comment starts nothing."""
+    bad = []
+    for raw in (text or "").splitlines():
+        words = raw.split("#", 1)[0].split()
+        if not words:
+            continue
+        if words[0] == "iface":
+            if len(words) >= 4 and words[2] == "inet6" and words[3] in ("dhcp", "auto"):
+                bad.append(" ".join(words))
+        elif any(w.split("/")[-1] in DHCP6_CLIENTS for w in words[1:]):
+            bad.append(" ".join(words))
+    return bad
+
+
+def parse_stat(text):
+    """(pid, comm, ppid) from a /proc/<pid>/stat line, or None. The comm
+    sits in parentheses and may itself hold spaces and parentheses."""
+    try:
+        head, tail = text.split("(", 1)
+        comm, rest = tail.rsplit(")", 1)
+        return int(head), comm, int(rest.split()[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _procs():
+    """(pid, ppid, comm, command line) of every process."""
+    out = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        st = parse_stat(_read("/proc/%s/stat" % name, ""))
+        if st is None:
+            continue
+        cmd = (_read("/proc/%s/cmdline" % name, "") or "").replace("\0", " ").strip()
+        out.append((st[0], st[2], st[1], cmd))
+    return out
+
+
+def link_addrs(text, iface):
+    """(link-local, global) IPv6 addresses of one interface, as the hex
+    strings of /proc/net/if_inet6 (address, index, prefix length, scope,
+    flags, name; scope 20 is the link, 00 the world)."""
+    local, world = [], []
+    for line in (text or "").splitlines():
+        f = line.split()
+        if len(f) == 6 and f[5] == iface:
+            if f[3] == "20":
+                local.append(f[0])
+            elif f[3] == "00":
+                world.append(f[0])
+    return local, world
+
+
+@test("image.network-boot", title="The boot does not wait on the network",
+      subsystem="image", kind="auto", est_min=1,
+      description="The network comes up without the boot waiting on a server. init starts the "
+                  "rest of the boot, the console login last, only after the networking script "
+                  "returns, so a client that waits in ifup's foreground on a server's answer "
+                  "holds the whole machine: no login, no SSH, no control panel. ifup has "
+                  "returned for wlan0 (it is in the state file and no ifup is running) and the "
+                  "console login is up; the DHCP client is the bounded one (-b, which leaves "
+                  "ifup after three unanswered discovers) and has left ifup; no DHCPv6 client "
+                  "is named in the interfaces file, running, or on the image; and IPv6 is the "
+                  "kernel's own: enabled on wlan0, router advertisements accepted, a link-local "
+                  "address up. A global address is evidence only, because a network whose "
+                  "router advertisement offers no SLAAC prefix gives none. What a hostile "
+                  "server does to a client is a bench drill, not a test. No component covers "
+                  "this: the interfaces file is layer content, in the platform identity of "
+                  "every fingerprint.")
+def network_boot(ctx):
+    ev = ctx.evidence
+    procs = _procs()
+
+    # 1. ifup came back, and the boot went on to the console login
+    state = ifstate_names(_read(IFSTATE, ""))
+    ev["ifstate"] = sorted(state)
+    ctx.check("wlan0" in state, "ifup has not finished wlan0: %s holds %s", IFSTATE, sorted(state))
+    stuck = [p for p in procs if p[2] in ("ifup", "ifdown")]
+    ev["ifup_running"] = [p[3] for p in stuck]
+    ctx.check(not stuck, "ifup is still running: %s", [p[3] for p in stuck])
+    logins = [p[3] for p in procs if p[2] == "getty"]
+    ev["getty"] = logins
+    ctx.check(any("ttymxc0" in c for c in logins), "no console login is running: %s", logins)
+
+    # 2. the DHCP client is the bounded one, and it has left ifup
+    v4 = [p for p in procs if p[2] == "udhcpc"]
+    ev["udhcpc"] = [p[3] for p in v4]
+    ctx.check(v4, "no DHCP client is running")
+    for pid, ppid, _comm, cmd in v4:
+        ctx.check("-b" in cmd.split(), "the DHCP client runs without -b: %s", cmd)
+        ctx.check(ppid == 1, "the DHCP client (pid %d) is still a child of pid %d", pid, ppid)
+
+    # 3. no DHCPv6 client: not started, not running, not on the image
+    text = _read(INTERFACES)
+    ctx.check(text is not None, "%s is missing", INTERFACES)
+    named = dhcp6_in_interfaces(text)
+    ev["interfaces_dhcp6"] = named
+    ctx.check(not named, "%s starts a DHCPv6 client: %s", INTERFACES, named)
+    alive = [p[3] for p in procs if p[2] in DHCP6_CLIENTS]
+    ev["dhcp6_running"] = alive
+    ctx.check(not alive, "a DHCPv6 client is running: %s", alive)
+    for name in DHCP6_CLIENTS:
+        ctx.check(shutil.which(name) is None, "%s is on the image", name)
+    ctx.check(not os.path.exists("/usr/share/udhcpc/default6.script"),
+              "the DHCPv6 hook script is on the image")
+
+    # 4. IPv6 is the kernel's own
+    conf = "/proc/sys/net/ipv6/conf/wlan0/"
+    ev["disable_ipv6"] = (_read(conf + "disable_ipv6", "") or "").strip()
+    ev["accept_ra"] = (_read(conf + "accept_ra", "") or "").strip()
+    ctx.check(ev["disable_ipv6"] == "0", "IPv6 is off on wlan0 (disable_ipv6=%r)", ev["disable_ipv6"])
+    ctx.check(ev["accept_ra"] not in ("", "0"),
+              "wlan0 does not accept router advertisements (accept_ra=%r)", ev["accept_ra"])
+    local, world = link_addrs(_read("/proc/net/if_inet6", ""), "wlan0")
+    ev["link_local"] = local
+    ev["global"] = world
+    ctx.check(local, "wlan0 has no link-local IPv6 address")
+    ctx.log("wlan0: %d link-local, %d global IPv6 address(es)", len(local), len(world))
