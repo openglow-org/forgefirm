@@ -1442,7 +1442,9 @@ def fan_duty_readback(ctx):
                   "watch's thresholds at their lowest (1) make the head's own move trip the abort "
                   "generator inside an armed, dark (S0) job. Expected: the engine logs the crash "
                   "signal, the supervisor logs the stop and starts a new controller (new pid), the "
-                  "latch is locked, the kernel idle, no emission, and the thresholds are put back.")
+                  "latch is locked, the kernel idle, no emission, the crash fault ends with the run "
+                  "session (the engine's next tick after the controller is gone), and the "
+                  "thresholds are put back.")
 def fail_tier_stop(ctx):
     from .laser import prepare, stream, sample
     from .motion import FORGECTRL_LOG, _log_lines, _log_offset
@@ -1501,6 +1503,16 @@ def fail_tier_stop(ctx):
         ctx.check(ev["result"]["latch_locked"], "latch not locked after the crash tier")
         ctx.check(not (smp and smp["emission"]), "emission during a dark job: %s", smp and smp["emission"])
         ctx.check(fc.wait_idle(30, abort=ctx.aborted), "machine not idle after the restart")
+        # The crash fault is the run session's: the engine ends the session
+        # on its next 1 Hz tick after the controller is gone, and the fault
+        # and its hold go with it. The supervisor has the new controller up
+        # inside that second, so a test that returned here would hand the
+        # machine back with the fault it raised still standing.
+        cleared = ctx.wait_for(lambda: _cool(fc).get("verdict") != "CRASH", 10)
+        ev["result"]["fault_cleared_s"] = cleared
+        ctx.log("the crash fault ended with the run session after %s s: %s", cleared,
+                {k: _cool(fc).get(k) for k in ("phase", "verdict", "hold", "armed")})
+        ctx.check(cleared is not None, "the crash fault did not end with the run session: %s", _cool(fc))
     finally:
         fc.wait_idle(30, abort=ctx.aborted)
         st, body = fc.post("/settings", params=orig)
