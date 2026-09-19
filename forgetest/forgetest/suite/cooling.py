@@ -10,6 +10,7 @@ legal range trips the gate, the far end of the range turns it off by
 value, and both are said out loud: the settings reply, /status, the
 engine's run-start log line), and the airflow gates (a fan under its
 floor past the spin-up grace is a fault for the rest of the run)."""
+import os
 import time
 
 from ..catalog import test
@@ -1246,7 +1247,6 @@ LOAD_LINES = 27                     # two 30 x 4 mm fills back to back, about 35
 LOAD_SHARE_MIN_C = 0.3              # the tube was lit inside the window
 LOAD_MARGIN_C = 1.0                 # the judged rise this far under the limit
 LOAD_VERDICT_WAIT_S = 120           # the window opens ~15 s into the session and runs 50 s
-LOAD_LOG_LINES = "300"
 _LOAD_LINE_RX = None
 
 
@@ -1270,9 +1270,19 @@ def _load_fill():
     return lines
 
 
-def _forgectrl_tail(fc):
-    st, body = fc.get("/logs/tail", params={"name": "forgectrl", "lines": LOAD_LOG_LINES})
-    return body.get("text", "") if st == 200 and isinstance(body, dict) else ""
+def _log_since(path, offset):
+    """The text a log gained since byte `offset`. A count of lines in a
+    tail of fixed length cannot tell a new line from an old one: the new
+    line comes in at the bottom as an old one leaves at the top. A file now
+    shorter than the offset was rotated under the test, and all of it is
+    newer."""
+    try:
+        with open(path, "rb") as f:
+            if os.fstat(f.fileno()).st_size >= offset:
+                f.seek(offset)
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 
 @test("cooling.flow-under-load", title="The flow check reads true with the tube lit through its window",
@@ -1290,6 +1300,7 @@ def _forgectrl_tail(fc):
                   "the tube's share off and read its baseline as a mean.")
 def flow_under_load(ctx):
     from .laser import sample, prepare, LiveJob, ARM_CUE, run_and_sample, wait_disarm
+    from .motion import FORGECTRL_LOG, _log_offset
     fc = ctx.forgectrl
     ev = ctx.evidence
     state, check_s = _gate_state(fc, "cool_flow_check_s")
@@ -1297,7 +1308,7 @@ def flow_under_load(ctx):
     ctx.check(state != "off" and check_s, "the flow check is off (cool_flow_check_s=%s)", check_s)
     ctx.check(limit, "cool_flow_rise unreadable")
     ev.update({"check_s": check_s, "limit_c": limit})
-    before = _forgectrl_tail(fc).count("heater rise")
+    off = _log_offset(FORGECTRL_LOG)     # the verdict is a line written after this
     # The fill ends one line length out and (LOAD_LINES - 1) pitches up;
     # the job brings the head back so the baseline finds it where it began.
     back = "G0 X%g Y%g" % (-LOAD_WIDTH if LOAD_LINES % 2 else 0.0, -LOAD_PITCH * (LOAD_LINES - 1))
@@ -1332,12 +1343,11 @@ def flow_under_load(ctx):
             ctx.checkpoint()
             if hw.sysfs_int("thermal/heater_pwm", 0) > 0:
                 heater_seen = True
-            text = _forgectrl_tail(fc)
-            if text.count("heater rise") > before:
-                m = None
-                for m in _load_verdict_rx().finditer(text):
-                    pass
-                line = m.group(0) if m else None
+            m = None
+            for m in _load_verdict_rx().finditer(_log_since(FORGECTRL_LOG, off)):
+                pass
+            if m:
+                line = m.group(0)
                 break
             ctx.sleep(1)
         ev["heater_seen"] = heater_seen
