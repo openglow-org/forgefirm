@@ -126,6 +126,88 @@ def slots_and_signature(ctx):
         shutil.rmtree(work, ignore_errors=True)
 
 
+@test("update.product-gate", title="The firmware upload takes firmware only: an extension package is refused by name",
+      subsystem="update", kind="auto", est_min=1,
+      covers=_UPDATE_COVERS + [("forgectrl", "src/fwproduct.c"), ("forgectrl", "src/fwproduct.h")],
+      requires=["forgectrl.auth"],
+      description="Firmware and extension packages are the same container, and a signature says who "
+                  "made an archive, never what it is. Archives made on the spot with the machine's own "
+                  "fwup go to POST /update/upload: an extension package unsigned, one signed with a "
+                  "throwaway key, and one that carries a task are each refused with 400 in words that "
+                  "say what they are, and nothing is staged; an archive of some other product is "
+                  "refused as not firmware; and one whose product is ForgeFIRM firmware is taken as an "
+                  "unsigned upload, which is what it is. Nothing is applied: the apply calls the same "
+                  "gate before fwup -a, and its proof is the daemon's host test, because a catalog test "
+                  "that could fail there would write a slot.")
+def product_gate(ctx):
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    staged = "/data/forgefirm/upload.fw"
+    ctx.check(not os.path.exists(staged), "an upload is already staged: %s", staged)
+    work = tempfile.mkdtemp(prefix="forgetest-gate-")
+
+    def archive(name, product, task=False, sign=False):
+        conf = os.path.join(work, name + ".conf")
+        with open(conf, "w") as f:
+            f.write('meta-product = "%s"\nmeta-version = "0.0.0-test"\n'
+                    'file-resource payload.tar.gz { host-path = "payload.tar.gz" }\n' % product)
+            if task:
+                f.write('task upgrade.a { on-resource payload.tar.gz { raw_write(0) } }\n')
+        out = name + ".fw"
+        cmd = "cd %s && fwup -c -f %s.conf -o %s" % (work, name, out)
+        if sign:
+            cmd += " && fwup -S -s fwup-key.priv -i %s -o %s.signed && mv %s.signed %s" % (out, out, out, out)
+        rc, text = hw.run(["sh", "-c", cmd], timeout=60)
+        ctx.check(rc == 0, "could not make %s (rc %s): %s", name, rc, text.strip()[:200])
+        return os.path.join(work, out)
+
+    def upload(path):
+        mark = "forgetestGateBoundary9c2"
+        body = ('--%s\r\nContent-Disposition: form-data; name="file"; filename="%s"\r\n'
+                'Content-Type: application/octet-stream\r\n\r\n' % (mark, os.path.basename(path))).encode()
+        with open(path, "rb") as f:
+            body += f.read() + ("\r\n--%s--\r\n" % mark).encode()
+        return fc.post("/update/upload", data=body,
+                       headers={"Content-Type": "multipart/form-data; boundary=%s" % mark})
+
+    try:
+        with open(os.path.join(work, "payload.tar.gz"), "wb") as f:
+            f.write(b"forgetest product-gate drill\n" * 8)
+        rc, text = hw.run(["sh", "-c", "cd %s && fwup -g" % work], timeout=60)
+        ctx.check(rc == 0, "fwup -g did not make a key pair (rc %s): %s", rc, text.strip()[:200])
+        seen = {}
+        for name, product, task, sign in (("extension-unsigned", "ForgeFIRM extension", False, False),
+                                          ("extension-signed", "ForgeFIRM extension", False, True),
+                                          ("extension-with-task", "ForgeFIRM extension", True, False)):
+            st, body = upload(archive(name, product, task, sign))
+            words = body.get("error", "") if isinstance(body, dict) else str(body)
+            seen[name] = [st, words]
+            ctx.log("upload %s -> %s %s", name, st, words)
+            ctx.check(st == 400 and "an extension package, not firmware" in words,
+                      "%s at the firmware upload -> %s %s", name, st, words)
+            ctx.check(not os.path.exists(staged), "%s was refused and is staged all the same", name)
+        st, body = upload(archive("another-product", "forgetest"))
+        words = body.get("error", "") if isinstance(body, dict) else str(body)
+        seen["another-product"] = [st, words]
+        ctx.log("upload another-product -> %s %s", st, words)
+        ctx.check(st == 400 and "not firmware" in words and not os.path.exists(staged),
+                  "an archive of another product -> %s %s", st, words)
+        st, body = upload(archive("firmware-unsigned", "ForgeFIRM firmware"))
+        seen["firmware-unsigned"] = [st, body]
+        ctx.log("upload firmware-unsigned -> %s %s", st, body)
+        ctx.check(st == 200 and isinstance(body, dict) and body.get("signature") == "unsigned"
+                  and os.path.exists(staged), "an unsigned archive that is firmware -> %s %s", st, body)
+        ev["uploads"] = seen
+    finally:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        shutil.rmtree(work, ignore_errors=True)
+    ctx.log("PASS: three extension packages and one foreign product refused at the firmware upload with "
+            "nothing staged; firmware taken as the unsigned upload it is")
+
+
 _VERSION_RX = re.compile(r"^v?\d+\.\d+\.\d+")
 
 
