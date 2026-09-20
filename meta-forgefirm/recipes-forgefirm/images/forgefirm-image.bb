@@ -18,11 +18,18 @@ DESCRIPTION = "OpenGlow/ForgeFIRM image for Glowforge"
 # removal spec is expanded when applied, so the variable, not the removal,
 # is what a requiring recipe can override). python3 is the meta-package:
 # it installs every standard-library module (tkinter, idle, 2to3, pydoc,
-# ensurepip, venv, the debugger, asyncio, multiprocessing, xmlrpc), which
-# nothing here imports. Each Python recipe declares the module packages it
+# ensurepip, venv, the debugger, multiprocessing, xmlrpc), which nothing
+# here imports. Each Python recipe declares the module packages it
 # imports (python3-core plus the few it uses), so the meta-package goes.
 FORGEFIRM_RELEASE_TRIM ?= "nano"
 IMAGE_INSTALL:remove = "python3 ${FORGEFIRM_RELEASE_TRIM}"
+
+# The Python an extension can count on. An extension runs on the image's
+# interpreter and brings no standard-library module of its own, so the set
+# it may import is the set installed here: what ForgeFIRM's own Python
+# recipes pull in, plus python3-asyncio, which no ForgeFIRM program imports
+# and which an extension's event-stream and socket clients are written on.
+IMAGE_INSTALL:append = " python3-asyncio"
 
 # grblhal-glowforge: the grblHAL motion controller (Grbl over TCP:23).
 # forgectrl: the ForgeFIRM machine-services daemon (HTTP :80, HTTPS :443
