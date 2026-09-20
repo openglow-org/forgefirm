@@ -10,7 +10,9 @@ Ported from `scripts/bench/pacing_test.py` (protocol-loop pacing) and
 and round-trip; the laser stays latched (the tests never touch it); the
 suite is the only Grbl client while a test runs.
 """
+import json
 import os
+import struct
 import time
 
 from ..catalog import test
@@ -1778,3 +1780,453 @@ def step_timing_under_load(ctx):
               "; ".join(clamped))
     ctx.log("PASS: %d legs at 2000 mm/min against a nice-5 CPU hog, no clamped events",
             ev["legs"])
+
+
+# ------------------------------------------------- manual home, motor release
+
+HOLD_CURRENTS = ("33", "5")     # pic/x_step_current, pic/y_step_current at idle
+MANUAL_NOTICE = "Manual home: position set where the head was placed"
+
+
+def _step_currents():
+    return (hw.sysfs_read("pic/x_step_current"), hw.sysfs_read("pic/y_step_current"))
+
+
+def _rail_lines():
+    """How many times the kernel has logged the 40 V supply going on or off."""
+    rc, out = hw.run(["dmesg"])
+    if rc != 0:
+        return -1
+    return sum(1 for line in out.splitlines() if "40V on" in line or "40V off" in line)
+
+
+def _kernel_position():
+    """The kernel's position record: (x, y, z) in steps, then the bytes it
+    has played and the bytes it was handed. Nothing moves without the last
+    two moving, which makes them the witness for "nothing was shipped": the
+    head accelerometer cannot say it, since the rotors relax off their held
+    microstep when the drivers let go, when the currents drop to hold, and at
+    a reset, and the head feels each of those."""
+    with open(hw.sysfs_root() + "cnc/position", "rb") as f:
+        raw = f.read(32)
+    return struct.unpack_from("<3i", raw, 0) + struct.unpack_from("<2I", raw, 12)
+
+
+def _refused(ctx, g, line):
+    """Send a line that must be refused; acknowledge the parser error it
+    leaves (clear_error has the why) and return the error."""
+    r = g.command(line)
+    err = next((x for x in r if x.startswith("error")), None)
+    if err is not None:
+        g.command("")
+    return err
+
+
+def _drop_reference(ctx, fc):
+    """A false home is not left behind: a fresh controller starts unhomed."""
+    fc.post("/controller/stop")
+    _wait_controller(ctx, fc, ("stopped", "standby"), 30)
+    fc.post("/controller/start")
+    m = _wait_controller(ctx, fc, ("running",), 120, motion="verified")
+    ctx.check(m.get("controller") == "running", "the controller did not come back: %s", m)
+
+
+@test("motion.release", title="Motor release: nothing moves a released gantry, only the operator energizes it",
+      subsystem="motion", kind="auto", hardware="takeover", mode="grbl", est_min=8,
+      covers=_MOTION_COVERS + [("forgectrl", "src/status.*"), ("forgectrl", "src/wizdark.*")],
+      requires=["motion.jog-roundtrip"],
+      steps=["Bed clear; the head needs 50 mm of free travel each way on X and Y. Nobody touches the gantry."],
+      description="$MD releases X and Y by taking their step currents to 0, with the 40 V rail "
+                  "untouched (no supply line in the kernel log, cnc/state idle, no fault), drops the "
+                  "X and Y reference and locks the machine in alarm. While released a jog, a G0 and "
+                  "$X are refused, a soft reset does not unlock it, and forgectrl refuses a switch "
+                  "to cloud mode; the kernel's position record "
+                  "is the witness that nothing was shipped (no step and no byte played), and the head "
+                  "accelerometer stays under the moving threshold in the window after the release. "
+                  "$ME energizes with no fault. The drivers are then proven alive the way the machine "
+                  "proves it to itself: the Setup motion check runs the liveness probe on the held "
+                  "device and the witnessed 50 mm jogs.")
+def motor_release(ctx):
+    from .setup_dark import run_check
+
+    ev = ctx.evidence
+    fc = hw.Forgectrl()
+    accel = hw.AccelSampler()
+    ctx.check(accel.available, "no head accelerometer found (i2c %s): the motion witness is missing",
+              hw.HEAD_ACCEL_I2C)
+    rail0 = _rail_lines()
+    ctx.check(rail0 >= 0, "the kernel log is unreadable: the rail witness is missing")
+    with ctx.grbl() as g, accel:
+        clean_slate(ctx, g)
+        r = g.command("$MD")
+        ctx.check(not any(x.startswith("error") for x in r), "$MD refused at idle: %s", r)
+        text = "\n".join(r) + drain_text(g, 1.0)
+        ev["released_currents"] = list(_step_currents())
+        ev["state_released"] = g.status_report()["state"]
+        ev["kernel_state_released"] = hw.sysfs_read("cnc/state")
+        ev["faults_released"] = hw.sysfs_int("cnc/faults")
+        ev["homed_axes_released"] = fc.status().get("homed_axes")
+        ctx.log("$MD: step currents %s, %s, cnc/state %s, faults %s, homed_axes %s",
+                ev["released_currents"], ev["state_released"], ev["kernel_state_released"],
+                ev["faults_released"], ev["homed_axes_released"])
+        ctx.check(ev["released_currents"] == ["0", "0"],
+                  "the step currents read %s after $MD, not 0 and 0", ev["released_currents"])
+        ctx.check(ev["state_released"].startswith("Alarm"), "not locked in alarm: %s", ev["state_released"])
+        ctx.check(ev["kernel_state_released"] == "idle", "the kernel left idle: %s", ev["kernel_state_released"])
+        ctx.check(ev["faults_released"] == 0, "a driver fault on release: %s", ev["faults_released"])
+        ctx.check(not (ev["homed_axes_released"] or 0) & 3, "X or Y still referenced while released")
+        ctx.check("Motors released" in text, "the sender was not told the motors are released")
+
+        # The rotors have relaxed by now: from here on the head is still.
+        ctx.sleep(1.0)
+        k0 = _kernel_position()
+        t0 = time.time()
+        refusals = {}
+        for line in ("$J=G91X10F2400", "G0X10", "$X"):
+            refusals[line] = _refused(ctx, g, line)
+            ctx.check(refusals[line], "%s was accepted while the motors are released", line)
+        ctx.sleep(1.0)
+        p2px, p2py, n = accel.p2p(t0)
+        ev["released_accel_p2p"] = [p2px, p2py, n]
+        ctx.check(n > 0, "no accelerometer samples in the released window")
+        ctx.check(max(p2px, p2py) < hw.ACCEL_P2P_MOVING,
+                  "the head moved while released (accel p2p x=%d y=%d)", p2px, p2py)
+        g.realtime(0x18)
+        ctx.sleep(2)
+        g.drain()
+        refusals["^X then $X"] = _refused(ctx, g, "$X")
+        ctx.check(refusals["^X then $X"], "a soft reset and $X unlocked a released machine")
+        ev["state_after_reset"] = g.status_report()["state"]
+        ctx.check(ev["state_after_reset"].startswith("Alarm"),
+                  "a soft reset unlocked a released machine: %s", ev["state_after_reset"])
+        k1 = _kernel_position()
+        ev["refusals"] = refusals
+        ev["kernel_position"] = [list(k0), list(k1)]
+        ctx.log("refused while released: %s; accel p2p x=%d y=%d over %d samples; kernel record %s -> %s",
+                refusals, p2px, p2py, n, k0, k1)
+        ctx.check(k1 == k0, "the kernel played something while released: %s -> %s", k0, k1)
+
+        # forgectrl reads the release too: cloud homing moves the head, so the
+        # switch is refused (for the release where cloud mode is enabled, for
+        # cloud mode being off where it is not; the mode stays either way).
+        st, body = fc.post("/mode", data={"controller": "cloud"})
+        text = body if isinstance(body, str) else json.dumps(body)
+        cloud_on = str(fc.settings().get("cloud_enabled", "")).lower() in ("1", "true", "yes", "on")
+        ev["mode_cloud_released"] = {"status": st, "body": text, "cloud_enabled": cloud_on}
+        ctx.log("POST /mode controller=cloud while released -> %s %s", st, text)
+        ctx.check(st == 409, "a switch to cloud mode while released -> %s, expected 409", st)
+        if cloud_on:
+            ctx.check("released" in text, "the refusal does not name the release: %r", text)
+        ctx.check(fc.get("/mode")[1].get("mode") == "grbl", "the mode changed under a released gantry")
+        ctx.check(_step_currents() == ("0", "0"),
+                  "something energized the motors: step currents %s", _step_currents())
+
+        r = g.command("$ME")
+        ctx.check(not any(x.startswith("error") for x in r), "$ME refused: %s", r)
+        ctx.sleep(0.5)
+        ev["energized_currents"] = list(_step_currents())
+        ev["faults_energized"] = hw.sysfs_int("cnc/faults")
+        ev["state_energized"] = g.status_report()["state"]
+        ctx.check(tuple(ev["energized_currents"]) == HOLD_CURRENTS,
+                  "the step currents read %s after $ME, not the hold currents", ev["energized_currents"])
+        ctx.check(ev["faults_energized"] == 0, "a driver fault on energize: %s", ev["faults_energized"])
+        ctx.check(ev["state_energized"].startswith("Idle"), "not idle after $ME: %s", ev["state_energized"])
+
+    # The drivers are alive: the machine's own witness says so. The liveness
+    # probe is built for the accelerometer (a slow, rough move sampled for
+    # seconds); a quick smooth jog is not, and reads as nothing half the time.
+    ctx.notice("The head moves 50 mm each way on X and on Y. Keep the bed clear.")
+    last = run_check(ctx, "motion", lambda p: "Continue" if p.get("id") == "jogs" else None, 420)
+    ctx.clear_notice()
+    res = last.get("result") or {}
+    ev["probe"] = res.get("probe")
+    ev["moves"] = res.get("moves")
+    ctx.log("after energize: probe '%s', moves %s", res.get("probe"),
+            {k: v.get("witnessed") for k, v in (res.get("moves") or {}).items()})
+    ctx.check(res.get("probe") and last.get("result") is not None and not last.get("error"),
+              "the motion check did not complete after the energize: %s", last.get("error") or last)
+    for name in ("+X", "-X", "+Y", "-Y"):
+        m = (res.get("moves") or {}).get(name) or {}
+        ctx.check(m.get("witnessed") is True,
+                  "the %s jog was not witnessed after the energize: the drivers did not come back (%s)", name, m)
+    ok = ctx.wait_for(lambda: (fc.get("/mode")[1] or {}).get("local") is False
+                      and (fc.get("/mode")[1] or {}).get("controller") == "running", 90)
+    ctx.check(ok is not None, "the controller is not back in its normal posture")
+    ev["rail_lines"] = [rail0, _rail_lines()]
+    ctx.check(ev["rail_lines"][0] == ev["rail_lines"][1],
+              "the kernel logged the 40 V supply changing across a release: %s", ev["rail_lines"])
+    machine_idle(ctx)
+    ctx.log("PASS: released with the rail untouched, every motion refused and nothing shipped, "
+            "energized with no fault, and the liveness probe and the witnessed jogs say the drivers are alive")
+
+
+@test("homing.manual", title="Manual home: $H declares the stop-block position and moves nothing",
+      subsystem="motion", kind="auto", mode="grbl", est_min=4,
+      covers=_MOTION_COVERS + [("forgectrl", "src/status.*"), ("forgectrl", "src/main.c")],
+      requires=["motion.jog-roundtrip"],
+      steps=["Bed clear; the head needs 30 mm of free +X travel."],
+      description="With homing_mode = manual, $H ships nothing (the kernel's position record shows no "
+                  "byte played across it), sets X and Y to manual_home_x and manual_home_y (the origin "
+                  "when they are unset) where the head stands, marks X and Y homed with their soft "
+                  "limits on (a jog past the envelope is refused with error 15), leaves Z where it "
+                  "was, tells the sender the home was set by hand, and the anchor's source reads back "
+                  "as manual through forgectrl. Whatever a check decides, the false reference is "
+                  "dropped and the head returned before the machine is handed back.")
+def manual_home(ctx):
+    ev = ctx.evidence
+    fc = hw.Forgectrl()
+    settings = fc.settings() or {}
+    ev["homing_mode"] = settings.get("homing_mode")
+    want = []
+    for key in ("manual_home_x", "manual_home_y"):
+        try:
+            want.append(float(settings.get(key) or 0.0))
+        except ValueError:
+            want.append(0.0)
+    ev["manual_home"] = want
+    moved_out = False
+    st, body = fc.post("/settings", data={"homing_mode": "manual"})
+    ctx.check(st == 200, "homing_mode=manual -> %s %s", st, body)
+    try:
+        with ctx.grbl() as g:
+            clean_slate(ctx, g)
+            machine_idle(ctx)
+            k_start = _kernel_position()
+            r = g.command("$J=G91X30F2400")         # away from wherever the origin was
+            ctx.check(not any(x.startswith("error") for x in r), "the outbound jog was refused: %s", r)
+            moved_out = True
+            wait_idle(ctx, g)
+            z0 = g.status_report()["MPos"][2]
+            ctx.sleep(1.5)                          # the kernel has played the jog's tail
+            k0 = _kernel_position()
+            r = g.command("$H", timeout=15)
+            ctx.check(not any(x.startswith("error") for x in r), "$H under manual refused: %s", r)
+            text = "\n".join(r) + drain_text(g, 1.5)
+            k1 = _kernel_position()
+            rep = g.status_report()
+            st = fc.status()
+            ev.update(kernel_position=[list(k0), list(k1)], mpos=rep["MPos"], state=rep["state"],
+                      homed_axes=st.get("homed_axes"), home_source=st.get("home_source"),
+                      pos=st.get("pos"))
+            ctx.log("$H: %s MPos %s; kernel record %s -> %s; forgectrl homed_axes %s source %s pos %s",
+                    rep["state"], rep["MPos"], k0, k1, ev["homed_axes"], ev["home_source"], ev["pos"])
+            ctx.check(k1[3:] == k0[3:], "$H played pulse bytes: %s -> %s", k0[3:], k1[3:])
+            ctx.check(k1[0] == 0 and k1[1] == 0, "the kernel counters were not cleared: %s", k1)
+            # The home cleared the counters out here, not where the run found
+            # the head: the hand-back is told what the start reads in the new
+            # frame, or it would "return" the head by the length of the jog.
+            ctx.counters_rezeroed([k_start[i] - k0[i] for i in range(3)])
+            ctx.check(abs(rep["MPos"][0] - want[0]) < 0.01 and abs(rep["MPos"][1] - want[1]) < 0.01,
+                      "X and Y are %s, not manual_home %s", rep["MPos"][:2], want)
+            ctx.check(rep["MPos"][2] == z0, "Z changed across the home: %s -> %s", z0, rep["MPos"][2])
+            ctx.check(rep["state"].startswith("Idle"), "not idle after the home: %s", rep["state"])
+            ctx.check(MANUAL_NOTICE in text, "the sender was not told the home was set by hand")
+            ctx.check((ev["homed_axes"] or 0) & 3 == 3, "forgectrl does not show X and Y homed")
+            ctx.check(ev["home_source"] == "manual", "the anchor's source reads %r", ev["home_source"])
+            ctx.check(ev["pos"] and abs(ev["pos"]["x"] - want[0]) < 0.02 and abs(ev["pos"]["y"] - want[1]) < 0.02,
+                      "forgectrl's position is not the declared one: %s", ev["pos"])
+            # The blocks are a wall: the envelope starts where the head stands.
+            ev["past_envelope"] = _refused(ctx, g, "$J=G91X-5F600")
+            ctx.check(ev["past_envelope"] == "error:15",
+                      "a jog past the envelope after the home got %s, not error:15", ev["past_envelope"])
+    finally:
+        # Whatever a check above decided, the machine is handed back as it was
+        # found: the setting restored, the false home dropped, the head returned.
+        st, body = (fc.post("/settings", params={"homing_mode": ""}) if not ev["homing_mode"]
+                    else fc.post("/settings", data={"homing_mode": ev["homing_mode"]}))
+        ctx.log("restore homing_mode=%r -> %s", ev["homing_mode"], st)
+        if moved_out:
+            _drop_reference(ctx, fc)
+            with ctx.grbl() as g:
+                clean_slate(ctx, g)
+                r = g.command("$J=G91X-30F2400")    # back to where the test found the head
+                ctx.check(not any(x.startswith("error") for x in r), "the return jog was refused: %s", r)
+                wait_idle(ctx, g)
+    machine_idle(ctx)
+    ctx.log("PASS: a manual home shipped nothing, declared %s, turned the soft limits on, kept Z, "
+            "and reads back as manual", want)
+
+
+def _port_state(fc):
+    st, body = fc.get("/motion/state")
+    if st != 200 or not isinstance(body, dict):
+        raise hw.HwError("forgectrl /motion/state -> %s %s" % (st, body))
+    return body
+
+
+def _port_idle(ctx, fc, timeout=30.0):
+    """The port's own word that its jog is over. The suite's Grbl client
+    sends no line while a port jog runs: a line from it is what cancels one."""
+    ok = ctx.wait_for(lambda: (lambda s: s["state"] == "Idle" and not s["port_jog"])(_port_state(fc)),
+                      timeout, poll=0.1)
+    ctx.check(ok is not None, "the port jog did not end: %s", _port_state(fc))
+    machine_idle(ctx)
+
+
+def _words(body):
+    return body if isinstance(body, str) else json.dumps(body)
+
+
+@test("motion.port-jog", title="The controller port: the panel jogs beside a connected Grbl client",
+      subsystem="motion", kind="auto", mode="grbl", est_min=4,
+      covers=_MOTION_COVERS + [("forgectrl", "src/grblport.*"), ("forgectrl", "src/main.c"),
+                               ("forgectrl", "src/status.*")],
+      requires=["motion.jog-roundtrip"],
+      steps=["Bed clear; the head needs 180 mm of free travel toward +X. Nobody touches the gantry."],
+      description="With the suite connected as the Grbl client, POST /motion/jog moves the head by "
+                  "what was asked (the kernel's counters are the witness), the client is told "
+                  "([MSG:Panel jog]) and is not displaced: its next line still draws ok. "
+                  "GET /motion/state agrees with the kernel. With the client polling the way "
+                  "LightBurn does ('?' and an end of line), no port jog is refused for it, a 30 mm "
+                  "jog runs whole, and every poll draws its ok. POST /motion/cancel stops a long jog "
+                  "short. The client goes first: its line during a port jog cancels the jog and "
+                  "draws ok, never an error. A jog past the per-request bound is refused with "
+                  "nothing moved. POST /motion/release takes the step currents to 0 and /status "
+                  "says so, a jog is then refused in words, and POST /motion/energize restores "
+                  "the hold currents. The head is returned to where it was found.")
+def port_jog(ctx):
+    ev = ctx.evidence
+    fc = hw.Forgectrl()
+    with ctx.grbl() as g:
+        clean_slate(ctx, g)
+        x0, y0 = kernel_start(ctx)
+        ctx.sleep(0.6)                      # past the port's sender-quiet interval
+
+        # A bounded jog, beside the client.
+        st, body = fc.post("/motion/jog", params={"x": "10", "feed": "2400"})
+        ctx.check(st == 200, "POST /motion/jog x=10 -> %s %s", st, _words(body))
+        _port_idle(ctx, fc)
+        x1, y1 = kernel_xy_mm(ctx)
+        ps = _port_state(fc)
+        ev["jog"] = {"kernel": [x0, x1], "port_mpos": ps.get("mpos"), "sender": ps.get("sender")}
+        ctx.log("port jog +10: kernel X %.3f -> %.3f, port state %s", x0, x1, ps)
+        ctx.check(abs((x1 - x0) - 10.0) < 0.1, "the kernel moved %.3f mm, not 10", x1 - x0)
+        ctx.check(abs(y1 - y0) < 0.05, "Y moved on an X jog: %.3f -> %.3f", y0, y1)
+        ctx.check(ps.get("sender") is True, "the port does not see the connected client: %s", ps)
+        text = drain_text(g, 0.5)
+        ctx.check("Panel jog" in text, "the client was not told of the panel's jog: %r", text)
+        r = g.command("G4 P0")
+        ctx.check("ok" in r and not any(x.startswith("error") for x in r),
+                  "the client was displaced or refused after a port jog: %s", r)
+
+        # The client polls the way LightBurn does: '?' with an end of line
+        # behind it. The '?' is a realtime character; the end of line is an
+        # empty line, and an empty line is not the client speaking. No jog
+        # is refused for it, a jog runs whole under it, each poll draws its ok.
+        ctx.sleep(0.6)
+        g.drain()
+        polls, refused = 0, []
+        for _ in range(8):
+            g.send_raw(b"?\n")
+            polls += 1
+            st, body = fc.post("/motion/jog", params={"x": "0.5", "feed": "3000"})
+            if st != 200:
+                refused.append(_words(body))
+            ctx.sleep(0.12)
+        ctx.check(not refused, "%d of 8 port jogs were refused under a '?'+EOL poll: %s", len(refused), refused[:2])
+        _port_idle(ctx, fc)
+        xa = kernel_xy_mm(ctx)[0]
+        st, body = fc.post("/motion/jog", params={"x": "30", "feed": "1200"})    # 1.5 s: several polls long
+        ctx.check(st == 200, "the jog under the poll -> %s %s", st, _words(body))
+        in_jog = 0
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            g.send_raw(b"?\n")
+            polls += 1
+            ctx.sleep(0.25)
+            ps = _port_state(fc)
+            if ps["state"] == "Idle" and not ps["port_jog"]:
+                break
+            in_jog += 1
+        _port_idle(ctx, fc)
+        xb = kernel_xy_mm(ctx)[0]
+        oks = sum(1 for line in drain_text(g, 1.0).splitlines() if line.strip() == "ok")
+        ev["poll"] = {"polls": polls, "oks": oks, "polls_in_jog": in_jog, "kernel": [xa, xb]}
+        ctx.log("'?'+EOL poll: 8 of 8 jogs accepted; a 30 mm jog moved %.3f with %d polls into it; "
+                "%d polls drew %d oks", xb - xa, in_jog, polls, oks)
+        ctx.check(in_jog >= 3, "only %d polls landed inside the jog: the case did not test it", in_jog)
+        ctx.check(abs((xb - xa) - 30.0) < 0.1, "a status poll cut the port jog short: moved %.3f of 30", xb - xa)
+        ctx.check(oks == polls, "%d polls drew %d oks", polls, oks)
+        x1 = xb
+
+        # Past the bound: refused at the door, nothing moved.
+        st, body = fc.post("/motion/jog", params={"x": "101"})
+        ev["past_bound"] = [st, _words(body)]
+        ctx.check(st == 400, "a 101 mm jog -> %s %s, expected 400", st, _words(body))
+        ctx.check(abs(kernel_xy_mm(ctx)[0] - x1) < 0.01, "a refused jog moved the head")
+
+        # The cancel stops a long jog short.
+        ctx.sleep(0.6)
+        st, body = fc.post("/motion/jog", params={"x": "40", "feed": "600"})
+        ctx.check(st == 200, "the long jog -> %s %s", st, _words(body))
+        ctx.sleep(1.0)
+        st, body = fc.post("/motion/cancel")
+        ctx.check(st == 200, "POST /motion/cancel -> %s %s", st, _words(body))
+        _port_idle(ctx, fc)
+        x2 = kernel_xy_mm(ctx)[0]
+        ev["cancel"] = [x1, x2]
+        ctx.log("canceled a 40 mm jog at %.3f mm", x2 - x1)
+        ctx.check(1.0 < x2 - x1 < 35.0, "the cancel did not stop the jog short: moved %.3f of 40", x2 - x1)
+
+        # The client goes first: its line cancels the port's jog and draws ok.
+        # A fast jog, so the cancel is a real deceleration: the core stays in
+        # the jog state for the length of it, and a client line read in that
+        # window is the error:9 the hold exists to prevent. A slow jog stops
+        # at once and would pass with no hold at all.
+        g.drain()
+        ctx.sleep(0.6)
+        st, body = fc.post("/motion/jog", params={"x": "100", "feed": "6000"})
+        ctx.check(st == 200, "the fast jog -> %s %s", st, _words(body))
+        ctx.sleep(0.3)
+        r = g.command("G4 P0", timeout=15)
+        _port_idle(ctx, fc)
+        x3 = kernel_xy_mm(ctx)[0]
+        ev["sender_first"] = {"reply": r, "kernel": [x2, x3]}
+        ctx.log("the client's line during a port jog drew %s; the jog stopped at %.3f of 100", r, x3 - x2)
+        ctx.check("ok" in r and not any(x.startswith("error") for x in r),
+                  "the client's line during a port jog drew %s, not ok", r)
+        ctx.check(2.0 < x3 - x2 < 95.0, "the client's line did not cancel the port jog: moved %.3f", x3 - x2)
+
+        # The panel's own: the release and its end, by their routes.
+        ctx.sleep(0.6)
+        st, body = fc.post("/motion/release")
+        ctx.check(st == 200, "POST /motion/release -> %s %s", st, _words(body))
+        ctx.sleep(0.5)
+        ev["released"] = {"currents": list(_step_currents()),
+                          "status": fc.status().get("motors_released"),
+                          "port": _port_state(fc).get("released")}
+        ctx.check(ev["released"]["currents"] == ["0", "0"],
+                  "the step currents read %s after the release", ev["released"]["currents"])
+        ctx.check(ev["released"]["status"] is True and ev["released"]["port"] is True,
+                  "the release is not reported: %s", ev["released"])
+        k0 = _kernel_position()
+        st, body = fc.post("/motion/jog", params={"x": "1"})
+        ev["jog_released"] = [st, _words(body)]
+        ctx.check(st == 409 and "released" in _words(body),
+                  "a jog while released -> %s %s", st, _words(body))
+        ctx.check(_kernel_position() == k0, "the kernel played something while released")
+        st, body = fc.post("/motion/energize")
+        ctx.check(st == 200, "POST /motion/energize -> %s %s", st, _words(body))
+        ctx.sleep(0.5)
+        ev["energized"] = {"currents": list(_step_currents()),
+                           "status": fc.status().get("motors_released"),
+                           "faults": hw.sysfs_int("cnc/faults")}
+        ctx.check(tuple(ev["energized"]["currents"]) == HOLD_CURRENTS and ev["energized"]["status"] is False,
+                  "not energized: %s", ev["energized"])
+        ctx.check(ev["energized"]["faults"] == 0, "a driver fault on energize: %s", ev["energized"]["faults"])
+
+        # Back to where the head was found, by the kernel's own measure.
+        ctx.sleep(0.6)
+        for _ in range(3):                  # one request moves 100 mm at most
+            back = x0 - kernel_xy_mm(ctx)[0]
+            if abs(back) < 0.05:
+                break
+            st, body = fc.post("/motion/jog", params={"x": "%.3f" % max(-100.0, min(100.0, back)),
+                                                     "feed": "2400"})
+            ctx.check(st == 200, "the return jog -> %s %s", st, _words(body))
+            _port_idle(ctx, fc)
+            ctx.sleep(0.6)
+        check_kernel_returned(ctx, ev, (x0, y0), tag="port")
+    machine_idle(ctx)
+    ctx.log("PASS: the port jogged beside the client, the cancel and the client's own line each stopped "
+            "a jog short, the bound held, and the release and the energize went through their routes")

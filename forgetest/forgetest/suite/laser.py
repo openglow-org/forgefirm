@@ -1244,3 +1244,98 @@ def pause_resume_lid_cancel(ctx):
     ctx.log("PASS: button paused the burn (emission 0, armed kept, latch unlocked) and resumed it; "
             "the lid then canceled it - emission 0 at +%s s, reset without alarm, returned (drift "
             "%.3f mm), button latch SET", zero_at, drift)
+
+
+def _port_jog_sampled(ctx, fc, params, samples, timeout=30.0):
+    """One jog through the controller port, sampled at 8 Hz until the port
+    says it is over. Returns the HTTP status and body of the jog request."""
+    st, body = fc.post("/motion/jog", params=params)
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        ctx.checkpoint()
+        smp = sample(ctx)
+        if smp:
+            samples.append(smp)
+        try:
+            ps = fc.get("/motion/state")[1]
+        except hw.HwError:
+            ps = None
+        if st != 200 or (isinstance(ps, dict) and ps.get("state") == "Idle" and not ps.get("port_jog")):
+            break
+        time.sleep(0.125)
+    return st, body
+
+
+@test("laser.port-dark", title="A panel jog under an open armed window ships dark",
+      subsystem="laser", kind="live", mode="grbl", est_min=3,
+      covers=_LASER_COVERS + [("forgectrl", "src/grblport.*")],
+      requires=["laser.emission-witness", "motion.port-jog"], actions=["button"],
+      steps=["Scrap under the head with 20 mm of free +X travel; lid closed; exhaust on.",
+             "Press the physical button when it lights white (the arm)."],
+      description="A 20 mm line at M3 S400/F600 with no M5 and no program end after it, so the "
+                  "armed window stays open with M3 modal and S above zero: the state in which an "
+                  "injected G1 would fire. The line itself must be witnessed lit, or the case "
+                  "proves nothing. Then POST /motion/jog takes the head back over the line and out "
+                  "again, through the controller port. The window must read armed before and "
+                  "after the jogs, and through both the kernel's LASER_ON sample count stays 0, "
+                  "the HV current stays at its idle reading, and the head's beam detector does "
+                  "not rise over its level before the jogs. The client then ends the job (M5, "
+                  "M2) and the window closes.")
+def port_dark(ctx):
+    ev = ctx.evidence
+    fc = ctx.forgectrl
+    with ctx.grbl() as g, LiveJob(ctx, g):
+        prepare(ctx, g)
+        base = sample(ctx)
+        ctx.check(base, "forgectrl /status or /cool/status unavailable")
+        ctx.check(not base["emission"], "emission_samples nonzero before the job (%s)", base["emission"])
+        ctx.ready(ARM_CUE % "20 mm +X")
+        ctx.arm_press()
+        jog_samples = []
+        try:
+            # No M5 and no M2: the window stays open, M3 S400 stays modal.
+            lit = run_and_sample(ctx, g, ["G91", "G21", "M3", "S400", "G1 X20 F600"])
+            peak = max((s["emission"] or 0 for s in lit), default=0)
+            ctx.check(peak > 0, "no emission witnessed on the G1: the dark jogs would prove nothing")
+
+            # The cut is over and dark again; the window is still open.
+            ok = ctx.wait_for(lambda: (sample(ctx) or {}).get("emission") == 0, 10, poll=0.125)
+            ctx.check(ok is not None, "emission_samples did not return to 0 after the G1")
+            before = sample(ctx)
+            ctx.check(before and before["armed"], "the armed window closed before the jogs: %s",
+                      before and before["phase"])
+            ctx.sleep(0.6)                  # past the port's sender-quiet interval
+
+            for params in ({"x": "-20", "feed": "600"}, {"x": "20", "feed": "2400"},
+                           {"x": "-20", "feed": "2400"}):
+                st, body = _port_jog_sampled(ctx, fc, params, jog_samples)
+                ctx.check(st == 200, "POST /motion/jog %s under the open window -> %s %s", params, st, body)
+                ctx.sleep(0.6)
+            after = sample(ctx)
+            ctx.check(after and after["armed"],
+                      "the armed window closed during the jogs: the dark samples were not under it")
+        finally:
+            ctx.clear_notice()
+        r = g.command("M5")
+        r += g.command("M2")
+        ctx.check(not any(x.startswith("error") for x in r), "the client could not end the job: %s", r)
+        ev["disarm_s"] = wait_disarm(ctx, 30)
+        ctx.check(ev["disarm_s"] is not None, "the armed window did not close after the program end")
+
+    lit_in_jog = [s for s in jog_samples if s["emission"]]
+    hv_max = max((s["hv"] for s in jog_samples if s["hv"] is not None), default=0)
+    beams = [s["beam"] for s in jog_samples if s.get("beam") is not None]
+    beam_rise = (max(beams) - before["beam"]) if beams and before.get("beam") is not None else None
+    ev.update({"emission_peak_g1": peak, "jog_samples": len(jog_samples),
+               "jog_emission_samples": len(lit_in_jog), "jog_hv_max": hv_max,
+               "jog_beam_rise": beam_rise, "trail": trail(jog_samples)})
+    ctx.log("G1 emission peak %s; %d samples across three port jogs: %d with emission, HV max %s, "
+            "beam detector rise %s", peak, len(jog_samples), len(lit_in_jog), hv_max, beam_rise)
+    ctx.check(len(jog_samples) >= 16, "only %d samples across the jogs", len(jog_samples))
+    ctx.check(not lit_in_jog, "a port jog fired under the open window: %d samples with emission, "
+              "first emission_samples %s", len(lit_in_jog), lit_in_jog[0]["emission"] if lit_in_jog else None)
+    ctx.check(hv_max <= HV_DARK_MAX, "HV current %s during a port jog (idle reads ~0)", hv_max)
+    ctx.check(beam_rise is not None and beam_rise < BEAM_DELTA_MIN,
+              "the head's beam detector rose %s during a port jog", beam_rise)
+    ctx.log("PASS: lit on the G1 (peak %s), and three port jogs under the same open window with M3 S400 "
+            "modal shipped dark by all three witnesses", peak)
