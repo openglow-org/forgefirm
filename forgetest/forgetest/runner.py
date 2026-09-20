@@ -541,19 +541,17 @@ class Context:
     def takeover(self):
         return Takeover(self.run.log, self.test.id)
 
-    def counters_rezeroed(self, start_reads=None):
+    def counters_rezeroed(self):
         """Tell the baseline the kernel position counters were re-zeroed
-        during this run. With no argument they were re-zeroed at the head's
-        starting position (cloud mode's connect clears them): counters at
-        (0,0,0) afterward mean the head is back where the run found it.
-        `start_reads` is for a re-zero taken somewhere else (a manual home
-        after an outbound jog): what the counters read, in the new frame,
-        with the head at its starting position."""
+        at the head's starting position during this run (cloud mode's
+        connect clears them): counters at (0,0,0) afterward mean the head
+        is back where the run found it."""
         cap = self.run.baseline_captured
         if cap and cap.get("position") is not None:
-            cap["position"] = [int(v) for v in start_reads] if start_reads is not None else [0, 0, 0]
-            self.log("position counters re-zeroed during the run; the baseline expects %s at the end"
-                     % (tuple(cap["position"]),))
+            cap["position"] = [0, 0, 0]
+            cap["rezero_declared"] = True   # the test vouches for the new frame
+            self.log("position counters re-zeroed at the starting position; the baseline "
+                     "expects (0,0,0) at the end")
 
     def mode_changed(self, mode):
         """Declare a deliberate controller-mode change for the operator:

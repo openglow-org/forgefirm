@@ -139,6 +139,49 @@ class BaselineTests(unittest.TestCase):
         self.assertTrue(items["position"].action.startswith("unrestorable"), items["position"].action)
         self.assertEqual(items["position"].found, [1000, 0, 0])
 
+    def test_a_lost_counter_frame_never_moves_the_head(self):
+        # The controller zeroes the step counters at every start and at
+        # every home, and rewrites its anchor then. A run that began at
+        # -6400 steps and restarted the controller ends at 0 with the head
+        # where it was: the difference is not a distance, and the hand-back
+        # must neither jog the head nor call it a leftover.
+        anchor = os.path.join(self.tmp, "grblhal.homed")
+        old_path, baseline.ANCHOR_PATH = baseline.ANCHOR_PATH, anchor
+        try:
+            with open(anchor, "w") as f:
+                f.write("0 0 0 4 startup")
+            self._pos(-6400, 0, 0)
+            b = self.bl()
+            cap = b.capture()
+            self.assertIsNotNone(cap["frame"])
+            os.unlink(anchor)                       # a controller start: a new anchor file
+            with open(anchor + ".new", "w") as f:
+                f.write("0 0 0 4 startup")
+            os.replace(anchor + ".new", anchor)
+            os.utime(anchor, ns=(5, 5))             # a freed inode can come straight back, inside one clock tick
+            self._pos(0, 0, 0)
+            left = b.enforce("post", captured=cap)
+            self.assertEqual([x.item for x in left], [])
+            self.assertTrue(any("re-zeroed its counters during the run" in l for l in self.lines), self.lines)
+            # the same counters with the frame intact are a displaced head, as before
+            self.lines.clear()
+            self._pos(-6400, 0, 0)
+            cap = b.capture()
+            self._pos(0, 0, 0)
+            left = b.enforce("post", captured=cap)
+            self.assertEqual([x.item for x in left], ["position"])
+            # and a test that vouches for the new frame is held to it
+            self._pos(-6400, 0, 0)
+            cap = b.capture()
+            os.utime(anchor, ns=(1, 1))             # re-zeroed, and declared (ctx.counters_rezeroed)
+            cap["position"], cap["rezero_declared"] = [0, 0, 0], True
+            self._pos(0, 0, 0)
+            self.assertEqual(b.enforce("post", captured=cap), [])
+            self._pos(1000, 0, 0)
+            self.assertEqual([x.item for x in b.enforce("post", captured=cap)], ["position"])
+        finally:
+            baseline.ANCHOR_PATH = old_path
+
     def test_the_counters_are_read_at_the_modes_scale(self):
         # 6400 steps is 30 mm at x32 (a return within the bound; on the
         # host it stops at the missing controller) and 120 mm at x8

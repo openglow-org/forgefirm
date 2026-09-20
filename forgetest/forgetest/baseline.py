@@ -214,6 +214,23 @@ def write_led(name, value):
         f.write(str(value))
 
 
+# The GRBL controller zeroes the kernel's step counters at every start (the
+# lens reference) and at every home, and rewrites its home anchor each time.
+# The anchor's identity is therefore the counters' frame: if it changed
+# during a run, the counters at the end are not in the frame of the counters
+# at the start, and their difference is not a distance the head traveled.
+ANCHOR_PATH = os.environ.get("FORGETEST_ANCHOR", "/run/grblhal.homed")
+
+
+def counter_frame():
+    """What identifies the frame the step counters are in, or None."""
+    try:
+        st = os.stat(ANCHOR_PATH)
+        return [st.st_ino, st.st_mtime_ns]
+    except OSError:
+        return None
+
+
 def read_position():
     """(x, y, z) step counters, or None when unreadable."""
     try:
@@ -445,7 +462,8 @@ class Baseline:
     # -- capture -------------------------------------------------------
     def capture(self):
         """Record the preserved state before a run."""
-        cap = {"sysfs": {}, "position": read_position(), "settings": None, "mode": None}
+        cap = {"sysfs": {}, "position": read_position(), "frame": counter_frame(),
+               "settings": None, "mode": None}
         for attr in PRESERVED_SYSFS:
             cap["sysfs"][attr] = hw.sysfs_read(attr)
         st, body = self.fc_get("/settings")
@@ -829,7 +847,19 @@ class Baseline:
         # action re-zeroes them at its start, so they preserve nothing.
         was = captured.get("position")
         now = read_position()
-        if was is not None and now is not None and now != was and not self.cloud_mode():
+        # A controller start or a home during the run re-zeroed the counters
+        # wherever the head then stood. Unless the test said where that was
+        # (ctx.counters_rezeroed), the two readings share no frame: on the
+        # bench reference a head that had not moved was "returned" 30 mm into
+        # the stop blocks this way, twice. Nothing is moved on a guess.
+        frame_lost = ("frame" in captured and captured["frame"] != counter_frame()
+                      and not captured.get("rezero_declared"))
+        if was is not None and now is not None and now != was and frame_lost and not self.cloud_mode():
+            self.log("position: %s, and %s when the run began, but the controller re-zeroed its "
+                     "counters during the run (a controller start or a home): the two are not in "
+                     "one frame, so the head's position cannot be judged and the head is not moved"
+                     % (now, was))
+        elif was is not None and now is not None and now != was and not self.cloud_mode():
             spm = self._counter_spm
             act = self._return_head(was, now, spm)
             if position_quantized(was, now, spm):

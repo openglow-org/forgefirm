@@ -497,9 +497,23 @@ def events_stream(ctx):
     fc = hw.Forgectrl()
     streams = []
     try:
-        for src in ("127.0.0.2", "127.0.0.3", "127.0.0.4"):
-            s = _EventStream(fc.base, src)
-            streams.append(s)
+        # A stream an earlier test closed keeps its place until the daemon's
+        # next write to it (its keep-alive), so the three places may not be
+        # free yet: that is the daemon as documented, and the last part of
+        # this test measures it. The three are opened once they can be.
+        deadline = time.time() + 25
+        while True:
+            for src in ("127.0.0.2", "127.0.0.3", "127.0.0.4"):
+                streams.append(_EventStream(fc.base, src))
+            if all(s.status == 200 for s in streams) or time.time() > deadline:
+                break
+            ctx.log("an earlier stream still holds a place (%s): waiting for it to be given back",
+                    [s.status for s in streams])
+            for s in streams:
+                s.close()
+            streams = []
+            ctx.sleep(3)
+        for s, src in zip(streams, ("127.0.0.2", "127.0.0.3", "127.0.0.4")):
             hello = s.text(1.0)
             ctx.check(s.status == 200 and "text/event-stream" in s.head and "event: hello" in hello,
                       "GET /events from %s -> %s, %r", src, s.status, hello[:120])

@@ -1990,8 +1990,6 @@ def manual_home(ctx):
     try:
         with ctx.grbl() as g:
             clean_slate(ctx, g)
-            machine_idle(ctx)
-            k_start = _kernel_position()
             r = g.command("$J=G91X30F2400")         # away from wherever the origin was
             ctx.check(not any(x.startswith("error") for x in r), "the outbound jog was refused: %s", r)
             moved_out = True
@@ -2012,10 +2010,6 @@ def manual_home(ctx):
                     rep["state"], rep["MPos"], k0, k1, ev["homed_axes"], ev["home_source"], ev["pos"])
             ctx.check(k1[3:] == k0[3:], "$H played pulse bytes: %s -> %s", k0[3:], k1[3:])
             ctx.check(k1[0] == 0 and k1[1] == 0, "the kernel counters were not cleared: %s", k1)
-            # The home cleared the counters out here, not where the run found
-            # the head: the hand-back is told what the start reads in the new
-            # frame, or it would "return" the head by the length of the jog.
-            ctx.counters_rezeroed([k_start[i] - k0[i] for i in range(3)])
             ctx.check(abs(rep["MPos"][0] - want[0]) < 0.01 and abs(rep["MPos"][1] - want[1]) < 0.01,
                       "X and Y are %s, not manual_home %s", rep["MPos"][:2], want)
             ctx.check(rep["MPos"][2] == z0, "Z changed across the home: %s -> %s", z0, rep["MPos"][2])
@@ -2042,6 +2036,18 @@ def manual_home(ctx):
                 r = g.command("$J=G91X-30F2400")    # back to where the test found the head
                 ctx.check(not any(x.startswith("error") for x in r), "the return jog was refused: %s", r)
                 wait_idle(ctx, g)
+            machine_idle(ctx)
+            # The home cleared the kernel's counters 30 mm out, so the return
+            # leaves them at -30 mm with the head where the run found it. The
+            # hand-back compares counters, and a controller start zeroes them:
+            # left like this, the next test that restarts the controller reads
+            # as 30 mm out of place and the hand-back "returns" a head that
+            # never moved (on the bench reference it drove the head into the
+            # stop blocks). One more start, with the head back, leaves the
+            # counters at zero where the run began, which is what the rest of
+            # the catalog counts on.
+            _drop_reference(ctx, fc)
+            ctx.counters_rezeroed()
     machine_idle(ctx)
     ctx.log("PASS: a manual home shipped nothing, declared %s, turned the soft limits on, kept Z, "
             "and reads back as manual", want)
