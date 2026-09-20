@@ -16,7 +16,7 @@ import unittest
 
 import helpers
 from forgetest import baseline, catalog
-from forgetest.runner import Context, Run
+from forgetest.runner import Context, Failed, Run
 from forgetest.suite import setup
 
 IDS = ("setup.gate-blocks-controllers", "setup.override-until-reboot",
@@ -375,6 +375,26 @@ class CloudDisabledSurfaceTests(unittest.TestCase):
                 return 409, "cloud mode is not enabled on this machine"
             return None
         self.fake.on_post = on_post
+        self.list_lies = None               # a test sets this to break the list one way
+
+        def on_get(path, query):
+            if path != "/extensions":
+                return None
+            s = self.fake.state["settings"]
+            on = s.get("cloud_enabled") == "1"
+            roles = [{"role": role, "provider": prov, "kind": kind, "select_key": key, "fallback": back,
+                      "active": on and s.get(key) == prov}
+                     for role, prov, kind, key, back in (("homing", "gfcloud", "runner-fd", "homing_mode", "none"),
+                                                         ("controller", "cloud", "supervised", "controller_mode",
+                                                          "grbl"))]
+            if self.list_lies == "stale-active":
+                roles[0]["active"] = True
+            if self.list_lies == "always-on":
+                on = True
+            return 200, {"extensions": [{"id": "cloud", "name": "Glowforge cloud mode", "builtin": True,
+                                         "enabled": on, "enable_key": "cloud_enabled", "setup_step": "cloud",
+                                         "tab": "gfcloud", "roles": roles}]}
+        self.fake.on_get = on_get
 
     def tearDown(self):
         self.fake.stop()
@@ -384,6 +404,13 @@ class CloudDisabledSurfaceTests(unittest.TestCase):
         run = Run("test", t.id, t.title)
         t.fn(Context(run, None, t))
         return run
+
+    def test_a_list_that_disagrees_with_the_settings_fails(self):
+        for lie in ("always-on", "stale-active"):
+            self.list_lies = lie
+            self.fake.state["settings"].update({"cloud_enabled": "1", "homing_mode": "gfcloud"})
+            with self.assertRaises(Failed, msg=lie):
+                self.run_test()
 
     def test_refusals_and_restore(self):
         run = self.run_test()

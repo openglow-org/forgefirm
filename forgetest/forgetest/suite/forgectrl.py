@@ -741,7 +741,7 @@ def scoped_tokens(ctx):
         ctx.check(st == 400 and "not a capability" in _words_of(body),
                   "a capability outside the list -> %s %s", st, _words_of(body)[:120])
         hub = create("forgetest hub", "machine.read,camera.lid")
-        pend = create("forgetest pendant", "motion.jog")
+        pend = create("forgetest jogger", "motion.jog")
         view = create("forgetest viewer", "camera.lid")
 
         passed = {}
@@ -774,7 +774,7 @@ def scoped_tokens(ctx):
                  lambda: lan(None, "POST", "/settings?token=" + hub, data={"ui_units": units})),
                 ("a stranger's token", "authentication required",
                  lambda: lan("fft_" + "0" * 32, "GET", "/status")),
-                ("the pendant on /status", "does not hold machine.read", lambda: lan(pend, "GET", "/status"))):
+                ("the jog token on /status", "does not hold machine.read", lambda: lan(pend, "GET", "/status"))):
             st, body = call()
             refused[name] = [st, _words_of(body)[:120]]
             ctx.check(st == 403 and want in _words_of(body), "%s -> %s %s (wanted 403 %r)", name, st,
@@ -784,12 +784,12 @@ def scoped_tokens(ctx):
 
         # A write with a scoped token and nothing else: no session, no panel token.
         st, body = lan(pend, "POST", "/motion/jog", data={"x": "1", "feed": "1200"})
-        ctx.check(st == 200, "the pendant token's jog -> %s %s", st, _words_of(body)[:120])
+        ctx.check(st == 200, "the jog token's jog -> %s %s", st, _words_of(body)[:120])
         ctx.wait_for(lambda: abs(kernel_xy_mm(ctx)[0] - x0 - 1.0) < 0.02, 10, poll=0.1)
         machine_idle(ctx)
         moved = kernel_xy_mm(ctx)[0] - x0
         ev["jog_mm"] = round(moved, 3)
-        ctx.log("the pendant token jogged the head %.3f mm from the LAN with no session", moved)
+        ctx.log("the jog token jogged the head %.3f mm from the LAN with no session", moved)
         ctx.check(abs(moved - 1.0) < 0.02, "the jog moved %.3f mm, not 1", moved)
 
         # Plain HTTP from the LAN: refused, and the log says which token crossed in the clear.
@@ -827,10 +827,10 @@ def scoped_tokens(ctx):
         st, listed = fc.get("/tokens")
         mine = {t["name"]: t for t in listed.get("tokens", []) if t.get("name", "").startswith("forgetest ")}
         ev["listed"] = {n: {k: t[k] for k in ("id", "caps", "last_used")} for n, t in mine.items()}
-        ctx.check(set(mine) == {"forgetest hub", "forgetest pendant", "forgetest viewer"},
+        ctx.check(set(mine) == {"forgetest hub", "forgetest jogger", "forgetest viewer"},
                   "the list: %s", sorted(mine))
         ctx.check(mine["forgetest hub"]["caps"] == ["machine.read", "camera.lid"] and
-                  mine["forgetest pendant"]["caps"] == ["motion.jog"], "the capabilities listed: %s", ev["listed"])
+                  mine["forgetest jogger"]["caps"] == ["motion.jog"], "the capabilities listed: %s", ev["listed"])
         ctx.check(all(t["last_used"] > 0 for t in mine.values()), "a used token reads as never used: %s", ev["listed"])
         text = json.dumps(listed)
         ctx.check(hub[4:] not in text and pend[4:] not in text and view[4:] not in text and "sha" not in text and

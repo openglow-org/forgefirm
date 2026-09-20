@@ -896,12 +896,17 @@ def ssh_until_reboot(ctx):
 @test("setup.cloud-disabled-surface", title="Nothing points at the cloud while it is off",
       subsystem="setup", kind="auto", mode="grbl", est_min=1,
       covers=[("forgectrl", "src/main.c"), ("forgectrl", "src/super.c"), ("forgectrl", "src/settings.*"),
-              ("forgectrl", "src/wiz.c"), ("forgectrl", "src/hooks.h")],
+              ("forgectrl", "src/wiz.c"), ("forgectrl", "src/hooks.h"), ("forgectrl", "src/builtin.*")],
       requires=["forgectrl.settings-bounds"],
       description="The test turns cloud mode off itself with one write and puts every setting "
-                  "back as found. cloud_enabled=0 takes the gfcloud homing and the cloud boot mode "
-                  "down with it, as the cloud step does. With it at 0, POST /settings "
-                  "controller_mode=cloud and homing_mode=gfcloud are refused (409) and leave the "
+                  "back as found. GET /extensions lists cloud mode as a built-in with its two "
+                  "roles (homing gfcloud, controller cloud), enabled as cloud_enabled says and each "
+                  "role active exactly when its setting selects it. cloud_enabled=0 takes the "
+                  "gfcloud homing and the cloud boot mode "
+                  "down with it, as the cloud step does, and the list then reads off with no role "
+                  "active. With it at 0, POST /settings "
+                  "controller_mode=cloud and homing_mode=gfcloud are refused (409, in the words the "
+                  "table gives each role) and leave the "
                   "settings unchanged, cloud_enabled=1 without the typed phrase is refused (400) "
                   "and leaves it at 0, and POST /mode controller=cloud is refused (409) with a "
                   "message that names cloud mode, the machine staying in GRBL mode.")
@@ -912,6 +917,29 @@ def cloud_disabled_surface(ctx):
     found = fc.settings()
     prior = found.get("cloud_enabled") or ""
     ev["found"] = {k: found.get(k) for k in ("cloud_enabled", "homing_mode", "controller_mode")}
+
+    def cloud_entry():
+        st, doc = fc.get("/extensions")
+        ctx.check(st == 200 and isinstance(doc, dict), "GET /extensions -> %s", st)
+        ext = [e for e in doc.get("extensions", []) if e.get("id") == "cloud"]
+        ctx.check(len(ext) == 1, "GET /extensions lists cloud mode %d times", len(ext))
+        return ext[0]
+
+    # The list agrees with the settings as found.
+    e = cloud_entry()
+    ev["extension_found"] = {"enabled": e.get("enabled"), "roles": e.get("roles")}
+    ctx.check(e.get("builtin") is True and e.get("enable_key") == "cloud_enabled" and e.get("tab") == "gfcloud"
+              and e.get("setup_step") == "cloud", "the cloud entry: %s", e)
+    ctx.check(e.get("enabled") is (prior == "1"), "the list says enabled=%s with cloud_enabled=%r",
+              e.get("enabled"), prior)
+    roles = {r["role"]: r for r in e.get("roles", [])}
+    ctx.check(set(roles) == {"homing", "controller"} and roles["homing"]["provider"] == "gfcloud"
+              and roles["homing"]["fallback"] == "none" and roles["controller"]["provider"] == "cloud"
+              and roles["controller"]["fallback"] == "grbl", "the cloud entry's roles: %s", e.get("roles"))
+    for r in roles.values():
+        want = prior == "1" and found.get(r["select_key"]) == r["provider"]
+        ctx.check(r["active"] is want, "role %s reads active=%s with %s=%r", r["role"], r["active"],
+                  r["select_key"], found.get(r["select_key"]))
     try:
         if prior != "0":
             # the one write sweeps what pointed at the cloud
@@ -927,12 +955,18 @@ def cloud_disabled_surface(ctx):
                           "cloud_enabled=0 left controller_mode at %r, expected grbl",
                           swept.get("controller_mode"))
         ctx.check(fc.settings().get("cloud_enabled") == "0", "cloud_enabled does not read 0")
+        off = cloud_entry()
+        ev["extension_off"] = {"enabled": off.get("enabled"), "active": [r["active"] for r in off["roles"]]}
+        ctx.check(off.get("enabled") is False and not any(r["active"] for r in off["roles"]),
+                  "the list with cloud mode off: %s", ev["extension_off"])
         before = fc.settings()
-        for key, val in (("controller_mode", "cloud"), ("homing_mode", "gfcloud")):
+        for key, val, words in (("controller_mode", "cloud", "cloud mode is not enabled on this machine"),
+                                ("homing_mode", "gfcloud", "cloud homing needs cloud mode enabled")):
             st, body = fc.post("/settings", data={key: val})
             ev["settings %s=%s" % (key, val)] = st
             ctx.log("POST /settings %s=%s -> %s %s", key, val, st, body if isinstance(body, str) else "")
             ctx.check(st == 409, "%s=%s with cloud off -> %s, expected 409", key, val, st)
+            ctx.check(isinstance(body, str) and words in body, "%s=%s was refused in other words: %r", key, val, body)
         # the pair in one request is refused too: the request's own switch counts
         st, body = fc.post("/settings", data={"cloud_enabled": "0", "controller_mode": "cloud"})
         ctx.check(st == 409, "cloud_enabled=0 with controller_mode=cloud -> %s, expected 409", st)
@@ -972,6 +1006,9 @@ def cloud_disabled_surface(ctx):
     for key in ("cloud_enabled", "homing_mode", "controller_mode"):
         ctx.check((after.get(key) or "") == (found.get(key) or ""), "%s not restored: %r, was %r",
                   key, after.get(key), found.get(key))
+    back = cloud_entry()
+    ctx.check(back.get("enabled") == e.get("enabled") and back.get("roles") == e.get("roles"),
+              "the list did not come back as found: %s, was %s", back, e)
 
 
 # ---------------------------------------------------------- the operator

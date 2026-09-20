@@ -93,6 +93,7 @@ NON_BEHAVIORAL = [
     ("*", ".vscode/**"),
     ("*", ".env.example"),
     ("forgectrl", "tools/**"),        # host-side dev tools (panel dev server)
+    ("forgectrl", "examples/**"),     # clients of the remote API, run on another computer
 ]
 
 
