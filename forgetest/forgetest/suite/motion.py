@@ -2260,9 +2260,12 @@ def _job_post(fc, program, name="forgetest", **fields):
                    headers={"Content-Type": "multipart/form-data; boundary=%s" % mark})
 
 
-def _job_wait(ctx, fc, timeout):
-    """Until the job is over; the record, and the farthest the kernel saw X go."""
-    x0 = kernel_xy_mm(ctx)[0]
+def _job_wait(ctx, fc, timeout, x0=None):
+    """Until the job is over; the record, and the farthest the kernel saw X go
+    from x0. A caller that reads the distance passes the X it took before it
+    posted the job: by the time this is called the head is already moving."""
+    if x0 is None:
+        x0 = kernel_xy_mm(ctx)[0]
     far = 0.0
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -2361,7 +2364,7 @@ def job_runner(ctx):
             ctx.check(st == 409 and "a job (forgetest) holds the machine" in _words(body),
                       "%s beside the job -> %s %s", name, st, _words(body)[:160])
         ev["refused_beside_the_job"] = beside
-        rec, far = _job_wait(ctx, fc, 40)
+        rec, far = _job_wait(ctx, fc, 40, x0)
         x1 = kernel_xy_mm(ctx)[0]
         ev["dark_job"] = {"record": rec, "farthest_mm": round(far, 3), "kernel": [x0, x1]}
         ctx.log("the dark job: %s; the kernel saw %.3f mm out and ended %.3f from the start",
