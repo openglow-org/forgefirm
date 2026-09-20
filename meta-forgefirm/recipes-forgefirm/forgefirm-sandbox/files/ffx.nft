@@ -1,0 +1,44 @@
+#!/usr/sbin/nft -f
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+#
+# The extension sandbox's network rules (forgefirm-sandbox loads them from
+# rcS, before the network starts). Every packet sent from a socket that an
+# extension account owns (ffx0 to ffx31, uid 800 to 831) is refused: on
+# loopback, on the machine's own LAN address, IPv4 and IPv6 alike. That is
+# what keeps a package off the Grbl port, off forgectrl's listeners, and off
+# the controller's report route, whatever else fails.
+#
+# The rules sit on the output hook and match the sending socket's uid, so
+# they need no connection tracking, and no packet of the firmware's own pays
+# for more than one comparison. A refused TCP connect gets a reset, so it
+# fails at once instead of timing out; anything else is dropped, which the
+# sender sees as EPERM.
+#
+# The one way through is the allow map: uid -> a chain holding that package's
+# declared destinations. Whatever starts a package adds the element and the
+# chain, and removes both when the package stops; a chain that accepts
+# nothing returns here and the packet is refused. Loading this file again
+# replaces the whole table, allowlists included: it fails closed.
+
+table inet ffx
+delete table inet ffx
+
+table inet ffx {
+	map allow {
+		typeof meta skuid : verdict
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		meta skuid 800-831 jump pool
+	}
+
+	chain pool {
+		meta skuid vmap @allow
+		meta l4proto tcp counter reject with tcp reset
+		counter drop
+	}
+}

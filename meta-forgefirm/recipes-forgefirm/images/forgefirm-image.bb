@@ -64,6 +64,13 @@ IMAGE_INSTALL:append = " grblhal-glowforge forgectrl gfhome gfcloud v4l-utils fw
 # forgefirm-persist: the boot timestamp and the random seed on /data.
 IMAGE_INSTALL:append = " forgefirm-users forgefirm-hostname forgefirm-banner forgefirm-persist"
 
+# forgefirm-sandbox: what an extension package is held by, in place before
+# any package exists: the ffx account pool, the cgroup v2 tree with the cpu,
+# memory, and pids controllers, and the nftables rules (nft comes with it)
+# that refuse everything a pool uid sends, loaded from rcS before the
+# network starts.
+IMAGE_INSTALL:append = " forgefirm-sandbox"
+
 # The rootfs mounts read-only on both images; /data (p3) is the writable
 # partition. read-only-rootfs is poky's feature for it: the root line of
 # /etc/fstab (the BSP's, already ro) and ROOTFS_READ_ONLY in

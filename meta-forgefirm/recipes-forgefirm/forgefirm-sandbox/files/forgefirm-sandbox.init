@@ -1,0 +1,94 @@
+#!/bin/sh
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+### BEGIN INIT INFO
+# Provides:          forgefirm-sandbox
+# Required-Start:    mountkernfs
+# Required-Stop:
+# Default-Start:     S
+# Default-Stop:
+# Short-Description: ForgeFIRM extension sandbox: the cgroup tree and the deny rules
+### END INIT INFO
+
+# Runs at S30 in rcS, before the network starts (rc5). Two jobs, and each
+# is told apart in what it prints and in its exit status, because whatever
+# starts extension services checks both in the kernel and starts nothing
+# when either is missing:
+#
+#   the cgroup v2 tree   mounted at /sys/fs/cgroup, the cpu, memory, and pids
+#                        controllers handed down to /sys/fs/cgroup/ffx and
+#                        from there to the group each package gets. The ffx
+#                        group is idle-class against everything outside it:
+#                        a runnable task in the root group always goes first.
+#   the deny rules       table inet ffx from /etc/forgefirm/ffx.nft: a pool
+#                        uid sends nothing, loopback included.
+#
+# The firmware's own processes stay in the root group, which has no limit
+# and no controller file that could give it one.
+
+CG=/sys/fs/cgroup
+RULES=/etc/forgefirm/ffx.nft
+CONTROLLERS="cpu memory pids"
+
+cgroup_mounted () {
+  awk -v m="$CG" '$2 == m && $3 == "cgroup2" { f = 1 } END { exit !f }' /proc/mounts
+}
+
+# hand_down <group dir>: every controller into the group's subtree_control.
+hand_down () {
+  for c in $CONTROLLERS; do
+    echo "+$c" > "$1/cgroup.subtree_control" 2>/dev/null || return 1
+  done
+}
+
+start_cgroups () {
+  cgroup_mounted || mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 "$CG" || return 1
+  hand_down "$CG" || return 1
+  mkdir -p "$CG/ffx" || return 1
+  hand_down "$CG/ffx" || return 1
+  # An idle group's weight is the scheduler's own lowest; the kernel refuses
+  # a cpu.weight written on top of it.
+  echo 1 > "$CG/ffx/cpu.idle" || return 1
+}
+
+start_rules () {
+  /usr/sbin/nft -f "$RULES"
+}
+
+status () {
+  rc=0
+  if cgroup_mounted && [ -d "$CG/ffx" ]; then
+    echo "cgroups: $CG/ffx controls: $(cat "$CG/ffx/cgroup.subtree_control")"
+  else
+    echo "cgroups: not set up"; rc=1
+  fi
+  if /usr/sbin/nft list table inet ffx >/dev/null 2>&1; then
+    echo "deny rules: loaded"
+  else
+    echo "deny rules: NOT loaded"; rc=1
+  fi
+  return $rc
+}
+
+case "$1" in
+  start|restart|reload|force-reload)
+    rc=0
+    start_cgroups || { echo "forgefirm-sandbox: the cgroup tree could not be set up"; rc=1; }
+    start_rules || { echo "forgefirm-sandbox: the deny rules did not load"; rc=1; }
+    exit $rc
+    ;;
+  stop)
+    ;;
+  status)
+    status
+    exit $?
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+
+exit 0
