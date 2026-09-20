@@ -28,6 +28,7 @@ from .setup_dark import run_check, Restore
 SHEET_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/wizrun.h"),
                 ("forgectrl", "src/lens.*"), ("forgectrl", "src/sheet.*"),
                 ("forgectrl", "src/font_hershey.*"), ("forgectrl", "src/jobstream.*"),
+                ("forgectrl", "src/jobrun.*"), ("forgectrl", "src/lease.*"),
                 ("forgectrl", "src/curverec.*"), ("forgectrl", "src/wizdark.*"),
                 ("forgectrl", "src/wiz.*"), ("forgectrl", "src/setup.*"),
                 ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.*"),

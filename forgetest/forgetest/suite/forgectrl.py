@@ -584,7 +584,7 @@ def _text(body):
       subsystem="forgectrl", kind="auto", est_min=2,
       covers=[("forgectrl", "src/lease.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/status.*"),
               ("forgectrl", "src/wizdark.*"), ("forgectrl", "src/diag.*"), ("forgectrl", "src/curverec.*"),
-              ("forgectrl", "src/update.*"), ("forgectrl", "src/logs.*"), ("forgectrl", "src/super.*"),
+              ("forgectrl", "src/jobrun.*"), ("forgectrl", "src/update.*"), ("forgectrl", "src/logs.*"), ("forgectrl", "src/super.*"),
               ("forgectrl", "src/events.*")],
       description="The switches check is started and left waiting at its first prompt: it moves "
                   "nothing, and it holds the machine lease for as long as it waits. /status must "

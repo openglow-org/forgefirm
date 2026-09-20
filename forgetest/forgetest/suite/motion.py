@@ -2236,3 +2236,191 @@ def port_jog(ctx):
     machine_idle(ctx)
     ctx.log("PASS: the port jogged beside the client, the cancel and the client's own line each stopped "
             "a jog short, the bound held, and the release and the energize went through their routes")
+
+
+# ---------------------------------------------------------------- the job runner
+
+def _job(fc):
+    st, body = fc.get("/job")
+    if st != 200 or not isinstance(body, dict):
+        raise hw.HwError("forgectrl /job -> %s %s" % (st, body))
+    return body
+
+
+def _job_post(fc, program, name="forgetest", **fields):
+    """POST /job the way a client does: a multipart form, the program as
+    the file part."""
+    mark = "forgetestJobBoundary7d1"
+    form = ([("name", name)] if name is not None else []) + sorted(fields.items())
+    body = "".join('--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n%s\r\n' % (mark, k, v)
+                   for k, v in form)
+    body += ('--%s\r\nContent-Disposition: form-data; name="program"; filename="job.gcode"\r\n'
+             'Content-Type: text/plain\r\n\r\n%s\r\n--%s--\r\n' % (mark, program, mark))
+    return fc.post("/job", data=body.encode("ascii"),
+                   headers={"Content-Type": "multipart/form-data; boundary=%s" % mark})
+
+
+def _job_wait(ctx, fc, timeout):
+    """Until the job is over; the record, and the farthest the kernel saw X go."""
+    x0 = kernel_xy_mm(ctx)[0]
+    far = 0.0
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        far = max(far, abs(kernel_xy_mm(ctx)[0] - x0))
+        if _job(fc)["state"] != "running":
+            break
+        ctx.sleep(0.1)
+    return _job(fc), far
+
+
+def _lease_holder(fc):
+    return ((fc.status().get("lease") or {}).get("holder") or {})
+
+
+@test("motion.job", title="The job runner: a posted program runs with the daemon as its sender",
+      subsystem="motion", kind="auto", mode="grbl", est_min=3,
+      covers=_MOTION_COVERS + [("forgectrl", "src/jobrun.*"), ("forgectrl", "src/jobpost.*"),
+                               ("forgectrl", "src/jobstream.*"), ("forgectrl", "src/lease.*"),
+                               ("forgectrl", "src/main.c"), ("forgectrl", "src/status.*")],
+      requires=["motion.jog-roundtrip"],
+      steps=["Bed clear; the head needs 60 mm of free travel toward +X. Nobody touches the gantry."],
+      description="POST /job takes a G-code program as a multipart form and runs it with the daemon "
+                  "as the machine's one sender. A program with a $ line, and one with no name, are "
+                  "refused with 400 and nothing moved. With the suite connected as a Grbl client the "
+                  "job is refused with 409 (a sender is connected) and nothing moved. A dark program "
+                  "(out 20 mm, a dwell, back) then plays: while it does, /status names job:forgetest "
+                  "as the lease holder of kind sender, GET /job reports it running, and a second job, "
+                  "a port jog, and a settings write are each refused in the holder's name. At its "
+                  "end the record says done with every line and the runner's own M2 acknowledged, no "
+                  "discharge and no LASER_ON sample, the kernel's counters saw the 20 mm and are back "
+                  "where they began, and the lease is free. POST /job/abort then stops a long move "
+                  "short: the record says failed (aborted), the controller is in its alarm state, and "
+                  "the lease is free. A job sent into the alarm without unlock fails at its first "
+                  "line with nothing moved; the same job with unlock=1 clears the alarm with the "
+                  "runner's own $X and returns the head to where it was found.")
+def job_runner(ctx):
+    ev = ctx.evidence
+    fc = hw.Forgectrl()
+    machine_idle(ctx)
+    x0, y0 = kernel_start(ctx)
+    rest = _job(fc)
+    ev["record_keys"] = sorted(rest)
+    ctx.check({"state", "owner", "program", "lines", "sent", "acked", "elapsed_s", "lit", "emission",
+               "reason"} <= set(rest), "GET /job lacks keys: %s", sorted(rest))
+    ctx.check(rest["state"] != "running", "a job is already running: %s", rest)
+    ctx.check(not _lease_holder(fc), "the machine is not free at the start: %s", _lease_holder(fc))
+
+    # Refused at the door, nothing moved.
+    refused = {}
+    st, body = _job_post(fc, "G21\n$X\nG91\nG1 X5 F1200\n")
+    refused["a $ line"] = [st, _words(body)[:160]]
+    ctx.check(st == 400 and "line 2" in _words(body) and "$ command" in _words(body),
+              "a program with a $ line -> %s %s", st, _words(body)[:160])
+    st, body = _job_post(fc, "G21\nG91\nG1 X5 F1200\n", name=None)
+    refused["no name"] = [st, _words(body)[:160]]
+    ctx.check(st == 400 and "name" in _words(body), "a job with no name -> %s %s", st, _words(body)[:160])
+    with ctx.grbl() as g:
+        clean_slate(ctx, g)
+        # The lease asks the controller's published state, which follows the connection.
+        ok = ctx.wait_for(lambda: ((fc.status().get("lease") or {}).get("observed") or {}).get("sender"),
+                          10, poll=0.2)
+        ctx.check(ok is not None, "the controller never reported the suite's client as connected")
+        st, body = _job_post(fc, "G21\nG91\nG1 X5 F1200\n")
+        refused["a connected client"] = [st, _words(body)[:160]]
+        ctx.check(st == 409 and "sender is connected" in _words(body),
+                  "a job beside a connected Grbl client -> %s %s", st, _words(body)[:160])
+    ev["refused_at_the_door"] = refused
+    ctx.check(abs(kernel_xy_mm(ctx)[0] - x0) < 0.01, "a refused job moved the head")
+    ok = ctx.wait_for(lambda: not ((fc.status().get("lease") or {}).get("observed") or {}).get("sender"),
+                      10, poll=0.2)
+    ctx.check(ok is not None, "the controller still reports the suite's client as connected")
+
+    moved = 0.0
+    try:
+        # A dark program plays, and holds the machine while it does.
+        st, body = _job_post(fc, "(forgetest motion.job)\nG21\nG91\nG1 X20 F1200 ; out\nG4 P2\n"
+                                 "G1 X-20 F1200\nG90\n")
+        ctx.check(st == 200 and isinstance(body, dict) and body.get("state") == "running",
+                  "POST /job -> %s %s", st, _words(body)[:200])
+        ok = ctx.wait_for(lambda: _lease_holder(fc).get("owner") == "job:forgetest", 5, poll=0.1)
+        held = _lease_holder(fc)
+        ev["holder"] = held
+        ctx.log("the lease while the job plays: %s", held)
+        ctx.check(ok is not None and held.get("kind") == "sender" and "forgetest" in (held.get("words") or ""),
+                  "the lease does not name the job: %s", held)
+        rec = _job(fc)
+        ctx.check(rec["state"] == "running" and rec["owner"] == "job:forgetest" and rec["program"] is True
+                  and rec["lines"] == 6, "the record while it plays: %s", rec)
+        beside = {}
+        for name, call in (("a second job", lambda: _job_post(fc, "G21\n", name="second")),
+                           ("a port jog", lambda: fc.post("/motion/jog", params={"x": "1"})),
+                           ("a settings write", lambda: fc.post("/settings", params={
+                               "ui_units": fc.settings().get("ui_units") or "metric"}))):
+            st, body = call()
+            beside[name] = [st, _words(body)[:160]]
+            ctx.check(st == 409 and "a job (forgetest) holds the machine" in _words(body),
+                      "%s beside the job -> %s %s", name, st, _words(body)[:160])
+        ev["refused_beside_the_job"] = beside
+        rec, far = _job_wait(ctx, fc, 40)
+        x1 = kernel_xy_mm(ctx)[0]
+        ev["dark_job"] = {"record": rec, "farthest_mm": round(far, 3), "kernel": [x0, x1]}
+        ctx.log("the dark job: %s; the kernel saw %.3f mm out and ended %.3f from the start",
+                rec, far, x1 - x0)
+        ctx.check(rec["state"] == "done" and rec["reason"] == "", "the job did not end well: %s", rec)
+        ctx.check(rec["sent"] == rec["acked"] == rec["lines"] + 1,
+                  "lines %s, sent %s, acked %s (the runner's M2 is the one more)",
+                  rec["lines"], rec["sent"], rec["acked"])
+        ctx.check(rec["lit"] is False and rec["emission"]["laser_on_samples"] == 0,
+                  "a dark job's witnesses: %s", rec["emission"])
+        ctx.check(19.0 < far < 21.0, "the kernel saw %.3f mm of the 20", far)
+        ctx.check(abs(x1 - x0) < 0.1, "the job did not end where it began: %.3f mm off", x1 - x0)
+        ctx.check(not _lease_holder(fc), "the lease was not given back: %s", _lease_holder(fc))
+
+        # The abort stops a long move short.
+        st, body = _job_post(fc, "G21\nG91\nG1 X40 F300\nG90\n")
+        ctx.check(st == 200, "the long job -> %s %s", st, _words(body)[:200])
+        ctx.sleep(2.0)
+        st, body = fc.post("/job/abort")
+        ctx.check(st == 200 and isinstance(body, dict) and body.get("state") == "failed"
+                  and "aborted" in body.get("reason", ""), "POST /job/abort -> %s %s", st, _words(body)[:200])
+        ctx.sleep(1.0)
+        moved = kernel_xy_mm(ctx)[0] - x0
+        after = _port_state(fc)
+        ev["abort"] = {"record": body, "moved_mm": round(moved, 3), "controller": after.get("state")}
+        ctx.log("aborted a 40 mm move at %.3f mm; the controller is in %s", moved, after.get("state"))
+        ctx.check(1.0 < moved < 35.0, "the abort did not stop the move short: moved %.3f of 40", moved)
+        ctx.check(str(after.get("state", "")).startswith("Alarm"),
+                  "the controller is in %s after the abort, not its alarm state", after.get("state"))
+        ctx.check(not _lease_holder(fc), "the lease was not given back after the abort: %s", _lease_holder(fc))
+
+        # Into the alarm: refused by the controller without the unlock, and
+        # with it the head goes back where it was found.
+        back = "G21\nG91\nG1 X%.3f F1200\nG90\n" % -moved
+        st, body = _job_post(fc, back)
+        ctx.check(st == 200, "the job into the alarm -> %s %s", st, _words(body)[:200])
+        rec, far = _job_wait(ctx, fc, 20)
+        ev["into_the_alarm"] = rec
+        ctx.check(rec["state"] == "failed" and "line 1" in rec["reason"],
+                  "a job into the alarm without unlock: %s", rec)
+        ctx.check(abs((kernel_xy_mm(ctx)[0] - x0) - moved) < 0.05, "a refused job moved the head")
+        st, body = _job_post(fc, back, unlock="1")
+        ctx.check(st == 200, "the unlocking job -> %s %s", st, _words(body)[:200])
+        rec, far = _job_wait(ctx, fc, 40)
+        ev["unlocked"] = rec
+        ctx.log("the unlocking job: %s", rec)
+        ctx.check(rec["state"] == "done" and rec["sent"] == rec["acked"] == rec["lines"] + 2,
+                  "the unlocking job (its $X and its M2 are the two more): %s", rec)
+        moved = kernel_xy_mm(ctx)[0] - x0
+    finally:
+        if _job(fc)["state"] == "running":
+            fc.post("/job/abort")
+            ctx.sleep(1.0)
+        left = kernel_xy_mm(ctx)[0] - x0
+        if abs(left) > 0.05:
+            ctx.log("returning the head %.3f mm through a Grbl client", -left)
+            _return_x(ctx, left)
+    check_kernel_returned(ctx, ev, (x0, y0), tag="job")
+    machine_idle(ctx)
+    ctx.log("PASS: a posted program ran as job:forgetest with the lease held as a sender, everything "
+            "beside it was refused in its name, the abort stopped a move short and freed the machine, "
+            "and the unlocking job cleared the alarm and returned the head")

@@ -30,7 +30,8 @@ from ..catalog import test
 from .. import hw
 from ..runner import Failed
 from .motion import (kernel_xy_mm, kernel_start, check_kernel_returned, wait_state,
-                     wait_state_text, wait_left_state, wait_idle, drain_text, Watch)
+                     wait_state_text, wait_left_state, wait_idle, drain_text, Watch, machine_idle,
+                     _job, _job_post, _job_wait, _lease_holder, _port_state, _words)
 
 _LASER_COVERS = [("grblhal-glowforge", "src/**"), ("kernel-module-glowforge", "**"),
                  ("forgectrl", "src/super.c"), ("forgectrl", "src/cool.c"),
@@ -1339,3 +1340,119 @@ def port_dark(ctx):
               "the head's beam detector rose %s during a port jog", beam_rise)
     ctx.log("PASS: lit on the G1 (peak %s), and three port jogs under the same open window with M3 S400 "
             "modal shipped dark by all three witnesses", peak)
+
+
+# ---------------------------------------------------------------- the recorder, as a job of the runner's
+
+def _laser_keys(fc):
+    s = fc.settings()
+    return {k: s.get(k) for k in ("laser_floor_density", "laser_dose_curve")}
+
+
+def _arming(fc):
+    rep = ((fc.status().get("grbl") or {}).get("report") or {})
+    return bool((rep.get("laser") or {}).get("arming"))
+
+
+@test("laser.recorder-dark", title="The dose-curve recorder takes the machine as a job, arms, and is stopped dark",
+      subsystem="laser", kind="auto", mode="grbl", est_min=2,
+      covers=_LASER_COVERS + [("forgectrl", "src/curverec.*"), ("forgectrl", "src/jobrun.*"),
+                              ("forgectrl", "src/jobstream.*"), ("forgectrl", "src/lease.*"),
+                              ("forgectrl", "src/settings.*")],
+      requires=["motion.job"],
+      steps=["Lid closed, bed clear. Nobody presses the button: the recorder is stopped before its press.",
+             "The ladder begins at the controller's X0 Y0: the head goes there, and is brought back."],
+      description="POST /curve/record starts the dose ladder as a job of the job runner's. While it "
+                  "waits for a press that never comes: /status names the recorder as the lease "
+                  "holder of kind sender, GET /job reports the run (owner recorder, not a posted "
+                  "program), the floor and the curve are overridden (0 and off), the controller "
+                  "reaches its arm wait, POST /job/abort refuses to stop a run it did not start, a "
+                  "posted job is refused in the recorder's name, and the kernel's LASER_ON sample "
+                  "count and the HV current stay dark. POST /curve/stop then ends it: the recorder "
+                  "says it was stopped before the ladder fired, the lease is free, and both laser "
+                  "keys read as they did before. The head is returned by a posted job.")
+def recorder_dark(ctx):
+    ev = ctx.evidence
+    fc = hw.Forgectrl()
+    machine_idle(ctx)
+    x0, y0 = kernel_start(ctx)
+    keys0 = _laser_keys(fc)
+    base = sample(ctx)
+    ctx.check(base and not base["emission"], "emission_samples nonzero before the recording (%s)", base)
+    ctx.check(not _lease_holder(fc), "the machine is not free at the start: %s", _lease_holder(fc))
+    started = False
+    samples = []
+    try:
+        st, body = fc.post("/curve/record")
+        ctx.check(st == 200 and isinstance(body, dict) and body.get("state") == "waiting",
+                  "POST /curve/record -> %s %s", st, _words(body)[:200])
+        started = True
+        ok = ctx.wait_for(lambda: _lease_holder(fc).get("owner") == "recorder", 5, poll=0.1)
+        held = _lease_holder(fc)
+        ev["holder"] = held
+        ctx.check(ok is not None and held.get("kind") == "sender", "the lease does not name the recorder: %s", held)
+        rec = _job(fc)
+        ev["job_record"] = rec
+        ctx.check(rec["state"] == "running" and rec["owner"] == "recorder" and rec["program"] is False,
+                  "GET /job while the recorder runs: %s", rec)
+        over = _laser_keys(fc)
+        ev["override"] = over
+        ctx.check(str(over["laser_dose_curve"]) == "off" and float(over["laser_floor_density"] or 0) == 0.0,
+                  "the floor and the curve are not overridden for the ladder: %s", over)
+
+        ok = ctx.wait_for(lambda: _arming(fc), 40, poll=0.25)
+        ctx.check(ok is not None, "the controller never reached its arm wait: %s",
+                  (fc.status().get("grbl") or {}).get("report"))
+        ctx.log("the recorder holds the machine as %s, and the controller waits for the press", held)
+        st, body = fc.post("/job/abort")
+        ev["abort_route"] = [st, _words(body)[:160]]
+        ctx.check(st == 409 and "stop it where it was started" in _words(body),
+                  "POST /job/abort on the recorder's run -> %s %s", st, _words(body)[:160])
+        st, body = _job_post(fc, "G21\n")
+        ev["job_beside"] = [st, _words(body)[:160]]
+        ctx.check(st == 409 and "the dose-curve recorder holds the machine" in _words(body),
+                  "a posted job beside the recorder -> %s %s", st, _words(body)[:160])
+        for _ in range(16):                 # two seconds in the arm wait, by the witnesses
+            samples.append(sample(ctx))
+            ctx.sleep(0.125)
+        ctx.check(_lease_holder(fc).get("owner") == "recorder", "a refused request took the lease away")
+    finally:
+        if started:
+            st, body = fc.post("/curve/stop")
+            ev["stopped"] = body if isinstance(body, dict) else _words(body)[:160]
+    ctx.check(st == 200 and isinstance(body, dict) and body.get("state") == "failed"
+              and "before the ladder fired" in body.get("reason", ""), "POST /curve/stop -> %s %s",
+              st, _words(body)[:200])
+    ok = ctx.wait_for(lambda: not _lease_holder(fc), 10, poll=0.2)
+    ctx.check(ok is not None, "the lease was not given back: %s", _lease_holder(fc))
+    keys1 = _laser_keys(fc)
+    ev["keys"] = {"before": keys0, "after": keys1}
+    ctx.check(keys1 == keys0, "the laser keys were not restored: %s, were %s", keys1, keys0)
+
+    lit = [s for s in samples if s and s["emission"]]
+    hv_max = max((s["hv"] for s in samples if s and s["hv"] is not None), default=0)
+    ev["witnesses"] = {"samples": len(samples), "with_emission": len(lit), "hv_max": hv_max,
+                       "job": _job(fc)["emission"]}
+    ctx.check(not lit and hv_max <= HV_DARK_MAX and _job(fc)["emission"]["laser_on_samples"] == 0,
+              "the recorder's arm wait was not dark: %s", ev["witnesses"])
+
+    # The ladder's first move took the head to the controller's X0 Y0.
+    ctx.sleep(1.0)
+    dx, dy = (a - b for a, b in zip(kernel_xy_mm(ctx), (x0, y0)))
+    ev["moved_mm"] = [round(dx, 3), round(dy, 3)]
+    ev["controller_after_stop"] = _port_state(fc).get("state")
+    ctx.log("after the stop the controller is in %s; the head is %.3f, %.3f mm from where it was found",
+            ev["controller_after_stop"], dx, dy)
+    if abs(dx) > 0.05 or abs(dy) > 0.05:
+        st, body = _job_post(fc, "G21\nG91\nG1 X%.3f Y%.3f F2400\nG90\n" % (-dx, -dy), unlock="1")
+        ctx.check(st == 200, "the returning job -> %s %s", st, _words(body)[:200])
+        rec, _far = _job_wait(ctx, fc, 60)
+        ctx.check(rec["state"] == "done", "the returning job: %s", rec)
+    elif str(ev["controller_after_stop"]).startswith("Alarm"):
+        st, body = _job_post(fc, "G21\n", unlock="1")
+        rec, _far = _job_wait(ctx, fc, 20)
+        ctx.check(st == 200 and rec["state"] == "done", "the unlocking job: %s %s", st, rec)
+    check_kernel_returned(ctx, ev, (x0, y0), tag="recorder")
+    machine_idle(ctx)
+    ctx.log("PASS: the recorder ran as a job of the runner's, held the machine as a sender through its arm "
+            "wait with every witness dark, and its stop freed the machine and restored the laser keys")
