@@ -556,3 +556,96 @@ def events_stream(ctx):
     ctx.check(took is not None, "no stream could be opened 25 s after every stream was closed")
     ctx.log("PASS: three streams, the fourth refused in words with the settings route answering, a "
             "replacement told and ended, two edges in order, and a place back after %.0f s", took)
+
+
+def _lease(fc):
+    return (fc.status().get("lease") or {})
+
+
+def _text(body):
+    return body if isinstance(body, str) else json.dumps(body)
+
+
+@test("forgectrl.lease", title="The machine lease: a holder refuses everything else, by name",
+      subsystem="forgectrl", kind="auto", est_min=2,
+      covers=[("forgectrl", "src/lease.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/status.*"),
+              ("forgectrl", "src/wizdark.*"), ("forgectrl", "src/diag.*"), ("forgectrl", "src/curverec.*"),
+              ("forgectrl", "src/update.*"), ("forgectrl", "src/logs.*"), ("forgectrl", "src/super.*"),
+              ("forgectrl", "src/events.*")],
+      description="The switches check is started and left waiting at its first prompt: it moves "
+                  "nothing, and it holds the machine lease for as long as it waits. /status must "
+                  "name it as the holder (wizard:switches, kind hardware), the event stream must "
+                  "report lease.changed, and everything that asks the lease must be refused with "
+                  "409 and the holder's name: a diagnostic, the dose-curve recorder, a log export, a "
+                  "mode switch to the mode already in force, POST /controller/start, and POST "
+                  "/settings (with 'settings are locked'). Only requests that would do no harm if "
+                  "the lease failed are made: no reboot, no boot-slot change, no update job. The "
+                  "check is then aborted, and the lease must read free, lease.changed must say so, "
+                  "and POST /settings must be accepted again. Whatever a failed refusal started is "
+                  "stopped on the way out.")
+def lease(ctx):
+    from .setup_dark import dark
+
+    ev = ctx.evidence
+    fc = hw.Forgectrl()
+    wid, owner = "switches", "wizard:switches"
+    rest = _lease(fc)
+    ctx.check("holder" in rest and rest["holder"] is None, "the machine is not free at the start: %s", rest)
+    ctx.check(set(rest.get("observed") or {}) == {"sender", "motors_released"},
+              "what is observed outside the lease is not reported: %s", rest)
+    mode = (fc.get("/mode")[1] or {}).get("mode")
+    units = fc.settings().get("ui_units") or "metric"
+    stream = _EventStream(fc.base, "127.0.0.6")
+    ctx.check(stream.status == 200, "GET /events -> %s", stream.status)
+    stream.text(0.5)
+    started = False
+    try:
+        st, body = fc.post("/wiz/%s/start" % wid)
+        ctx.check(st == 200, "the %s check did not start (%s %s)", wid, st, _text(body))
+        started = True
+        ok = ctx.wait_for(lambda: (_lease(fc).get("holder") or {}).get("owner") == owner, 10, poll=0.2)
+        held = _lease(fc).get("holder") or {}
+        ev["holder"] = held
+        ctx.log("the lease while the check waits: %s", held)
+        ctx.check(ok is not None and held.get("kind") == "hardware" and "switches" in (held.get("words") or ""),
+                  "the lease does not name the running check: %s", held)
+
+        refused = {}
+        for name, path, kw in (
+                ("a diagnostic", "/diag/flow-verify", {}),
+                ("the recorder", "/curve/record", {}),
+                ("a log export", "/logs/export", {}),
+                ("a mode switch", "/mode", {"params": {"controller": mode}}),
+                ("the controller's start", "/controller/start", {}),
+                ("a settings write", "/settings", {"params": {"ui_units": units}})):
+            st, body = fc.post(path, **kw)
+            refused[name] = [st, _text(body)[:160]]
+            ctx.check(st == 409 and "holds the machine" in _text(body) and "switches" in _text(body),
+                      "%s under the wizard's hold -> %s %s", name, st, _text(body)[:160])
+        ctx.check("settings are locked" in refused["a settings write"][1],
+                  "the settings refusal does not say they are locked: %s", refused["a settings write"])
+        ev["refused"] = refused
+        ctx.check((_lease(fc).get("holder") or {}).get("owner") == owner,
+                  "a refused request took the lease away: %s", _lease(fc))
+    finally:
+        if started:
+            fc.post("/wiz/%s/abort" % wid)
+            ctx.wait_for(lambda: not dark(fc).get("running"), 30)
+        # Nothing a failed refusal may have started is left running.
+        fc.post("/diag/abort")
+        fc.post("/curve/stop")
+
+    ok = ctx.wait_for(lambda: _lease(fc).get("holder") is None, 30, poll=0.5)
+    ctx.check(ok is not None, "the lease was not given back after the abort: %s", _lease(fc))
+    st, body = fc.post("/settings", params={"ui_units": units})
+    ctx.check(st == 200, "POST /settings with the machine free again -> %s %s", st, _text(body)[:120])
+    text = stream.text(2.0)
+    stream.close()
+    changes = [l for l in text.splitlines() if l.startswith("data:") and "owner" in l]
+    ev["lease_changed"] = changes
+    ctx.log("the event stream: %s", changes)
+    i_take, i_free = text.find('"owner":"%s"' % owner), text.find('"owner":null')
+    ctx.check("event: lease.changed" in text and 0 <= i_take < i_free,
+              "lease.changed did not report the hold and then its end: %r", text[-300:])
+    ctx.log("PASS: %s held the machine, six requests were refused by name, the abort freed it, and the "
+            "event stream said both", owner)
