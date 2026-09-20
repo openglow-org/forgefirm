@@ -143,14 +143,39 @@ def auth(ctx):
               "GET /fuse-identity with the token but no button -> %s %r (expected the two-factor refusal)",
               st, body)
 
-    # the cooling report channel: the loopback peer is accepted. An idle
-    # report is what the controller sends every period; the engine is idle
-    # here, so it changes nothing. A dual-stack listener reports this peer
-    # as ::ffff:127.0.0.1, which the check must recognize in full.
-    st, body = fc.post("/cool/state", params={"mode": "idle", "armed": "0"})
+    # the cooling report channel is the running controller's alone. A
+    # loopback peer is not enough: anything on this host is one. The
+    # supervisor hands the controller a secret at its spawn, and the route
+    # asks for it. An idle report is what the controller sends every
+    # period; the engine is idle here, so the accepted one changes nothing.
+    # A dual-stack listener reports this peer as ::ffff:127.0.0.1, which
+    # the loopback check must recognize in full.
+    report = {"mode": "idle", "armed": "0"}
+    st, body = fc.post("/cool/state", params=report)
+    ev["cool_state_from_loopback_no_secret"] = st
+    ctx.log("POST /cool/state from loopback, no secret -> %s %s", st, body if isinstance(body, str) else "")
+    ctx.check(st == 403 and "controller's alone" in str(body),
+              "/cool/state from loopback without the secret -> %s %r", st, body)
+    st, body = fc.post("/cool/state", params=report, headers={"X-ForgeFIRM-Report": "0" * 32})
+    ctx.check(st == 403, "/cool/state with a secret that is not the controller's -> %s %r", st, body)
+    # The secret itself, as only root on this host can read it: out of
+    # the running controller's environment. It is never logged.
+    secret = None
+    pid = (fc.get("/mode")[1] or {}).get("pid")
+    if pid:
+        try:
+            with open("/proc/%d/environ" % int(pid), "rb") as f:
+                for item in f.read().split(b"\0"):
+                    if item.startswith(b"GF_REPORT_SECRET="):
+                        secret = item.split(b"=", 1)[1].decode("ascii", "replace")
+        except OSError:
+            pass
+    ev["controller_has_a_secret"] = bool(secret)
+    ctx.check(secret and len(secret) == 32, "the running controller (pid %s) was handed no report secret", pid)
+    st, body = fc.post("/cool/state", params=report, headers={"X-ForgeFIRM-Report": secret})
     ev["cool_state_from_loopback"] = st
-    ctx.log("POST /cool/state from loopback -> %s %s", st, body if isinstance(body, dict) else "")
-    ctx.check(st == 200, "/cool/state refused the loopback peer (%s %r): the controller's "
+    ctx.log("POST /cool/state from loopback with the controller's secret -> %s", st)
+    ctx.check(st == 200, "/cool/state refused the controller's own secret (%s %r): the controller's "
               "reports never reach the engine", st, body)
 
     # ...and a non-loopback peer is refused, even with a token. Over HTTP
@@ -162,8 +187,7 @@ def auth(ctx):
     ip = lan_ip()
     ev["lan_ip"] = ip
     ctx.check(ip, "cannot determine the board's LAN address")
-    token = {"X-ForgeFIRM-Token": fc.token}
-    report = {"mode": "idle", "armed": "0"}
+    token = {"X-ForgeFIRM-Token": fc.token, "X-ForgeFIRM-Report": secret}
     st, body, hdrs = request("http://%s" % ip, "POST", "/cool/state", data=report, headers=token)
     loc = hdrs.get("location", "")
     ev["cool_state_from_lan_http"] = {"status": st, "location": loc}

@@ -1532,3 +1532,60 @@ def fail_tier_stop(ctx):
               "thresholds not restored: %s", {k: after.get(k) for k in CRASH_KEYS})
     ctx.log("PASS: the crash tier stopped the job, locked the latch, and the supervisor restarted "
             "the controller (pid %s -> %s)", pid0, m1 and m1.get("pid"))
+
+
+@test("cooling.report-channel", title="A forged cooling report inside a run session is refused and changes nothing",
+      subsystem="cooling", kind="auto", mode="grbl", est_min=2,
+      covers=_COOL_COVERS + [("forgectrl", "src/super.*"), ("forgectrl", "src/main.c"),
+                             ("forgectrl", "src/auth.*")],
+      requires=["forgectrl.auth"],
+      description="The report channel (POST /cool/state) is what tells the engine a job is running: a "
+                  "forged idle report would stand the fans down under a cut. M8 opens a run session "
+                  "from the suite's Grbl client, and once the engine is in phase run with its run fan "
+                  "profile commanded, a process on this host that is not the controller reports "
+                  "mode=idle, armed=0: with no secret, with a made-up secret, and with a made-up "
+                  "secret and a forged Host header. Each is refused (403). Over the next five seconds "
+                  "the engine stays in phase run and no commanded fan duty drops. M9 "
+                  "ends the session, and the engine leaves phase run on the controller's own report.")
+def report_channel(ctx):
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    forged = {"mode": "idle", "armed": "0"}
+
+    with ctx.grbl() as g:
+        def in_run(c):
+            return c.get("phase") == "run"
+        ctx.check(_cool(fc).get("phase") != "run", "a run session is already open")
+        g.command("M8")
+        try:
+            ok = ctx.wait_for(lambda: in_run(_cool(fc)), VERDICT_WAIT_S, poll=0.5)
+            ctx.check(ok is not None, "M8 did not open a run session: %s", _cool(fc).get("phase"))
+            ctx.sleep(2)                    # the run fan profile is commanded
+            before = _cool(fc)
+            duties0 = _duties()
+            ev["before"] = {"phase": before.get("phase"), "duties": duties0}
+            refused = {}
+            for name, headers in (("no secret", {}),
+                                  ("a made-up secret", {"X-ForgeFIRM-Report": "0123456789abcdef" * 2}),
+                                  ("a made-up secret and a forged Host",
+                                   {"X-ForgeFIRM-Report": "f" * 32, "Host": "localhost"})):
+                st, body = fc.post("/cool/state", params=forged, headers=headers, auth=False)
+                refused[name] = [st, str(body)[:100]]
+                ctx.check(st == 403, "a forged report (%s) -> %s %s", name, st, str(body)[:100])
+            ev["refused"] = refused
+            held = []
+            for _ in range(5):
+                ctx.sleep(1)
+                c = _cool(fc)
+                held.append([c.get("phase"), _duties()])
+            ev["after"] = held
+            ctx.log("phase and duties over 5 s after three forged idle reports: %s", held)
+            ctx.check(all(p == "run" for p, _d in held), "the engine left phase run: %s", [p for p, _d in held])
+            ctx.check(all(d[k] >= duties0[k] for _p, d in held for k in duties0),
+                      "a commanded fan duty dropped under the forged reports: %s -> %s", duties0, held)
+        finally:
+            g.command("M9")
+            _session_ended(ctx, fc, "report channel")
+    ctx.check(_cool(fc).get("phase") != "run", "the session did not end on the controller's own report")
+    ctx.log("PASS: three forged idle reports from this host were refused inside a run session, and the "
+            "engine held its phase and its fan duties")

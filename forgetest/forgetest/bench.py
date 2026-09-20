@@ -265,6 +265,14 @@ TOOLS = [
              "(a line queued right behind the port's included), the refusals, the single client, a CR LF "
              "sender, a soft reset, and the client as the dead-man. A CI harness (the grblHAL repo): needs "
              "the host-built null-sink controller, not the machine, so it is not a bench-page tool."},
+    {"id": "cool-report-test", "title": "Cooling report secret harness", "script": "cool_report_test.py",
+     "safety": "dry", "where": "host", "ported": False, "args": [],
+     "desc": "The controller's cooling reports on the null-sink controller, read by a stand-in for "
+             "forgectrl's listener: every report carries the secret the supervisor hands the controller at "
+             "its spawn (GF_REPORT_SECRET), none does when there is none, a value that is not 32 hex digits "
+             "(a CR LF with a header behind it included) never reaches the wire, and the homing runner the "
+             "controller starts does not inherit it. A CI harness (the grblHAL repo): needs the host-built "
+             "null-sink controller, not the machine, so it is not a bench-page tool."},
     {"id": "manual-home-test", "title": "Manual home and motor release harness", "script": "manual_home_test.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
      "desc": "The manual homing provider and the motor release on the null-sink controller: $H under manual "
