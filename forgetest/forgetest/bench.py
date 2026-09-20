@@ -257,6 +257,23 @@ TOOLS = [
              "card's stops: the ends of the reach run, two half-steps past either end alarms. A CI harness "
              "(the grblHAL repo): needs the host-built null-sink controller, not the machine, so it is not a "
              "bench-page tool."},
+    {"id": "ctlport-test", "title": "Controller port and line multiplexer harness", "script": "ctlport_test.py",
+     "safety": "dry", "where": "host", "ported": False, "args": [],
+     "desc": "A scripted sender that counts every response, beside the controller port's one client, on the "
+             "null-sink controller: a port jog's status goes to the port and never to the sender, a port "
+             "error does not reach the sender's parser, a sender line cancels a port jog and gets its own ok "
+             "(a line queued right behind the port's included), the refusals, the single client, a CR LF "
+             "sender, a soft reset, and the client as the dead-man. A CI harness (the grblHAL repo): needs "
+             "the host-built null-sink controller, not the machine, so it is not a bench-page tool."},
+    {"id": "manual-home-test", "title": "Manual home and motor release harness", "script": "manual_home_test.py",
+     "safety": "dry", "where": "host", "ported": False, "args": [],
+     "desc": "The manual homing provider and the motor release on the null-sink controller: $H under manual "
+             "ships nothing and declares X0 Y0 with the soft limits on and Z kept; while the motors are "
+             "released every motion source is refused and ships nothing, $X and a soft reset do not unlock "
+             "it, and only $ME and a manual $H write the energize, once each; the port's panel operations "
+             "do the same with the sender's count exact. Imports its sender and port client from "
+             "ctlport_test.py. A CI harness (the grblHAL repo): needs the host-built null-sink controller, "
+             "not the machine, so it is not a bench-page tool."},
     {"id": "raster-dry", "title": "Dry top-speed raster per XY microstep mode", "script": "raster_dry.py",
      "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("modes", "choice", "8 16 32", "the modes to run, in order", ["8", "16", "32", "8 16 32"])],
