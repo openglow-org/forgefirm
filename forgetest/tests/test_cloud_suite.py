@@ -1003,6 +1003,23 @@ class CloudSuiteTests(unittest.TestCase):
         hooks = {"press it. The print runs dark": lambda: self.append(run, delay=0.05)}
         self.assertFails(cloud.dark_print, "the latch is unlocked at the button wait", hooks=hooks)
 
+    def test_a_print_turned_away_before_the_button_fails_at_once_with_the_reason(self):
+        """The bench reference's own lines, 2026-09-20: the coolant read 27.4
+        against the client's start ceiling of 27, and the test then sat out
+        its two minutes and said only that the button wait never came."""
+        self.in_offline()
+        stamp = "2026-09-20T21:28:16.83+00:00 gfcloud[782] INFO "
+        refused = [stamp + "gfuiservice:run service action request: print (ready)",
+                   stamp + "machine:_motion start motion",
+                   stamp + "machine:_safe_to_move machine temp is too high, temp: 27.4",
+                   stamp + "machine:_motion end motion",
+                   stamp + 'basemachine:_finish_action print [9005]: finished with event ":cancelled"']
+        self.offline_print_hooks(refused)
+        t0 = time.time()
+        self.assertFails(cloud.dark_print, "turned the print away before the button wait: "
+                                           "INFO machine:_safe_to_move machine temp is too high, temp: 27.4")
+        self.assertLess(time.time() - t0, 30, "the refusal was not seen until the wait timed out")
+
     def test_verdict_refuse_on_the_bench_excerpt(self):
         self.in_offline()
         self.fc.state["status"]["coolant"] = {"up_c": 21.5, "down_c": 21.4}

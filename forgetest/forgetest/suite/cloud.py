@@ -586,6 +586,42 @@ def wait_log(ctx, offset, needles, timeout, poll=0.5):
     return found
 
 
+# What the client logs when it turns a print away before the button wait
+# (machine._safe_to_move): the lid or the interlock, a machine that is not
+# idle, the coolant above the start ceiling of its own configuration
+# (THERMAL.max_start_temp), a coolant sensor that reads nothing.
+REFUSED_BEFORE_THE_BUTTON = ("unsafe to move", "machine is not idle", "machine temp is too high",
+                             "coolant sensor reads invalid")
+
+
+def wait_button_wait(ctx, offset, timeout, also=()):
+    """Wait for the client's button wait (and the `also` needles). A print
+    the client turns away never gets there: it logs why and finishes at
+    once, so the wait ends on that finish line too and the failure carries
+    the client's own reason, not two minutes of silence. Returns wait_log's
+    result."""
+    needles = list(also) + ["waiting for button"]
+    found = {n: None for n in needles}
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        ctx.checkpoint()
+        lines = log_lines_since(GFCLOUD_LOG, offset)
+        for ln in lines:
+            for n in needles:
+                if found[n] is None and n in ln:
+                    found[n] = ln
+        if all(found.values()):
+            break
+        if found["waiting for button"] is None and action_finish_index(lines, "print") is not None:
+            why = [message(ln) for ln in lines if any(r in ln for r in REFUSED_BEFORE_THE_BUTTON)]
+            fin = lines[action_finish_index(lines, "print")]
+            ctx.fail("the client turned the print away before the button wait: %s (%s)",
+                     "; ".join(why[-3:]) or "it logged no reason", message(fin))
+        time.sleep(0.5)
+    ctx.check(found["waiting for button"], "the print never reached the button wait")
+    return found
+
+
 def log_has(offset, needle):
     """True when the gfcloud log carries needle since offset (one read;
     the condition an `act` waits on)."""
@@ -1043,9 +1079,7 @@ def offline_start_print(ctx, off, action_id, path, offset, settings=None):
     client loads the job, lights the button and waits; the operator's
     press arms it and the run starts. Returns the 'starting run' line."""
     off.print_ready(action_id, path, settings)
-    got = wait_log(ctx, offset, ["waiting for button"], 120)
-    ctx.check(got["waiting for button"], "the offline print never reached the button wait (refused, "
-                                         "or the job did not load)")
+    wait_button_wait(ctx, offset, 120)
     ctx.act("button", "press", text="The button is lit white: the press arms the print and the "
             "head starts to move. Nothing fires: the job commands no laser.",
             until=lambda: wait_print_running(ctx, offset, 0.1) is not None, timeout=180)
@@ -1272,10 +1306,9 @@ def lid_during_button_wait(ctx):
 
 def lid_during_button_wait_body(ctx, ev, off, job, offset):
     off.print_ready(9003, job)
-    got = wait_log(ctx, offset, ["job is longer than the ring", "waiting for button"], 180)
+    got = wait_button_wait(ctx, offset, 180, also=["job is longer than the ring"])
     ctx.check(got["job is longer than the ring"],
               "the job fit the ring: this test needs a job the ring cannot hold")
-    ctx.check(got["waiting for button"], "the print never reached the button wait")
     ctx.act("lid", "open", text="The button is lit: do NOT press it.", timeout=120)
     relock = "button wait lid opened - relocking the laser"
     got = wait_log(ctx, offset, [relock], 60)
@@ -1365,8 +1398,7 @@ def dark_print(ctx):
 
 def dark_print_body(ctx, ev, off, job, offset, fc):
     off.print_ready(9005, job)
-    got = wait_log(ctx, offset, ["waiting for button"], 120)
-    ctx.check(got["waiting for button"], "the print never reached the button wait")
+    wait_button_wait(ctx, offset, 120)
     ev["latch_locked_at_button"] = latch_locked()
     ctx.check(ev["latch_locked_at_button"], "the latch is unlocked at the button wait")
     ctx.act("button", "press", text="The button is lit: press it. The print runs dark and finishes.",
@@ -1434,8 +1466,7 @@ def verdict_refuse_body(ctx, ev, off, job, offset, fc, up, orig):
               gate, HOLD_REFUSE_S, st, body)
     ev["gate"] = gate
     off.print_ready(9006, job)
-    got = wait_log(ctx, offset, ["waiting for button"], 120)
-    ctx.check(got["waiting for button"], "the print never reached the button wait")
+    wait_button_wait(ctx, offset, 120)
     ev["latch_locked_at_button"] = latch_locked()
     ctx.check(ev["latch_locked_at_button"], "the latch is unlocked at the button wait")
     ctx.act("button", "press", text="The button is lit: press it. Nothing runs; the print cancels "
