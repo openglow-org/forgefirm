@@ -1,10 +1,13 @@
 # The extension sandbox's deny rules, proven on real traffic.
 #
 # scripts/sandbox-rules-test.py loads meta-forgefirm's ffx.nft into a network
-# namespace of its own and sends at it from real uids: a pool uid is refused
-# on loopback (IPv4 and IPv6, TCP at once, UDP with EPERM), the uids on
-# either side of the pool and root are not touched, an allowlist chain opens
-# one destination to one uid, and loading the file again takes it away. The
+# namespace of its own, joins a second namespace to it with a veth pair (a
+# peer that is not the machine), and sends from real uids: a pool uid is
+# refused on loopback, at its own LAN address, and at the peer (TCP at once,
+# UDP with EPERM), the uids on either side of the pool and root are not
+# touched, an allowlist chain opens one port of the peer to one uid, the
+# machine's own addresses stay shut even on an allowlist, and loading the
+# file again takes the allowlist away. The
 # runner's nft is the version the image carries or newer; the kernel side is
 # the image's own business and is proven on the machine (exthost.platform).
 

@@ -205,8 +205,8 @@ def _pids_of(comm):
 
 
 def _pool_counters():
-    """The packet counts of chain pool's two refusals: [tcp reset, drop]."""
-    p = subprocess.run([NFT, "-j", "list", "chain", "inet", "ffx", "pool"], capture_output=True, text=True)
+    """The packet counts of chain refuse's two rules: [tcp reset, drop]."""
+    p = subprocess.run([NFT, "-j", "list", "chain", "inet", "ffx", "refuse"], capture_output=True, text=True)
     if p.returncode != 0:
         return None
     return [e["counter"]["packets"] for c in json.loads(p.stdout)["nftables"] if "rule" in c
@@ -366,6 +366,9 @@ def platform(ctx):
         ev["rules"] = p.stdout
         ctx.check("meta skuid %d-%d jump pool" % (POOL_FIRST, uid) in p.stdout and "hook output" in p.stdout
                   and "policy accept" in p.stdout, "table inet ffx is not the image's: %s", p.stdout[:400])
+        pool = p.stdout[p.stdout.find("chain pool"):].split("}")[0]
+        ctx.check(0 <= pool.find('oifname "lo" jump refuse') < pool.find("vmap @allow"),
+                  "the machine itself is not refused ahead of the allow map: %s", pool)
         lan = lan_ip()
         ctx.check(lan, "the machine has no LAN address to aim at")
         tcp = [[4, "127.0.0.1", 443, False], [4, "127.0.0.1", 80, False], [6, "::1", 443, False],
@@ -397,6 +400,29 @@ def platform(ctx):
                 "counted %s -> %s", len(tcp), len(udp), c0, c1)
         ctx.check(c0 is not None and c1 is not None and len(c1) == 2 and c1[0] - c0[0] >= 2 * len(tcp)
                   and c1[1] - c0[1] >= 2 * len(udp), "the rules did not count the attempts: %s -> %s", c0, c1)
+
+        # The machine itself is not a destination, whatever the allow map says: an
+        # allow chain that names forgectrl on loopback and on the LAN address
+        # opens neither.
+        chain = "u%d" % uid
+        rules = ["add chain inet ffx %s" % chain,
+                 "add rule inet ffx %s ip daddr { 127.0.0.1, %s } tcp dport 443 accept" % (chain, lan),
+                 "add element inet ffx allow { %d : jump %s }" % (uid, chain), ""]
+        opened = subprocess.run([NFT, "-f", "-"], capture_output=True, text=True, input=os.linesep.join(rules))
+        try:
+            ctx.check(opened.returncode == 0, "could not add an allow chain: %s", opened.stderr.strip()[:200])
+            rc, lines, err = _probe("-", uid, "net", json.dumps([[4, "127.0.0.1", 443, False], [4, lan, 443, False]]))
+            res = (lines[-1] if lines else {}).get("results", [])
+            ev["allowlisted_self"] = res
+            ctx.log("uid %d with the machine's own addresses on its allowlist: %s", uid, res)
+            ctx.check(len(res) == 2 and all(r[1][0] == "refused" for r in res),
+                      "an allowlist opened the machine itself to a pool uid: %s %s", res, err)
+        finally:
+            subprocess.run([NFT, "delete", "element", "inet", "ffx", "allow", "{ %d }" % uid], capture_output=True)
+            subprocess.run([NFT, "flush", "chain", "inet", "ffx", chain], capture_output=True)
+            subprocess.run([NFT, "delete", "chain", "inet", "ffx", chain], capture_output=True)
+        left = subprocess.run([NFT, "list", "chain", "inet", "ffx", chain], capture_output=True)
+        ctx.check(left.returncode != 0, "the test's allow chain stayed behind")
 
         # 6. landlock and seccomp, on a root process so that neither the uid nor the rules explain the refusal
         rc, lines, err = _probe("-", 0, "landlock", json.dumps([4, "127.0.0.1", 443, False]))

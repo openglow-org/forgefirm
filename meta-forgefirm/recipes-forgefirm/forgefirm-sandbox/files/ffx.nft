@@ -22,6 +22,12 @@
 # chain, and removes both when the package stops; a chain that accepts
 # nothing returns here and the packet is refused. Loading this file again
 # replaces the whole table, allowlists included: it fails closed.
+#
+# The machine itself is not a destination, whatever the allow map says.
+# Everything a host sends to one of its own addresses, the LAN one included,
+# leaves through lo, so that is refused before the map is looked at. An
+# allowlist names addresses, and the machine's own address can change under
+# it (a new DHCP lease); this rule does not depend on knowing it.
 
 table inet ffx
 delete table inet ffx
@@ -37,7 +43,12 @@ table inet ffx {
 	}
 
 	chain pool {
+		oifname "lo" jump refuse
 		meta skuid vmap @allow
+		jump refuse
+	}
+
+	chain refuse {
 		meta l4proto tcp counter reject with tcp reset
 		counter drop
 	}
