@@ -663,3 +663,210 @@ def lease(ctx):
               "lease.changed did not report the hold and then its end: %r", text[-300:])
     ctx.log("PASS: %s held the machine, six requests were refused by name, the abort freed it, and the "
             "event stream said both", owner)
+
+
+# ---------------------------------------------------------------- scoped tokens
+
+def _words_of(body):
+    b = body if isinstance(body, (dict, str)) else ""
+    return b.get("error", "") if isinstance(b, dict) else b
+
+
+@test("forgectrl.tokens", title="Scoped API tokens: a token reaches what it was granted, and nothing else",
+      subsystem="forgectrl", kind="auto", mode="grbl", est_min=2,
+      covers=_COVERS_AUTH + [("forgectrl", "src/tokens.*"), ("forgectrl", "src/grblport.*"),
+                             ("forgectrl", "src/settings.*")],
+      steps=["Bed clear; the head needs 2 mm of free travel toward +X."],
+      description="Three tokens are created through the panel's route: one holding machine.read "
+                  "and camera.lid, one holding motion.jog, one holding camera.lid alone. Each is then "
+                  "used the way a client on the network uses it, over HTTPS to the machine's own LAN "
+                  "address, so the daemon sees a peer that is not this host. The first reads /status "
+                  "as a bearer token, /mode in the panel token's header, and /cam/status as a bearer "
+                  "token; the camera-only token reads /cam/status as ?key=. Refused, each with 403 "
+                  "and the reason in words: the first token in a URL (it holds more than a camera), "
+                  "the camera-only token on the head camera, and for the first token a jog, a "
+                  "settings write, a mode switch, and the token routes. The second jogs the head 1 mm with no "
+                  "session and no panel token (the kernel's counters are the witness) and is refused "
+                  "/status. A token presented over plain HTTP from the LAN is refused, and the "
+                  "daemon's log names it. A token that is not this machine's is refused. With "
+                  "panel_open_reads=0 the LAN reads /status with machine.read and with nothing else. "
+                  "The list names both tokens with a last-used time and carries neither a token nor "
+                  "a hash, and the store is mode 0600 and holds neither token. A revoked token is "
+                  "refused at once, with reads open again. Both tokens are revoked, the setting "
+                  "restored, and the head returned on the way out. No token is written to the log "
+                  "or the evidence.")
+def scoped_tokens(ctx):
+    from .setup import request, decode
+    from .motion import kernel_xy_mm, machine_idle
+
+    ev = ctx.evidence
+    fc = hw.Forgectrl()
+    ip = lan_ip()
+    ctx.check(ip, "cannot determine the board's LAN address")
+    tls, plain = "https://%s" % ip, "http://%s" % ip
+    machine_idle(ctx)
+    x0 = kernel_xy_mm(ctx)[0]
+    reads_were = str(fc.settings().get("panel_open_reads", "1"))
+    mode = (fc.get("/mode")[1] or {}).get("mode")
+    units = fc.settings().get("ui_units") or "metric"
+    made = {}
+
+    def create(name, caps):
+        st, body = fc.post("/tokens", data={"name": name, "caps": caps})
+        ctx.check(st == 200 and isinstance(body, dict) and str(body.get("token", "")).startswith("fft_")
+                  and len(body["token"]) == 36, "POST /tokens %s -> %s", name, st)
+        made[name] = body
+        return body["token"]
+
+    def lan(token, method, path, how="bearer", base=None, data=None):
+        headers = {}
+        if token and how == "bearer":
+            headers["Authorization"] = "Bearer " + token
+        elif token and how == "header":
+            headers["X-ForgeFIRM-Token"] = token
+        elif token and how == "key":
+            path += ("&" if "?" in path else "?") + "key=" + token
+        st, content, _h = request(base or tls, method, path, data=data, headers=headers)
+        return st, decode(content)
+
+    try:
+        # Whatever an earlier, interrupted run left behind.
+        st, listed = fc.get("/tokens")
+        ctx.check(st == 200 and isinstance(listed, dict), "GET /tokens -> %s", st)
+        for t in listed.get("tokens", []):
+            if t.get("name", "").startswith("forgetest "):
+                fc.post("/tokens/revoke", data={"id": t["id"]})
+        st, body = fc.post("/tokens", data={"name": "forgetest bad", "caps": "settings.write"})
+        ev["outside_the_list"] = [st, _words_of(body)[:120]]
+        ctx.check(st == 400 and "not a capability" in _words_of(body),
+                  "a capability outside the list -> %s %s", st, _words_of(body)[:120])
+        hub = create("forgetest hub", "machine.read,camera.lid")
+        pend = create("forgetest pendant", "motion.jog")
+        view = create("forgetest viewer", "camera.lid")
+
+        passed = {}
+        for name, call in (("bearer GET /status", lambda: lan(hub, "GET", "/status")),
+                           ("header GET /mode", lambda: lan(hub, "GET", "/mode", how="header")),
+                           ("bearer GET /cam/status", lambda: lan(hub, "GET", "/cam/status")),
+                           ("camera-only ?key= GET /cam/status",
+                            lambda: lan(view, "GET", "/cam/status", how="key"))):
+            st, body = call()
+            passed[name] = st
+            ctx.check(st == 200 and isinstance(body, dict), "the hub token, %s -> %s %s", name, st,
+                      _words_of(body)[:120])
+        ev["hub_passed"] = passed
+
+        refused = {}
+        for name, want, call in (
+                ("the head camera", "does not hold camera.head",
+                 lambda: lan(view, "GET", "/cam/snapshot?cam=head", how="key")),
+                ("a token with more than a camera, in a URL", "in a URL may hold camera capabilities only",
+                 lambda: lan(hub, "GET", "/cam/status", how="key")),
+                ("a jog", "does not hold motion.jog", lambda: lan(hub, "POST", "/motion/jog", data={"x": "1"})),
+                ("a settings write", "no scoped token reaches", lambda: lan(hub, "POST", "/settings",
+                                                                            data={"ui_units": units})),
+                ("a mode switch", "no scoped token reaches", lambda: lan(hub, "POST", "/mode",
+                                                                         data={"controller": mode})),
+                ("the token list", "no scoped token reaches", lambda: lan(hub, "GET", "/tokens")),
+                ("a token of its own", "no scoped token reaches",
+                 lambda: lan(hub, "POST", "/tokens", data={"name": "forgetest child", "caps": "machine.read"})),
+                ("the panel's ?token= form", "authentication required",
+                 lambda: lan(None, "POST", "/settings?token=" + hub, data={"ui_units": units})),
+                ("a stranger's token", "authentication required",
+                 lambda: lan("fft_" + "0" * 32, "GET", "/status")),
+                ("the pendant on /status", "does not hold machine.read", lambda: lan(pend, "GET", "/status"))):
+            st, body = call()
+            refused[name] = [st, _words_of(body)[:120]]
+            ctx.check(st == 403 and want in _words_of(body), "%s -> %s %s (wanted 403 %r)", name, st,
+                      _words_of(body)[:120], want)
+        ev["refused"] = refused
+        ctx.check(abs(kernel_xy_mm(ctx)[0] - x0) < 0.01, "a refused jog moved the head")
+
+        # A write with a scoped token and nothing else: no session, no panel token.
+        st, body = lan(pend, "POST", "/motion/jog", data={"x": "1", "feed": "1200"})
+        ctx.check(st == 200, "the pendant token's jog -> %s %s", st, _words_of(body)[:120])
+        ctx.wait_for(lambda: abs(kernel_xy_mm(ctx)[0] - x0 - 1.0) < 0.02, 10, poll=0.1)
+        machine_idle(ctx)
+        moved = kernel_xy_mm(ctx)[0] - x0
+        ev["jog_mm"] = round(moved, 3)
+        ctx.log("the pendant token jogged the head %.3f mm from the LAN with no session", moved)
+        ctx.check(abs(moved - 1.0) < 0.02, "the jog moved %.3f mm, not 1", moved)
+
+        # Plain HTTP from the LAN: refused, and the log says which token crossed in the clear.
+        log_path = "/data/log/forgefirm/forgectrl/forgectrl.log"
+        try:
+            log_from = os.path.getsize(log_path)
+        except OSError:
+            log_from = 0
+        st, body = lan(hub, "GET", "/status", base=plain)
+        ev["plain_http"] = [st, _words_of(body)[:120]]
+        ctx.check(st == 403 and "HTTPS only" in _words_of(body), "a token over plain HTTP -> %s %s", st,
+                  _words_of(body)[:120])
+
+        def logged():
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(log_from)
+                    return "scoped token %s was presented over plain HTTP" % made["forgetest hub"]["id"] in f.read()
+            except OSError:
+                return False
+        ctx.check(ctx.wait_for(logged, 10, poll=0.5) is not None, "the log does not name the token sent in the clear")
+
+        # Reads closed to the LAN: machine.read opens them, nothing else does.
+        st, body = fc.post("/settings", params={"panel_open_reads": "0"})
+        ctx.check(st == 200, "closing the reads -> %s", st)
+        closed = {"nobody": lan(None, "GET", "/status")[0], "machine.read": lan(hub, "GET", "/status")[0],
+                  "motion.jog": lan(pend, "GET", "/status")[0]}
+        ev["reads_closed"] = closed
+        ctx.check(closed == {"nobody": 403, "machine.read": 200, "motion.jog": 403},
+                  "with the reads closed: %s", closed)
+        st, body = fc.post("/settings", params={"panel_open_reads": reads_were})
+        ctx.check(st == 200, "restoring panel_open_reads=%s -> %s", reads_were, st)
+
+        # The list and the store: names and times, never a token or a hash.
+        st, listed = fc.get("/tokens")
+        mine = {t["name"]: t for t in listed.get("tokens", []) if t.get("name", "").startswith("forgetest ")}
+        ev["listed"] = {n: {k: t[k] for k in ("id", "caps", "last_used")} for n, t in mine.items()}
+        ctx.check(set(mine) == {"forgetest hub", "forgetest pendant", "forgetest viewer"},
+                  "the list: %s", sorted(mine))
+        ctx.check(mine["forgetest hub"]["caps"] == ["machine.read", "camera.lid"] and
+                  mine["forgetest pendant"]["caps"] == ["motion.jog"], "the capabilities listed: %s", ev["listed"])
+        ctx.check(all(t["last_used"] > 0 for t in mine.values()), "a used token reads as never used: %s", ev["listed"])
+        text = json.dumps(listed)
+        ctx.check(hub[4:] not in text and pend[4:] not in text and view[4:] not in text and "sha" not in text and
+                  all(set(t) == {"id", "name", "caps", "created", "last_used"} for t in mine.values()),
+                  "the list carries more than names, capabilities, and times")
+        store = "/data/forgefirm/tokens"
+        mode_bits = os.stat(store).st_mode & 0o777
+        with open(store, "r", encoding="utf-8", errors="replace") as f:
+            kept = f.read()
+        ev["store"] = {"mode": oct(mode_bits),
+                       "holds_a_token": hub[4:] in kept or pend[4:] in kept or view[4:] in kept}
+        ctx.check(mode_bits == 0o600 and not ev["store"]["holds_a_token"], "the store: %s", ev["store"])
+
+        # A revoke ends it at once, and the open reads are no way around it.
+        st, body = fc.post("/tokens/revoke", data={"id": made["forgetest hub"]["id"]})
+        ctx.check(st == 200, "the revoke -> %s %s", st, _words_of(body)[:120])
+        st, body = lan(hub, "GET", "/status")
+        ev["after_revoke"] = [st, _words_of(body)[:120]]
+        ctx.check(st == 403 and "authentication required" in _words_of(body),
+                  "a revoked token -> %s %s", st, _words_of(body)[:120])
+        ctx.check(lan(pend, "POST", "/motion/cancel")[0] == 200, "the revoke took the other token too")
+    finally:
+        fc.post("/settings", params={"panel_open_reads": reads_were})
+        for t in made.values():
+            fc.post("/tokens/revoke", data={"id": t.get("id", "")})
+        back = x0 - kernel_xy_mm(ctx)[0]
+        if abs(back) > 0.02:
+            machine_idle(ctx)
+            fc.post("/motion/jog", params={"x": "%.3f" % back, "feed": "1200"})
+            ctx.wait_for(lambda: abs(kernel_xy_mm(ctx)[0] - x0) < 0.02, 10, poll=0.1)
+    machine_idle(ctx)
+    ctx.check(abs(kernel_xy_mm(ctx)[0] - x0) < 0.05, "the head was not returned: %.3f mm off",
+              kernel_xy_mm(ctx)[0] - x0)
+    st, listed = fc.get("/tokens")
+    ctx.check(not [t for t in listed.get("tokens", []) if t.get("name", "").startswith("forgetest ")],
+              "a test token was left on the machine")
+    ctx.log("PASS: each token reached what it was granted from the LAN with no session, was refused "
+            "everything else in words, was refused over plain HTTP and once revoked, and the machine "
+            "keeps no token")
