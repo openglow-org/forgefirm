@@ -593,7 +593,11 @@ def advisories_rehash(ctx):
       description="The test makes its own account: the account record is moved aside under a "
                   "forgectrl restart, the account route creates a temporary one with a password "
                   "only the test knows, and the real record comes back under another restart at "
-                  "the end, the system accounts replayed and the temporary home removed. Over "
+                  "the end, the system accounts replayed and the temporary home removed. The data "
+                  "directory is set to 0700 first, as a strict umask leaves it: the render that makes "
+                  "the account opens it for search and nothing else (0711), and tried as the account, "
+                  "its home can be entered and written while the data directory cannot be listed and "
+                  "the account record cannot be read. Over "
                   "HTTPS (self-signed, so unverified): GET /wiz reports no session and the "
                   "certificate fingerprint; POST /login with a wrong password is refused (401); "
                   "five failures lock the address (429, wait at most 30 s) and the right password "
@@ -608,25 +612,86 @@ def account_login(ctx):
     before = wiz(fc)
     ev["account_before"] = (before.get("users") or {}).get("name")
     homes = "/data/forgefirm/home"
-    with installed(ctx, {users_path(): None}):
-        w = wiz(fc)
-        ctx.check(not (w.get("users") or {}).get("exists"), "an account still exists: %s", w.get("users"))
-        st, body = fc.post("/wiz/account", data={"name": name, "password": pw})
-        ctx.log("POST /wiz/account (temporary %r) -> %s %s", name, st, body if isinstance(body, dict) else "")
-        ctx.check(st == 200, "the temporary account was not created: %s %s", st, body)
-        w = wiz(fc)
-        ctx.check((w.get("users") or {}).get("name") == name, "the account reads %s", w.get("users"))
-        login_checks(ctx, name, pw)
-    rc, out = hw.initd("forgefirm-users", "reload")
-    ev["users_reload_rc"] = rc
-    ctx.log("forgefirm-users reload -> rc %s %s", rc, out.strip()[:200])
-    if name != ev["account_before"]:
-        import shutil
-        shutil.rmtree(os.path.join(homes, name), ignore_errors=True)
+    dir_mode = os.stat(data_dir()).st_mode & 0o7777
+    ev["data_dir_mode_found"] = "%04o" % dir_mode
+    try:
+        with installed(ctx, {users_path(): None}):
+            w = wiz(fc)
+            ctx.check(not (w.get("users") or {}).get("exists"), "an account still exists: %s", w.get("users"))
+            # the data directory as a strict umask leaves it: the account's render has to open it
+            os.chmod(data_dir(), 0o700)
+            st, body = fc.post("/wiz/account", data={"name": name, "password": pw})
+            ctx.log("POST /wiz/account (temporary %r) -> %s %s", name, st, body if isinstance(body, dict) else "")
+            ctx.check(st == 200, "the temporary account was not created: %s %s", st, body)
+            w = wiz(fc)
+            ctx.check((w.get("users") or {}).get("name") == name, "the account reads %s", w.get("users"))
+            reach = home_reach(name)
+            ev["home_reach"] = reach
+            ev["data_dir_mode_after_render"] = "%04o" % (os.stat(data_dir()).st_mode & 0o7777)
+            ctx.log("as %s, from a data directory found 0700 (now %s): %s", name, ev["data_dir_mode_after_render"], reach)
+            ctx.check(reach.get("cd") == "ok" and reach.get("write") == "ok",
+                      "the account cannot use its own home %s: %s", reach.get("home"), reach)
+            ctx.check(ev["data_dir_mode_after_render"] == "0711", "the render left the data directory at %s, expected "
+                      "0711 (the search bit and nothing else)", ev["data_dir_mode_after_render"])
+            ctx.check(reach.get("list_data_dir") == "EACCES" and reach.get("read_record") == "EACCES",
+                      "the account reads what is not its own: %s", reach)
+            login_checks(ctx, name, pw)
+    finally:
+        # as found; the replay below is the product's own say on the mode
+        os.chmod(data_dir(), dir_mode)
+        rc, out = hw.initd("forgefirm-users", "reload")
+        ev["users_reload_rc"] = rc
+        ctx.log("forgefirm-users reload -> rc %s %s", rc, out.strip()[:200])
+        if name != ev["account_before"]:
+            import shutil
+            shutil.rmtree(os.path.join(homes, name), ignore_errors=True)
     after = wiz(fc)
     ctx.check((after.get("users") or {}).get("name") == ev["account_before"],
               "the account reads %r after the restore, was %r", (after.get("users") or {}).get("name"),
               ev["account_before"])
+
+
+# Run as root: becomes the account and tries its own home, and what is
+# not its own. One JSON line.
+HOME_REACH = r'''
+import errno, json, os, pwd, sys
+p = pwd.getpwnam(sys.argv[1])
+os.setgroups([])
+os.setgid(p.pw_gid)
+os.setuid(p.pw_uid)
+
+
+def tried(fn):
+    try:
+        fn()
+        return "ok"
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+
+
+def write():
+    path = os.path.join(p.pw_dir, ".forgetest-reach")
+    with open(path, "w") as f:
+        f.write("x")
+    os.remove(path)
+
+
+print(json.dumps({"uid": os.getuid(), "home": p.pw_dir, "cd": tried(lambda: os.chdir(p.pw_dir)), "write": tried(write),
+                  "list_data_dir": tried(lambda: os.listdir(sys.argv[2])),
+                  "read_record": tried(lambda: open(os.path.join(sys.argv[2], "users")).read())}))
+'''
+
+
+def home_reach(name):
+    """What the account can do with its own home and with the data
+    directory around it, tried as the account."""
+    import subprocess
+    import sys
+    p = subprocess.run([sys.executable, "-c", HOME_REACH, name, data_dir()], capture_output=True, text=True, timeout=30)
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        return {"error": (p.stderr or p.stdout).strip()[-200:]}
 
 
 def login_checks(ctx, name, pw):

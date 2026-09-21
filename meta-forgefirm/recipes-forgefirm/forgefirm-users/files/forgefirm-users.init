@@ -44,8 +44,9 @@
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 umask 077
 
-RECORD=/data/forgefirm/users
-HOMES=/data/forgefirm/home
+DATA_DIR=/data/forgefirm
+RECORD=$DATA_DIR/users
+HOMES=$DATA_DIR/home
 STATE=/run/forgefirm/accounts
 ACCOUNT_FILES="passwd shadow group gshadow"
 LOGIN_SHELL=/bin/sh
@@ -140,6 +141,12 @@ replay () {
   # 0755: a login traverses it to reach its home (the umask above is for
   # the tmpfs state).
   [ -d "$HOMES" ] || { mkdir -p "$HOMES" && chmod 0755 "$HOMES"; }
+  # And it walks through the data directory to get there. A data directory
+  # that was made under a strict umask is 0700, and the account cannot
+  # reach its own home. The search bit is put on it whoever made it:
+  # nothing is taken away and nothing in it becomes listable, and what is
+  # private in it is closed file by file.
+  chmod go+x "$DATA_DIR" || log "cannot open $DATA_DIR for search: no account reaches its home"
   ACCOUNTS=""
   KEEP=""
   while IFS=: read -r name hash uid rest; do

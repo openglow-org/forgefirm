@@ -122,7 +122,7 @@ def fds_of(pid):
                   "the daemon ownership, "
                   "the init ordering, the extension host as one process that starts after forgectrl and "
                   "stops before it on a machine with no package installed and nothing running under a "
-                  "pool account, the file modes the release depends on, and the mounts: the "
+                  "pool account, the data directory open for search on a machine with an account, the file modes the release depends on, and the mounts: the "
                   "rootfs read-only, /data writable, the account files and the banner rendered "
                   "into tmpfs, the sshd host keys on /data, the factory slots on the dev image only.")
 def image_health(ctx):
@@ -309,6 +309,14 @@ def image_health(ctx):
             ev[path] = "%o" % m
             ctx.log("%s mode %o", path, m)
             ctx.check(m == 0o600, "%s mode %o, expected 600", path, m)
+    # an operator account walks through the data directory to its home, and a
+    # package's account to its files: forgefirm-users opens it for search at
+    # every render, whoever made it and under whatever umask
+    if os.path.exists("/data/forgefirm/users"):
+        m = stat.S_IMODE(os.stat("/data/forgefirm").st_mode)
+        ev["/data/forgefirm"] = "%o" % m
+        ctx.log("/data/forgefirm mode %o", m)
+        ctx.check(m & 0o011 == 0o011, "/data/forgefirm mode %o: no account can walk through it to its home", m)
     if os.path.isdir("/data"):
         s = os.statvfs("/data")
         free_mb = s.f_bavail * s.f_frsize // (1024 * 1024)
