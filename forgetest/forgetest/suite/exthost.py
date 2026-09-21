@@ -486,6 +486,8 @@ REF_SERVICE = r'''
 import errno, json, os, socket, sys, time
 lan = sys.argv[1]
 data, pkg = os.environ["FFX_DATA"], os.environ["FFX_PKG"]
+if os.path.exists(os.path.join(data, "stop")):
+    sys.exit(3)
 
 
 def word(e):
@@ -617,14 +619,14 @@ def _tree(root):
     return sorted(out)
 
 
-def _pack_reference(work, lan):
+def _pack_reference(work, lan, more_caps=()):
     """The reference package, signed with a key made here: (archive, public key)."""
     import io
     import tarfile
     manifest = {"manifest": 1, "id": REF_ID, "name": "forgetest reference", "version": "1.0.0",
                 "author": "forgetest", "license": "MIT", "api": "0.1", "runtime": "python",
                 "service": {"exec": "bin/reference.py", "args": [lan or "-"]},
-                "capabilities": ["net.outbound:%s:443" % REF_DEST, "storage:1"]}
+                "capabilities": ["net.outbound:%s:443" % REF_DEST, "storage:1"] + list(more_caps)}
     payload = os.path.join(work, "payload.tar.gz")
     with tarfile.open(payload, "w:gz") as t:
         for name, text, mode in (("manifest.json", json.dumps(manifest), 0o644),
@@ -976,4 +978,170 @@ def armed_freeze(ctx):
     finally:
         _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
     _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
+
+
+# ------------------------------------------------------------- the hold
+
+HOLDS_DIR = "/run/forgefirm/holds"
+REQUIRED_HOLDS = EXT_ROOT + "/required-holds"
+
+
+@test("exthost.hold-pause-tier", title="A package's hold withholds fire, and the operator's exits end it",
+      subsystem="exthost", kind="auto", hardware="takeover", est_min=7,
+      covers=[("forgeext", "src/holdkeep.*"), ("forgeext", "src/run.*"), ("forgeext", "src/install.*"),
+              ("forgeext", "src/state.*"), ("forgeext", "src/main.c"), ("forgectrl", "src/holds.*"),
+              ("forgectrl", "src/cool.*")],
+      requires=["exthost.service"],
+      description="The reference package is installed with the hold grant and its hold is marked required "
+                  "(the package is then named under required-holds for forgectrl). Until its service has "
+                  "run healthy (60 s) the required hold stands in the host's words; from then on the host "
+                  "keeps its hold file fresh and clear and the engine's verdict is OK. The test then "
+                  "makes the service end at every start: the host raises the hold in its own words and GET "
+                  "/cool/status reads verdict EXT, fire_ok false, hold true, with the reason naming the "
+                  "package. Safe mode ends the hold within two ticks and leaving it brings the hold back; "
+                  "marked advisory the hold is dropped and the verdict is OK; marked required again, with "
+                  "the host suspended the file goes stale and the reason becomes that the host is not "
+                  "answering, and resumed it is the package's again; ext_enabled=0 ends it. Nothing moves "
+                  "and nothing fires: the verdict is read at idle. Everything is put back as "
+                  "exthost.service puts it back, and the required holds are empty at the end.")
+def hold_pause_tier(ctx):
+    import tempfile
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(len(_host_pids()) == 1, "the extension host is not one running process: %s", _host_pids())
+    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: settings are locked")
+    prior = fc.settings().get("ext_enabled") or ""
+    raw = read_file(record_path())
+    ctx.check(raw, "no setup record at %s", record_path())
+    ctx.check(not os.path.exists(SAFE_FILE), "%s exists: the machine is in safe mode", SAFE_FILE)
+    found_tree = _tree(EXT_ROOT)
+    dir_mode = os.stat(os.path.dirname(EXT_ROOT)).st_mode & 0o7777
+    st, body, hdrs = request(fc.base, "GET", "/advisories/extensions", headers={"Host": fc.host_header()})
+    etag = hdrs.get("etag")
+    ctx.check(st == 200 and etag, "GET /advisories/extensions -> %s", st)
+
+    def cool():
+        st_, c = fc.get("/cool/status")
+        return c if st_ == 200 and isinstance(c, dict) else {}
+
+    def verdict_is(name, seconds, reason=None):
+        def ok():
+            c = cool()
+            return c if c.get("verdict") == name and (reason is None or reason in (c.get("reason") or "")) else None
+        return _until(ctx, ok, seconds, poll=0.25)
+
+    def hold_file():
+        try:
+            h = json.loads(_read("%s/%s.json" % (HOLDS_DIR, REF_ID)))
+        except ValueError:
+            return None
+        h["age"] = time.monotonic() - h["ts_mono"]
+        return h
+
+    start = cool()
+    ev["verdict_at_start"] = {k: start.get(k) for k in ("verdict", "fire_ok", "hold", "reason")}
+    ctx.check(start.get("verdict") == "OK", "the engine's own verdict %r stands above a hold: the test needs OK",
+              start.get("verdict"))
+    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
+    stop_path = os.path.join(EXT_ROOT, "data", REF_ID, "stop")
+    why_not_running = REF_ID + ": the extension is not running"
+    try:
+        archive, pub = _pack_reference(work, lan_ip(), more_caps=["hold"])
+        with open(pub, "rb") as f:
+            write_file(os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub"), f.read())
+        os.chmod(os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub"), 0o644)
+        r = _forgeext("install", archive, "--consent-community")
+        ev["install_without_the_grant"] = r.get("error")
+        ctx.check(r.get("ok") is False and "hold" in (r.get("error") or ""), "a hold was installed without the operator's grant: %s", r)
+        r = _forgeext("install", archive, "--consent-community", "--grant", "hold")
+        ctx.check(r.get("ok") is True, "the install -> %s", r.get("error"))
+        ctx.check(not os.listdir(REQUIRED_HOLDS), "a granted hold is required before the operator marks it: %s",
+                  os.listdir(REQUIRED_HOLDS))
+        r = _forgeext("hold", REF_ID, "required")
+        ctx.check(r.get("ok") is True and os.listdir(REQUIRED_HOLDS) == [REF_ID], "marked required -> %s, named %s",
+                  r.get("error"), os.listdir(REQUIRED_HOLDS))
+
+        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        ctx.check(st == 200, "ext_enabled=1 over the advisory -> %s %r", st, reply)
+        beat_path = os.path.join(EXT_ROOT, "data", REF_ID, "beat")
+        seen = set()
+        ctx.check(_until(ctx, lambda: seen.add(_read(beat_path)) or len(seen) >= 3, 120, poll=0.2),
+                  "the reference service's heartbeat does not advance: %s", _svc(REF_ID) or _host_status())
+        h = hold_file()
+        ev["running"] = {"hold_file": h, "verdict": cool().get("verdict"), "status_hold": _svc(REF_ID).get("hold")}
+        ctx.check(h and h["required"] is True and h["age"] < 1.5, "a running package's required hold is not fresh: %s", h)
+        # a required hold stands until its package has run healthy (60 s): one that ends at every
+        # start reads as running for a moment each time, and must not flicker clear
+        ctx.check(cool().get("verdict") == "EXT" and "only just started" in (cool().get("reason") or ""),
+                  "a required hold is clear before its package has run healthy: %s", cool())
+        ctx.check(verdict_is("OK", 100), "with the package running healthy the verdict is %s (%s)", cool().get("verdict"),
+                  cool().get("reason"))
+        h = hold_file()
+        ctx.check(h and h["raised"] is False and h["age"] < 1.5, "healthy: the hold file is not fresh and clear: %s", h)
+        ctx.check(_svc(REF_ID).get("hold") == "required", "the status file does not say the hold is required: %s", _svc(REF_ID))
+
+        # the package can no longer speak for itself
+        _write(stop_path, "")
+        os.kill(_svc(REF_ID)["pid"], signal.SIGKILL)
+        t0 = time.time()
+        c = verdict_is("EXT", 40, why_not_running)
+        ev["held"] = {"after_s": round(time.time() - t0, 1), "cool": {k: (c or {}).get(k) for k in ("verdict", "fire_ok", "hold", "reason")},
+                      "hold_file": hold_file()}
+        ctx.log("the service ends at every start: %s", ev["held"])
+        ctx.check(c and c.get("fire_ok") is False and c.get("hold") is True,
+                  "the hold does not withhold fire: %s", c or cool())
+        # it reads as running for a moment at every start on its way to quarantine: never clear
+        looks = []
+        for _ in range(24):
+            ctx.sleep(0.5)
+            c = cool()
+            looks.append((c.get("verdict"), c.get("fire_ok")))
+        ev["looks_over_the_crash_loop"] = sorted(set(looks), key=str)
+        ctx.check(all(v == "EXT" and ok is False for v, ok in looks),
+                  "the required hold flickered clear while its package kept ending: %s", ev["looks_over_the_crash_loop"])
+
+        # the operator's exits
+        _write(SAFE_FILE, "")
+        t0 = time.time()
+        ctx.check(verdict_is("OK", 4), "safe mode did not end the hold within four seconds: %s", cool())
+        ev["safe_mode_released_s"] = round(time.time() - t0, 1)
+        os.remove(SAFE_FILE)
+        ctx.check(verdict_is("EXT", 30, why_not_running), "out of safe mode the hold did not come back: %s", cool())
+
+        r = _forgeext("hold", REF_ID, "advisory")
+        ctx.check(r.get("ok") is True and not os.listdir(REQUIRED_HOLDS), "marked advisory -> %s, still named %s",
+                  r.get("error"), os.listdir(REQUIRED_HOLDS))
+        ctx.check(verdict_is("OK", 6), "an advisory hold of a package that is not running was not dropped: %s", cool())
+        r = _forgeext("hold", REF_ID, "required")
+        ctx.check(r.get("ok") is True and verdict_is("EXT", 6, why_not_running), "marked required again: %s", cool())
+
+        # the host itself gone quiet: the file goes stale, and that is what stands
+        host = _host_pids()[0]
+        os.kill(host, signal.SIGSTOP)
+        try:
+            c = verdict_is("EXT", 8, REF_ID + ": the extension host is not answering")
+            ev["host_suspended"] = {k: (c or cool()).get(k) for k in ("verdict", "fire_ok", "reason")}
+            ctx.check(c and c.get("fire_ok") is False, "with the host suspended the required hold does not stand on its "
+                      "stale file: %s", c or cool())
+        finally:
+            os.kill(host, signal.SIGCONT)
+        ctx.check(verdict_is("EXT", 8, why_not_running), "the host resumed: the hold is not the package's again: %s", cool())
+
+        st, reply = fc.post("/settings", data={"ext_enabled": "0"})
+        ctx.check(st == 200, "ext_enabled=0 -> %s %r", st, reply)
+        t0 = time.time()
+        ctx.check(verdict_is("OK", 4), "ext_enabled=0 did not end the hold within four seconds: %s", cool())
+        ev["ext_off_released_s"] = round(time.time() - t0, 1)
+        ctx.log("PASS: held in %s s; safe mode released it in %s s, extensions off in %s s", ev["held"]["after_s"],
+                ev["safe_mode_released_s"], ev["ext_off_released_s"])
+    finally:
+        for pid in _host_pids():
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except OSError:
+                pass
+        _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
+    _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
+    ctx.check(not os.listdir(REQUIRED_HOLDS), "a required hold is still named at the end: %s", os.listdir(REQUIRED_HOLDS))
+    ctx.check(_until(ctx, lambda: cool().get("verdict") == "OK", 6), "the verdict at the end is %s", cool().get("verdict"))
 
