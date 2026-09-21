@@ -977,6 +977,31 @@ def service(ctx):
                   and (rep.get("api_traversal") or [0])[0] == 400,
                   "a hold it was not granted, a path the API does not have, a path with ..: %s %s %s",
                   rep.get("api_hold"), rep.get("api_nowhere"), rep.get("api_traversal"))
+        # the storage quota: the host measures what it holds and sets it aside
+        big = os.path.join(EXT_ROOT, "data", REF_ID, "toobig")
+        with open(big, "wb") as f:
+            f.write(b"x" * (2 << 20))
+        ctx.log("wrote 2 MiB into its data directory (it declares storage:1)")
+
+        def quarantined():
+            x = _svc(REF_ID)
+            return x if x.get("state") == "quarantined" else None
+
+        q = _until(ctx, quarantined, 90, poll=1.0)
+        ev["quota"] = {"state": (q or _svc(REF_ID)).get("state"), "reason": (q or _svc(REF_ID)).get("reason")}
+        ctx.log("over its quota: %s", ev["quota"])
+        ctx.check(q, "a service 2 MiB over its 1 MiB quota was not set aside: %s", _svc(REF_ID))
+        ctx.check("may hold" in ((q or {}).get("reason") or ""),
+                  "it was set aside without the quota's reason: %s", (q or {}).get("reason"))
+        ctx.check(not os.path.exists("/proc/%d" % pid), "it is still running after being set aside")
+        # The operator's way out: clear the data, enable it again.
+        os.remove(big)
+        r = _forgeext("enable", REF_ID)
+        ctx.check(r.get("ok") is True, "enable after the quota -> %s", r.get("error"))
+        back = _until(ctx, lambda: _svc(REF_ID) if _svc(REF_ID).get("state") == "running" else None, 90, poll=0.5)
+        ctx.check(back, "it did not come back once its data was cleared and it was enabled: %s", _svc(REF_ID))
+        pid = (back or {}).get("pid") or pid
+
         sock = "%s/%s.sock" % (API_DIR, REF_ID)
         st_ = os.stat(sock)
         ctx.check(stat.S_ISSOCK(st_.st_mode) and stat.S_IMODE(st_.st_mode) == 0o660 and (st_.st_uid, st_.st_gid) == (0, uid),
