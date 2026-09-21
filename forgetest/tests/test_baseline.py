@@ -457,6 +457,71 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class ExtensionFreeTests(BaselineTests):
+    """A campaign's machine is extension-free: what a test made is removed,
+    what is the operator's is reported and left alone."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = os.path.join(self.tmp, "ext")
+        for d in ("pkg", "keys", "data"):
+            os.makedirs(os.path.join(self.root, d))
+        # a stand-in for the host's command line: remove <id> takes the package away
+        self.forgeext = os.path.join(self.tmp, "forgeext")
+        with open(self.forgeext, "w") as f:
+            f.write('#!/bin/sh\n[ "$1" = remove ] && rm -rf "%s/pkg/$2" && echo \'{"ok": true}\'\n' % self.root)
+        os.chmod(self.forgeext, 0o755)
+        self.pool = {}
+        self._saved = (baseline.hw.EXT_ROOT, baseline.hw.FORGEEXT, baseline.hw.pool_pids, baseline.EXT_STOP_S)
+        baseline.hw.EXT_ROOT, baseline.hw.FORGEEXT = self.root, self.forgeext
+        baseline.hw.pool_pids = lambda: dict(self.pool)
+        baseline.EXT_STOP_S = 0.2
+
+    def tearDown(self):
+        baseline.hw.EXT_ROOT, baseline.hw.FORGEEXT, baseline.hw.pool_pids, baseline.EXT_STOP_S = self._saved
+        super().tearDown()
+
+    def _package(self, id_):
+        os.makedirs(os.path.join(self.root, "pkg", id_, "1.0.0"))
+
+    def _key(self, name):
+        with open(os.path.join(self.root, "keys", name), "w") as f:
+            f.write("x")
+
+    def test_an_installed_package_that_does_not_run_is_nobodys_leftover(self):
+        self._package("org.example.notify")
+        self._key("owner.pub")
+        self.assertEqual(self.bl().enforce("pre", captured=None), [])
+
+    def test_what_a_test_left_behind_is_removed_and_the_operators_is_not(self):
+        self._package("org.forgetest.reference")
+        self._package("org.example.notify")
+        self._key("forgetest-reference.pub")
+        self._key("owner.pub")
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertEqual(sorted(left), ["ext.owner_key", "ext.package"])
+        self.assertEqual((left["ext.package"].found, left["ext.package"].action), ("org.forgetest.reference", "restored"))
+        self.assertEqual((left["ext.owner_key"].found, left["ext.owner_key"].action), ("forgetest-reference.pub", "restored"))
+        self.assertEqual(os.listdir(os.path.join(self.root, "pkg")), ["org.example.notify"])
+        self.assertEqual(os.listdir(os.path.join(self.root, "keys")), ["owner.pub"])
+
+    def test_a_package_that_cannot_be_removed_says_so(self):
+        self._package("org.forgetest.reference")
+        with open(self.forgeext, "w") as f:
+            f.write('#!/bin/sh\necho \'{"ok": false, "error": "the lock is held"}\'\nexit 1\n')
+        left = self.bl().enforce("post", captured=None)
+        self.assertEqual([x.item for x in left], ["ext.package"])
+        self.assertTrue(left[0].action.startswith("failed:") and "the lock is held" in left[0].action, left[0].action)
+
+    def test_running_extensions_are_reported_and_left_alone(self):
+        self._package("org.example.notify")
+        self.pool = {4242: 800}
+        left = self.bl().enforce("pre", captured=None)
+        self.assertEqual([(x.item, x.action) for x in left], [("ext.running", "unrestorable")])
+        self.assertIn("org.example.notify", left[0].found)
+        self.assertTrue(os.path.isdir(os.path.join(self.root, "pkg", "org.example.notify")))
+
+
 class TransientNotLeftoverTests(BaselineTests):
     """A leftover is what a run left behind, not the machine part-way
     through its own work. Found on the bench reference, where

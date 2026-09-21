@@ -324,6 +324,40 @@ def initd(service, action, timeout=60):
     return p.returncode, p.stdout.decode("utf-8", "replace")
 
 
+# The extension host's side of the machine (forgefirm-sandbox, forgeext).
+EXT_POOL_FIRST, EXT_POOL_LAST = 800, 831
+EXT_ROOT = "/data/forgefirm/ext"
+EXT_TEST_PREFIX = "org.forgetest."          # a package a test made; every other one is the operator's
+FORGEEXT = "/usr/bin/forgeext"
+
+
+def pool_pids():
+    """{pid: uid} of every process that runs under an extension pool account."""
+    out = {}
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return out
+    for pid in pids:
+        try:
+            with open("/proc/%s/status" % pid) as f:
+                line = next((x for x in f if x.startswith("Uid:")), "")
+            uid = int(line.split()[1])              # the real uid; a service has all four alike
+        except (OSError, IndexError, ValueError):
+            continue
+        if EXT_POOL_FIRST <= uid <= EXT_POOL_LAST:
+            out[int(pid)] = uid
+    return out
+
+
+def ext_packages():
+    """The ids of the installed extension packages."""
+    try:
+        return sorted(d for d in os.listdir(EXT_ROOT + "/pkg") if os.path.isdir(os.path.join(EXT_ROOT, "pkg", d)))
+    except OSError:
+        return []
+
+
 def pidof(comm):
     """PIDs whose /proc/<pid>/comm equals comm (15-char kernel limit applies)."""
     out = []

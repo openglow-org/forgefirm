@@ -111,7 +111,7 @@ def fds_of(pid):
 
 @test("image.health", title="Post-flash image health", subsystem="image", kind="auto",
       always=True, est_min=1,
-      covers=[("forgectrl", "init/**"), ("forgectrl", "src/main.c"), ("forgectrl", "src/auth.c"),
+      covers=[("forgectrl", "init/**"), ("forgeext", "init/**"), ("forgectrl", "src/main.c"), ("forgectrl", "src/auth.c"),
               ("forgectrl", "CMakeLists.txt"), ("grblhal-glowforge", "src/boards/**"),
               ("grblhal-glowforge", "CMakeLists.txt"), ("kernel-module-glowforge", "**"),
               ("linux-fslc", "**")],
@@ -120,7 +120,9 @@ def fds_of(pid):
                   "console banner and the motd, "
                   "the kernel options, the module, the pulse ring it maps and the SDMA clocks it holds, "
                   "the daemon ownership, "
-                  "the init ordering, the file modes the release depends on, and the mounts: the "
+                  "the init ordering, the extension host as one process that starts after forgectrl and "
+                  "stops before it on a machine with no package installed and nothing running under a "
+                  "pool account, the file modes the release depends on, and the mounts: the "
                   "rootfs read-only, /data writable, the account files and the banner rendered "
                   "into tmpfs, the sshd host keys on /data, the factory slots on the dev image only.")
 def image_health(ctx):
@@ -266,6 +268,29 @@ def image_health(ctx):
     ctx.log("rc6.d: %s", " ".join(k))
     ctx.check(kg and kf, "rc6.d lacks the grblhal/forgectrl kill links")
     ctx.check(kg[0] < kf[0], "controller kill link %s must sort before forgectrl's %s", kg[0], kf[0])
+
+    # 5b. the extension host: one process, up after forgectrl and down
+    # before it, and a campaign's machine is extension-free
+    host = []
+    for pid in hw.pidof("forgeext"):
+        argv = _read("/proc/%d/cmdline" % pid, "").split("\0")
+        if argv[:2] == [hw.FORGEEXT, "run"]:
+            host.append(pid)
+    ev["extension_host_pids"] = host
+    ctx.check(len(host) == 1, "the extension host is not one running process: %s", host)
+    s5 = sorted(os.path.basename(x) for x in glob.glob("/etc/rc5.d/S*"))
+    sx = [x for x in s5 if x.endswith("forgeext")]
+    sf = [x for x in s5 if x.endswith("forgectrl")]
+    kx = [x for x in k if x.endswith("forgeext")]
+    ev["forgeext_links"] = {"start": sx, "kill": kx}
+    ctx.check(sx and sf and sf[0] < sx[0], "the extension host must start after forgectrl: %s, %s", sf, sx)
+    ctx.check(kx and kx[0] < kf[0], "the extension host must stop before forgectrl: %s, %s", kx, kf)
+    ev["extension_packages"] = hw.ext_packages()
+    ev["pool_processes"] = len(hw.pool_pids())
+    ctx.log("extension host pid %s, packages %s, pool processes %d", host, ev["extension_packages"], ev["pool_processes"])
+    ctx.check(not ev["extension_packages"], "a campaign wants an extension-free machine: installed %s",
+              ev["extension_packages"])
+    ctx.check(not ev["pool_processes"], "%d process(es) run under extension pool accounts", ev["pool_processes"])
 
     # 6. logging lever present, no userspace watchdog daemon
     logging = [n for n in ("forgefirm-logging", "forgefirm-logrotate") if os.path.exists("/etc/init.d/" + n)]

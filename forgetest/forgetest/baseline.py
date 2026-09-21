@@ -41,6 +41,7 @@ that made it, not a reason to hand the dirt on.
 import json
 import os
 import struct
+import subprocess
 import time
 
 from . import hw
@@ -289,6 +290,11 @@ def read_program_total():
         return None
 
 
+# The extension host stops a removed package's service on its next
+# one-second turn; its group is killed and waited for inside that turn.
+EXT_STOP_S = 8
+
+
 class Leftover:
     def __init__(self, item, found, expected, action):
         self.item = item
@@ -489,6 +495,7 @@ class Baseline:
         self._forgectrl_side(left, captured)
         self._kernel_side(left)
         self._lamp_side(left)
+        self._ext_side(left)
         self._preserved(left, captured)
         if left:
             self.log("%s: %d leftover(s): %s" % (phase, len(left), "; ".join(str(x) for x in left)))
@@ -686,6 +693,37 @@ class Baseline:
             act = "restored (stood the machine down)"
         left.append(Leftover("cool", found, "idle/unarmed/no hold",
                              act if w is not None else "failed: still %s" % found))
+
+    def _ext_side(self, left):
+        """A campaign's machine is extension-free. What a test made and
+        left behind (a package under the tests' own prefix, the owner key
+        it was signed with) is removed, and the host stops its service.
+        The operator's own packages are theirs: running ones are reported
+        and not touched."""
+        for id_ in [p for p in hw.ext_packages() if p.startswith(hw.EXT_TEST_PREFIX)]:
+            try:
+                p = subprocess.run([hw.FORGEEXT, "remove", id_], capture_output=True, text=True, timeout=120)
+                ok = p.returncode == 0 and id_ not in hw.ext_packages()
+                act = "restored" if ok else "failed: %s" % (p.stdout.strip()[-120:] or p.returncode)
+            except (OSError, subprocess.SubprocessError) as e:
+                act = "failed: %s" % e
+            left.append(Leftover("ext.package", id_, "not installed", act))
+        keys = hw.EXT_ROOT + "/keys"
+        for name in sorted(os.listdir(keys)) if os.path.isdir(keys) else []:
+            if not name.startswith("forgetest-"):
+                continue
+            try:
+                os.remove(os.path.join(keys, name))
+                act = "restored"
+            except OSError as e:
+                act = "failed: %s" % e
+            left.append(Leftover("ext.owner_key", name, "absent", act))
+        # the host stops a removed package's service on its next turn
+        running = self._wait("no test package running", lambda: not hw.pool_pids() or None, EXT_STOP_S) is None \
+            and hw.pool_pids()
+        if running:
+            left.append(Leftover("ext.running", "%d process(es) under pool accounts, packages %s"
+                                 % (len(running), hw.ext_packages()), "an extension-free machine", "unrestorable"))
 
     def _lamp_side(self, left):
         """The lid lamp at forgectrl's idle level (the lid_lamp_idle setting).
