@@ -63,7 +63,10 @@ def _jpeg_size(data):
                   "far smaller), a second snapshot with the lid lamp switched off differs from it "
                   "and is smaller (the capture is live, not a frame the pipeline is re-serving, "
                   "and the lamp lights what the camera sees), and the MJPEG stream starts and "
-                  "stops.")
+                  "stops. A capture marked background=1 yields to a viewer: while the stream is "
+                  "open it is refused in words, the operator's own unmarked capture is still "
+                  "served, and once the viewer stops the background capture is served again. A "
+                  "background value that is neither 0 nor 1 is refused.")
 def snapshot(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -116,6 +119,48 @@ def snapshot(ctx):
     ev["stream_ctype"] = ctype
     ctx.log("stream: %s, first %d bytes", ctype, len(chunk))
     ctx.check("multipart" in ctype and b"\xff\xd8" in chunk, "stream is not an MJPEG multipart")
+
+    # A capture nobody is waiting for yields to one somebody is: a
+    # snapshot borrows the mux and stutters a running stream, which is a
+    # price worth paying for an operator and not for a program. The
+    # stream above is closed by now, so one is opened and held here.
+    bad = fc.get("/cam/snapshot", params={"cam": "lid", "background": "maybe"})
+    ev["background_bad_value"] = bad
+    ctx.check(bad[0] == 400, "background=maybe -> %s", bad)
+
+    held = urllib.request.urlopen(
+        urllib.request.Request(fc.base + "/cam/stream", headers={"Host": fc.host_header()}), timeout=10)
+    try:
+        held.read(8192)
+        watching = None
+        for _ in range(40):
+            st_, body_ = fc.get("/cam/status")
+            if isinstance(body_, dict) and body_.get("clients"):
+                watching = body_
+                break
+            ctx.sleep(0.25)
+        ev["clients_while_watching"] = (watching or {}).get("clients")
+        ctx.check(watching, "no viewer was counted while the stream was held: %s", body_)
+        st_, why = fc.get("/cam/snapshot", params={"cam": "lid", "res": "half", "background": "1"})
+        ev["background_while_watched"] = [st_, why]
+        ctx.log("background capture while a viewer watches -> %s %s", st_, why)
+        ctx.check(st_ == 409, "a background capture did not yield to a viewer: %s %s", st_, why)
+        st_, data_ = fc.get("/cam/snapshot", params={"cam": "lid", "res": "half"}, raw=True)
+        ev["operator_while_watched"] = [st_, len(data_ or b"")]
+        ctx.check(st_ == 200 and data_ and data_[:2] == b"\xff\xd8",
+                  "the operator's own capture was refused while watching: %s", st_)
+    finally:
+        held.close()
+    for _ in range(40):
+        st_, body_ = fc.get("/cam/status")
+        if isinstance(body_, dict) and not body_.get("clients"):
+            break
+        ctx.sleep(0.25)
+    st_, data_ = fc.get("/cam/snapshot", params={"cam": "lid", "res": "half", "background": "1"}, raw=True)
+    ev["background_after_watching"] = [st_, len(data_ or b"")]
+    ctx.check(st_ == 200 and data_ and data_[:2] == b"\xff\xd8",
+              "a background capture was still refused after the viewer stopped: %s", st_)
+
     ctx.sleep(2)
     st, body = fc.get("/cam/status")
     ev["cam_status_after"] = body
