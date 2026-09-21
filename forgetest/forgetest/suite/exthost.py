@@ -531,6 +531,37 @@ def api(method, path, body=None):
         s.close()
 
 
+def shot(body):
+    """POST /v0/camera: (status, bytes or the error's words). A frame is
+    bytes, so this one does not try to read the answer as JSON."""
+    payload = json.dumps(body).encode()
+    head = ("POST /v0/camera HTTP/1.1\r\nHost: forgeext\r\nContent-Type: application/json\r\n"
+            "Content-Length: %d\r\n\r\n" % len(payload))
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(40)
+    try:
+        s.connect(os.environ["FFX_API"])
+        s.sendall(head.encode() + payload)
+        buf = b""
+        while True:
+            c = s.recv(65536)
+            if not c:
+                break
+            buf += c
+        top, _, rest = buf.partition(b"\r\n\r\n")
+        code = int(top.split()[1])
+        if code == 200:
+            return code, len(rest), rest[:2] == b"\xff\xd8", b"image/jpeg" in top
+        try:
+            return code, json.loads(rest or b"{}").get("error", ""), False, False
+        except ValueError:
+            return code, rest[:80].decode("utf-8", "replace"), False, False
+    except (OSError, ValueError, IndexError) as e:
+        return 599, str(e), False, False
+    finally:
+        s.close()
+
+
 def opened(path, mode="r"):
     try:
         with open(path, mode) as f:
@@ -581,6 +612,9 @@ report = {
     "loopback_undeclared_port": dial("127.0.0.1", 80),
     "netlink_socket": family(16),
     "unix_socket": family(1),
+    "api_camera": shot({"camera": "lid", "resolution": "half"}),
+    "api_camera_head": shot({"camera": "head"}),
+    "api_camera_bad": shot({"camera": "bed"}),
     "api_settings": api("GET", "/v0/settings"),
     "api_settings_set": api("POST", "/v0/settings", {"threshold": 70, "note": "set from inside"}),
     "api_settings_undeclared": api("POST", "/v0/settings", {"nothere": 1}),
@@ -619,6 +653,13 @@ while True:
             json.dump({"place": place, "seen": seen, "polls": polls, "last": ans,
                        "connected": ans.get("connected") if isinstance(ans, dict) else None}, f)
         os.rename(os.path.join(data, "events.json.new"), os.path.join(data, "events.json"))
+    # the test's word to the service: take a capture now
+    ask = os.path.join(data, "shoot")
+    if os.path.exists(ask):
+        os.remove(ask)
+        with open(os.path.join(data, "shot.new"), "w") as f:
+            json.dump(shot({"camera": "lid", "resolution": "half"}), f)
+        os.rename(os.path.join(data, "shot.new"), os.path.join(data, "shot"))
     # the test's word to the service: what to say of its hold
     say = os.path.join(data, "say")
     if os.path.exists(say):
@@ -748,7 +789,7 @@ def _pack_reference(work, lan, more_caps=()):
                              "when": {"type": "choice", "default": "end",
                                       "choices": ["start", "end", "never"]}},
                 "capabilities": ["net.outbound:%s:443" % REF_DEST, "storage:1", "machine.read",
-                                 "settings.own"] + list(more_caps)}
+                                 "settings.own", "camera.lid"] + list(more_caps)}
     payload = os.path.join(work, "payload.tar.gz")
     with tarfile.open(payload, "w:gz") as t:
         for name, text, mode in (("manifest.json", json.dumps(manifest), 0o644),
@@ -943,8 +984,56 @@ def service(ctx):
         ev["api"] = {k: rep.get(k) for k in ("api_self", "api_mode", "api_hold", "api_nowhere", "api_traversal")}
         ctx.check(me[0] == 200 and me[1].get("id") == REF_ID and me[1].get("version") == "1.0.0"
                   and sorted(me[1].get("capabilities") or []) == sorted(["net.outbound:%s:443" % REF_DEST, "storage:1",
-                                                                          "machine.read", "settings.own"]),
+                                                                          "machine.read", "settings.own",
+                                                                          "camera.lid"]),
                   "GET /v0/self from the inside: %s", me)
+
+        # a camera: the one it was granted, and not the one it was not
+        cam = rep.get("api_camera") or [0, "", False, False]
+        ev["api_camera"] = {"status": cam[0], "bytes": cam[1] if cam[0] == 200 else None,
+                            "jpeg": cam[2], "image_type": cam[3],
+                            "why": cam[1] if cam[0] != 200 else None}
+        ctx.log("the lid camera, from inside the sandbox: %s", ev["api_camera"])
+        ctx.check(cam[0] == 200 and cam[2] and cam[3] and isinstance(cam[1], int) and cam[1] > 4096,
+                  "the granted camera did not come back as a JPEG: %s", ev["api_camera"])
+        head_ = rep.get("api_camera_head") or [0, ""]
+        ev["api_camera_head"] = head_[:2]
+        ctx.check(head_[0] == 403, "the head camera, which it was not granted -> %s", head_[:2])
+        badcam = rep.get("api_camera_bad") or [0, ""]
+        ev["api_camera_bad"] = badcam[:2]
+        ctx.check(badcam[0] == 400, "a camera there is none of -> %s", badcam[:2])
+
+        # A package's capture yields to somebody watching a camera: it is
+        # never the person standing at the machine.
+        import urllib.request
+        shot_file = os.path.join(EXT_ROOT, "data", REF_ID, "shot")
+        if os.path.exists(shot_file):
+            os.remove(shot_file)
+        held = urllib.request.urlopen(
+            urllib.request.Request(fc.base + "/cam/stream", headers={"Host": fc.host_header()}), timeout=15)
+        try:
+            held.read(8192)
+            watching = _until(ctx, lambda: (fc.get("/cam/status")[1] or {}).get("clients"), 15, poll=0.5)
+            ctx.check(watching, "no viewer was counted while the stream was held")
+            _write(os.path.join(EXT_ROOT, "data", REF_ID, "shoot"), "now")
+            yielded = _until(ctx, lambda: json.loads(_read(shot_file)) if os.path.exists(shot_file) else None,
+                             30, poll=0.5)
+            ev["camera_while_watched"] = yielded
+            ctx.log("the package's capture while a viewer watches: %s", yielded)
+            ctx.check(yielded and yielded[0] == 409,
+                      "a package's capture did not yield to a viewer: %s", yielded)
+            ctx.check(yielded and "watching" in str(yielded[1]),
+                      "it yielded without the machine's own words: %s", yielded)
+        finally:
+            held.close()
+        os.remove(shot_file)
+        _until(ctx, lambda: not (fc.get("/cam/status")[1] or {}).get("clients"), 15, poll=0.5)
+        _write(os.path.join(EXT_ROOT, "data", REF_ID, "shoot"), "now")
+        again = _until(ctx, lambda: json.loads(_read(shot_file)) if os.path.exists(shot_file) else None,
+                       40, poll=0.5)
+        ev["camera_after_watching"] = [again[0], again[1]] if again else None
+        ctx.check(again and again[0] == 200 and again[2],
+                  "the package's capture did not come back once the viewer stopped: %s", again)
 
         # its own settings: read, set, and what the schema will not take
         got = rep.get("api_settings") or [0, {}]
