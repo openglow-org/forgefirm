@@ -1250,7 +1250,8 @@ def hold_pause_tier(ctx):
 
 @test("exthost.package-routes", title="The panel's package routes are the extension host's own word",
       subsystem="exthost", kind="auto", est_min=2,
-      covers=[("forgectrl", "src/extpkg.*"), ("forgectrl", "src/main.c"), ("forgeext", "src/main.c"),
+      covers=[("forgectrl", "src/extpkg.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/ext.js"),
+              ("forgectrl", "src/ui/index.html"), ("forgectrl", "src/ui/embed.cmake"), ("forgeext", "src/main.c"),
               ("forgeext", "src/install.*"), ("forgeext", "src/state.*")],
       requires=["exthost.service", "forgectrl.auth"],
       description="Extensions stay as found (the package is installed and never runs). The reference package is "
@@ -1261,7 +1262,9 @@ def hold_pause_tier(ctx):
                   "required-holds and the list says required; disable and enable change the host's state "
                   "file; an action outside the closed list and an id that has not the form of one are 400 "
                   "and run nothing; an id that is not installed is 409 in the host's words; without the "
-                  "login 403; remove takes the package, its data, and its name away. The key and the work "
+                  "login 403; remove takes the package, its data, and its name away. The panel page carries "
+                  "the card and its script, and the script is in the page before the one that calls it "
+                  "(the panel runs its tab's loads while it parses). The key and the work "
                   "directory are removed and the extension root is as found.")
 def package_routes(ctx):
     import shutil
@@ -1286,6 +1289,17 @@ def package_routes(ctx):
         return json.loads(_read(EXT_ROOT + "/state.json") or "{}").get("packages", {}).get(REF_ID, {})
 
     try:
+        # The card is in the page the image serves, and its script is loaded before the one whose
+        # tab loads call it: panel.js runs them while it parses, so a later ext.js is a broken tab.
+        st, page = fc.get("/", raw=True)
+        text = page.decode("utf-8", "replace") if isinstance(page, bytes) else str(page)
+        ev["panel_page_bytes"] = len(text)
+        ctx.check(st == 200 and text, "GET / -> %s", st)
+        for want in ("extpkgs", "extswitch", "extfile", "extstaged", "extinstallphrase", "extAct", "loadExt"):
+            ctx.check(want in text, "the panel page carries no %s", want)
+        ctx.check(0 < text.index("function loadExt") < text.index("loadExt();"),
+                  "the panel page defines loadExt after the call that runs at parse time")
+
         archive, pub = _pack_reference(work, lan_ip(), more_caps=["hold"])
         shutil.copy(pub, owner_key)
         os.chmod(owner_key, 0o644)
