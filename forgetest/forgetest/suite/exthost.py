@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 
+from .. import hw
 from ..catalog import test
 from .forgectrl import lan_ip
 from .image import kernel_config
@@ -653,6 +654,15 @@ while True:
             json.dump({"place": place, "seen": seen, "polls": polls, "last": ans,
                        "connected": ans.get("connected") if isinstance(ans, dict) else None}, f)
         os.rename(os.path.join(data, "events.json.new"), os.path.join(data, "events.json"))
+    # the test's word to the service: jog now
+    jog = os.path.join(data, "jog")
+    if os.path.exists(jog):
+        with open(jog) as f:
+            words = json.load(f)
+        os.remove(jog)
+        with open(os.path.join(data, "jogged.new"), "w") as f:
+            json.dump(api("POST", "/v0/motion/jog", words), f)
+        os.rename(os.path.join(data, "jogged.new"), os.path.join(data, "jogged"))
     # the test's word to the service: take a capture now
     ask = os.path.join(data, "shoot")
     if os.path.exists(ask):
@@ -1608,6 +1618,127 @@ def events(ctx):
         ev["feed_with_no_reader"] = f
         ctx.check(f is not None and not f.get("connected") and not f.get("wanted"),
                   "with no package wanting events the host still holds a stream: %s", feed())
+    finally:
+        _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
+    _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
+
+
+@test("exthost.motion-jog", title="A package jogs the machine, bounded and dark",
+      subsystem="exthost", kind="auto", hardware="takeover", est_min=7,
+      covers=[("forgeext", "src/api.*"), ("forgeext", "src/machine.*"), ("forgeext", "src/run.*"),
+              ("forgectrl", "src/tokens.*"), ("forgectrl", "src/auth.*"), ("forgectrl", "src/main.c"),
+              ("forgectrl", "src/grblport.*")],
+      requires=["exthost.service"],
+      description="The reference package is installed with motion.jog. Its jog reaches the machine "
+                  "through the host's own credential, which forgectrl mints for each run of the daemon "
+                  "into a file only root can read: the file is 0600 and root's, an extension account "
+                  "cannot read it, and the credential holds motion.jog and not the routes it was not "
+                  "given. The package's jog moves the head, and the head accelerometer - the "
+                  "supervisor's own motion witness - sees it move; the laser stays dark throughout "
+                  "(the latch locked, no fire seconds, no emission). A jog past the bounds is refused "
+                  "by the host without the machine being asked, and a jog with the capability removed "
+                  "is refused. Everything is put back as exthost.service puts it back, and the head "
+                  "returns to where it started.")
+def motion_jog(ctx):
+    import shutil
+    import tempfile
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(len(_host_pids()) == 1, "the extension host is not one running process: %s", _host_pids())
+    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: settings are locked")
+    prior = fc.settings().get("ext_enabled") or ""
+    raw = read_file(record_path())
+    ctx.check(raw, "no setup record at %s", record_path())
+    ctx.check(not os.path.exists(SAFE_FILE), "%s exists: the machine is in safe mode", SAFE_FILE)
+    found_tree = _tree(EXT_ROOT)
+    dir_mode = os.stat(os.path.dirname(EXT_ROOT)).st_mode & 0o7777
+    st, body, hdrs = request(fc.base, "GET", "/advisories/extensions", headers={"Host": fc.host_header()})
+    etag = hdrs.get("etag")
+    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
+    owner_key = os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub")
+
+    # The host's credential: root's alone, and holding only what it relays.
+    cred = "/run/forgefirm/ext-host.token"
+    ctx.check(os.path.exists(cred), "forgectrl minted no host credential at %s", cred)
+    cst = os.stat(cred)
+    ev["host_credential"] = {"mode": "%04o" % (cst.st_mode & 0o7777), "uid": cst.st_uid, "gid": cst.st_gid}
+    ctx.check((cst.st_mode & 0o7777) == 0o600 and cst.st_uid == 0,
+              "the host credential is not root's alone: %s", ev["host_credential"])
+    token = _read(cred).strip()
+    ctx.check(token.startswith("fft_"), "the host credential is not a scoped credential")
+    # It holds motion.jog and nothing it was not given.
+    st_, why_ = fc.get("/cam/snapshot", params={"cam": "lid"}, headers={"X-ForgeFIRM-Token": token})
+    ev["credential_beyond_its_grant"] = [st_, why_ if st_ != 200 else "served"]
+    ctx.check(st_ != 200, "the host credential reached a camera it does not hold: %s", st_)
+
+    try:
+        archive, pub = _pack_reference(work, lan_ip(), more_caps=["motion.jog"])
+        shutil.copy(pub, owner_key)
+        os.chmod(owner_key, 0o644)
+        r = _forgeext("install", archive, "--consent-community", "--grant", "motion.jog")
+        if r.get("ok") is not True:
+            r = _forgeext("install", archive, "--consent-community")
+        ctx.check(r.get("ok") is True, "the install -> %s", r.get("error"))
+        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        ctx.check(st == 200, "ext_enabled=1 over the advisory -> %s %r", st, reply)
+        x = _until(ctx, lambda: _svc(REF_ID) if _svc(REF_ID).get("state") == "running" else None, 90, poll=0.5)
+        ctx.check(x, "the service is not running: %s", _svc(REF_ID))
+
+        data_dir = os.path.join(EXT_ROOT, "data", REF_ID)
+        jogged = os.path.join(data_dir, "jogged")
+
+        def ask_jog(words, seconds=40):
+            if os.path.exists(jogged):
+                os.remove(jogged)
+            _write(os.path.join(data_dir, "jog"), json.dumps(words))
+            return _until(ctx, lambda: json.loads(_read(jogged)) if os.path.exists(jogged) else None,
+                          seconds, poll=0.5)
+
+        # A jog the host refuses on its own: the machine is never asked.
+        far = ask_jog({"x": 500})
+        ev["jog_past_the_bounds"] = far
+        ctx.check(far and far[0] == 400 and "100 mm" in str(far[1]),
+                  "a jog past the bounds was not refused by the host: %s", far)
+
+        # A real jog, watched by the accelerometer and by the laser's own witnesses.
+        accel = hw.AccelSampler()
+        ctx.check(accel.available, "no head accelerometer found: the motion witness is missing")
+        before = fc.get("/status")[1] or {}
+        with accel:
+            # The sampler stamps its samples with the wall clock, so the
+            # window is read from the same clock.
+            t0 = time.time()
+            got = ask_jog({"x": 20, "feed": 3000})
+            ctx.sleep(1.5)
+            t1 = time.time()
+        ev["jog"] = got
+        ctx.check(got and got[0] == 200, "the package's jog was refused: %s", got)
+        p2px, p2py, n = accel.p2p(t0, t1)
+        ev["accel"] = {"p2p_x": p2px, "p2p_y": p2py, "samples": n}
+        ctx.log("the package jogged X 20 mm: accel p2p x=%d y=%d over %d samples", p2px, p2py, n)
+        ctx.check(n > 0 and max(p2px, p2py) > 0,
+                  "the accelerometer saw no motion for the package's jog: %s", ev["accel"])
+
+        after = fc.get("/status")[1] or {}
+
+        def laser_of(st_):
+            return {"locked": st_.get("laser_locked"),
+                    "emission_samples": (st_.get("laser") or {}).get("emission_samples")}
+
+        ev["laser"] = {"before": laser_of(before), "after": laser_of(after)}
+        ctx.log("the laser across the jog: %s", ev["laser"])
+        # The names are read from the machine's own status, so a field
+        # that is not there fails rather than comparing None to None.
+        ctx.check(ev["laser"]["before"]["locked"] is True and ev["laser"]["after"]["locked"] is True,
+                  "the laser latch was not locked across a package's jog: %s", ev["laser"])
+        ctx.check(ev["laser"]["after"]["emission_samples"] == 0
+                  and ev["laser"]["before"]["emission_samples"] == 0,
+                  "the emission witness is not zero across a package's jog: %s", ev["laser"])
+
+        # Put the head back where it started.
+        back = ask_jog({"x": -20, "feed": 3000})
+        ctx.check(back and back[0] == 200, "the head was not jogged back: %s", back)
+        ctx.sleep(1.5)
     finally:
         _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
     _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
