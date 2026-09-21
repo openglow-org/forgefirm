@@ -4,6 +4,7 @@
 # SPDX-License-Identifier:    MIT
 
 """exthost.* - what holds an extension package: the image's sandbox platform."""
+import contextlib
 import json
 import os
 import re
@@ -1347,4 +1348,147 @@ def package_routes(ctx):
     left = _tree(EXT_ROOT)
     ctx.check(left == found_tree, "the extension root is not as found: %s", sorted(set(left) ^ set(found_tree)))
     ctx.check(not os.listdir(REQUIRED_HOLDS), "a required hold is still named at the end: %s", os.listdir(REQUIRED_HOLDS))
+
+
+# ------------------------------------------- installing through the panel
+
+EXT_STAGE = "/data/forgefirm/tmp/ext-upload.ffx"
+
+
+@test("exthost.panel-install", title="A package is installed through the panel with the consent its tier takes",
+      subsystem="exthost", kind="operator", mode="grbl", est_min=4,
+      covers=[("forgectrl", "src/extpkg.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/auth.*"),
+              ("forgeext", "src/main.c"), ("forgeext", "src/install.*"), ("forgeext", "src/pkg.*")],
+      requires=["exthost.package-routes"], actions=["button"],
+      steps=["The machine idle in GRBL mode; nothing moves and nothing fires. The test asks for the button to be "
+             "HELD for a few seconds while it installs an unsigned package: hold it when the notice says so."],
+      description="Extensions stay as found; the packages are installed and never run. POST /ext/upload without "
+                  "the login is 403; an upload the host will not take (bytes that are no archive) is 400 in the "
+                  "host's words and leaves no staged file. The reference package signed with a key nobody "
+                  "trusts uploads as tier unverified with consent button: POST /ext/install without the button "
+                  "held is 409 and the staged file stays, the typed phrase is no substitute, and with the "
+                  "button held it installs with the hold the request granted and is listed unverified. With "
+                  "the same key added as the owner's, the upload reads community with consent typed: the "
+                  "install without the phrase is 400, with the phrase and without the grant 409 in the "
+                  "host's words, with a grant that has not the form of a capability 400, and with the phrase "
+                  "and the grant it installs. An install with nothing staged is 409, and a discarded upload "
+                  "is gone. Both packages are removed through the route; the key, the work directory, and "
+                  "the staged file are removed and the extension root is as found.")
+def panel_install(ctx):
+    import shutil
+    import tempfile
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(len(_host_pids()) == 1, "the extension host is not one running process: %s", _host_pids())
+    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: an upload is refused")
+    ctx.check(REF_ID not in [x.get("id") for x in _forgeext("list").get("packages", [])], "%s is already installed", REF_ID)
+    found_tree = _tree(EXT_ROOT)
+    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
+    owner_key = os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub")
+
+    def upload(path=None, raw=None, login=True):
+        mark = "forgetestExtBoundary7d1"
+        with open(path, "rb") if path else contextlib.nullcontext() as f:
+            data = f.read() if path else raw
+        body = ('--%s\r\nContent-Disposition: form-data; name="file"; filename="package.ffx"\r\n'
+                'Content-Type: application/octet-stream\r\n\r\n' % mark).encode() + data + ("\r\n--%s--\r\n" % mark).encode()
+        hdrs = {"Content-Type": "multipart/form-data; boundary=%s" % mark}
+        if login:
+            return fc.post("/ext/upload", data=body, headers=hdrs)
+        st, reply, _ = request(fc.base, "POST", "/ext/upload", data=body, headers=dict(hdrs, Host=fc.host_header()))
+        return st, reply
+
+    def install(**form):
+        return fc.post("/ext/install", data=form)
+
+    def installed():
+        return next((x for x in _forgeext("list").get("packages", []) if x.get("id") == REF_ID), None)
+
+    try:
+        archive, pub = _pack_reference(work, lan_ip(), more_caps=["hold"])
+
+        st, reply = upload(archive, login=False)
+        ctx.check(st == 403 and not os.path.exists(EXT_STAGE), "an upload without the login -> %s, staged %s", st, os.path.exists(EXT_STAGE))
+        st, reply = upload(raw=b"these bytes are no archive\n" * 40)
+        ev["not_an_archive"] = [st, reply if isinstance(reply, str) else ""]
+        ctx.log("an upload that is no archive -> %s %s", st, reply if isinstance(reply, str) else "")
+        ctx.check(st == 400 and not os.path.exists(EXT_STAGE), "an upload the host will not take -> %s, staged file %s", st,
+                  "kept" if os.path.exists(EXT_STAGE) else "gone")
+        st, reply = install(grants="hold", phrase=SAFETY_PHRASE)
+        ctx.check(st == 409 and isinstance(reply, str) and "staged" in reply, "an install with nothing staged -> %s %r", st, reply)
+
+        # nobody the machine trusts signed it: the button, held
+        st, doc = upload(archive)
+        ev["unverified_upload"] = {k: (doc or {}).get(k) for k in ("tier", "consent", "needs_grant")} if isinstance(doc, dict) else doc
+        ctx.log("the upload, its key unknown to the machine -> %s %s", st, ev["unverified_upload"])
+        ctx.check(st == 200 and isinstance(doc, dict) and doc.get("tier") == "unverified" and doc.get("consent") == "button"
+                  and doc.get("needs_grant") == ["hold"] and (doc.get("package") or {}).get("id") == REF_ID,
+                  "the unverified upload -> %s %s", st, doc)
+        st, reply = install(grants="hold", phrase=SAFETY_PHRASE)
+        ev["unverified_without_the_button"] = [st, reply if isinstance(reply, str) else ""]
+        ctx.check(st == 409 and isinstance(reply, str) and "button" in reply and os.path.exists(EXT_STAGE) and not installed(),
+                  "an unverified install without the button held -> %s %r", st, reply)
+        done = {}
+
+        def held_install():
+            st_, reply_ = install(grants="hold")
+            done["last"] = [st_, reply_ if isinstance(reply_, str) else "ok"]
+            return st_ == 200
+
+        # A person holds the button; the bench actuator's press is a half-second pulse, so it is pressed again
+        # until a request has landed inside one.
+        for _ in range(10):
+            if ctx.act("button", "press", text="HOLD the button now, for a few seconds: an unsigned package is being installed.",
+                       until=held_install, timeout=4, fail=False) is not None:
+                break
+        pkg = installed()
+        ev["unverified_installed"] = {k: (pkg or {}).get(k) for k in ("tier", "grants", "hold", "enabled")}
+        ctx.log("with the button held: %s, listed %s", done.get("last"), ev["unverified_installed"])
+        ctx.check(pkg and pkg.get("tier") == "unverified" and pkg.get("grants") == ["hold"] and not os.path.exists(EXT_STAGE),
+                  "with the button held the package is not installed as unverified with its grant: %s (%s)", pkg, done.get("last"))
+        st, reply = fc.post("/ext/package", data={"id": REF_ID, "action": "remove"})
+        ctx.check(st == 200 and not installed(), "remove through the route -> %s", st)
+
+        # the same key, now the owner's: the typed phrase
+        shutil.copy(pub, owner_key)
+        os.chmod(owner_key, 0o644)
+        st, doc = upload(archive)
+        ev["community_upload"] = {k: (doc or {}).get(k) for k in ("tier", "consent", "needs_grant")} if isinstance(doc, dict) else doc
+        ctx.check(st == 200 and isinstance(doc, dict) and doc.get("tier") == "community" and doc.get("consent") == "typed",
+                  "the community upload -> %s %s", st, doc)
+        for name, form, want, words in (
+                ("no phrase", {"grants": "hold"}, 400, "type I UNDERSTAND"),
+                ("the phrase in another case", {"grants": "hold", "phrase": SAFETY_PHRASE.lower()}, 400, "type I UNDERSTAND"),
+                ("the phrase and no grant", {"phrase": SAFETY_PHRASE}, 409, "hold"),
+                ("a grant with a shell's words", {"phrase": SAFETY_PHRASE, "grants": "hold;reboot"}, 400, "capability names"),
+                ("a grant that is an option", {"phrase": SAFETY_PHRASE, "grants": "--consent-unverified"}, 400, "capability names")):
+            st, reply = install(**form)
+            ev[name] = st
+            ctx.log("POST /ext/install, %s -> %s %s", name, st, reply if isinstance(reply, str) else "")
+            ctx.check(st == want and isinstance(reply, str) and words in reply and not installed() and os.path.exists(EXT_STAGE),
+                      "%s -> %s %r, expected %s with the package not installed and the staged file kept", name, st, reply, want)
+        st, reply = install(grants="hold", phrase=SAFETY_PHRASE)
+        pkg = installed()
+        ctx.check(st == 200 and pkg and pkg.get("tier") == "community" and pkg.get("grants") == ["hold"]
+                  and not os.path.exists(EXT_STAGE), "the community install -> %s, listed %s", st, pkg)
+        st, reply = fc.post("/ext/package", data={"id": REF_ID, "action": "remove"})
+        ctx.check(st == 200 and not installed(), "remove through the route -> %s", st)
+
+        st, doc = upload(archive)
+        ctx.check(st == 200 and os.path.exists(EXT_STAGE), "the third upload -> %s", st)
+        st, reply = fc.post("/ext/upload/discard")
+        ctx.check(st == 200 and not os.path.exists(EXT_STAGE), "discard -> %s, staged file %s", st,
+                  "kept" if os.path.exists(EXT_STAGE) else "gone")
+        st, reply = install(grants="hold", phrase=SAFETY_PHRASE)
+        ctx.check(st == 409 and not installed(), "an install after the discard -> %s", st)
+    finally:
+        ctx.clear_notice()
+        if installed():
+            _forgeext("remove", REF_ID)
+        for path in (owner_key, EXT_STAGE):
+            if os.path.exists(path):
+                os.remove(path)
+        shutil.rmtree(work, ignore_errors=True)
+    left = _tree(EXT_ROOT)
+    ctx.check(left == found_tree, "the extension root is not as found: %s", sorted(set(left) ^ set(found_tree)))
 
