@@ -591,11 +591,30 @@ with open(os.path.join(data, "report.json.new"), "w") as f:
     json.dump(report, f)
 os.rename(os.path.join(data, "report.json.new"), os.path.join(data, "report.json"))
 print("reference service up", flush=True)
+mine = api("GET", "/v0/self")[1] or {}
+watching = "events" in (mine.get("capabilities") or [])
+place, seen, polls = None, [], []
 n = 0
 while True:
     n += 1
     with open(os.path.join(data, "beat"), "w") as f:
         f.write(str(n))
+    if watching:
+        # A poll that waits: it comes back with an event as soon as there
+        # is one, and with nothing when its two seconds are up.
+        ask = {"wait": 2} if place is None else {"since": place, "wait": 2}
+        began = time.time()
+        st, ans = api("POST", "/v0/events", ask)
+        took = round(time.time() - began, 2)
+        if st == 200:
+            place = ans.get("next")
+            seen = (seen + [e.get("event") for e in ans.get("events") or []])[-40:]
+        polls = (polls + [{"status": st, "took": took, "placed": "since" in ask,
+                           "got": len(ans.get("events") or []) if isinstance(ans, dict) else 0}])[-20:]
+        with open(os.path.join(data, "events.json.new"), "w") as f:
+            json.dump({"place": place, "seen": seen, "polls": polls, "last": ans,
+                       "connected": ans.get("connected") if isinstance(ans, dict) else None}, f)
+        os.rename(os.path.join(data, "events.json.new"), os.path.join(data, "events.json"))
     # the test's word to the service: what to say of its hold
     say = os.path.join(data, "say")
     if os.path.exists(say):
@@ -668,6 +687,49 @@ def _tree(root):
             if rel not in ("state.json", "lock"):
                 out.append(rel)
     return sorted(out)
+
+
+EVENTS_MAX_STREAMS = 3                  # forgectrl's own cap (src/events.h)
+EVENTS_HOST_HEADER = "X-ForgeFIRM-Client: extension-host"
+
+
+def _stream(addr, host_client=False, keep=False, source=None):
+    """One GET /events straight at forgectrl's read-only listener: (status,
+    the words of a refusal, the socket). The socket is left open when keep,
+    so the caller can hold a stream. `source` binds the address the
+    connection comes from, because the cap counts peer addresses and the
+    kernel would otherwise give every loopback connection 127.0.0.1."""
+    import socket
+    c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    c.settimeout(8)
+    try:
+        if source:
+            c.bind((source, 0))
+        c.connect((addr, 80))
+        req = "GET /events HTTP/1.0\r\nHost: %s\r\nAccept: text/event-stream\r\n%s\r\n" % (
+            addr, EVENTS_HOST_HEADER + "\r\n" if host_client else "")
+        c.sendall(req.encode())
+        head = b""
+        while b"\r\n\r\n" not in head and len(head) < 8192:
+            k = c.recv(4096)
+            if not k:
+                break
+            head += k
+        top, _, rest = head.partition(b"\r\n\r\n")
+        code = int(top.split()[1]) if top.split()[1:] else 0
+        why = ""
+        if code != 200:
+            try:
+                why = (json.loads(rest or b"{}") or {}).get("error") or ""
+            except ValueError:
+                why = rest.decode("utf-8", "replace")[:120]
+        if not keep or code != 200:
+            c.close()
+            c = None
+        return code, why, c
+    except OSError as e:
+        c.close()
+        return 0, str(e), None
 
 
 def _pack_reference(work, lan, more_caps=()):
@@ -1247,6 +1309,160 @@ def hold_pause_tier(ctx):
 
 
 # ------------------------------------------------- the operator's door
+
+@test("exthost.events", title="The machine's events reach a package, over one subscription",
+      subsystem="exthost", kind="auto", hardware="takeover", est_min=6,
+      covers=[("forgeext", "src/evfeed.*"), ("forgeext", "src/api.*"), ("forgeext", "src/run.*"),
+              ("forgectrl", "src/events.*"), ("forgectrl", "src/main.c")],
+      requires=["exthost.service"],
+      description="The reference package is installed with the events capability. The host holds one "
+                  "subscription to forgectrl's stream for every package that wants events, and none when "
+                  "no package does: with the service running the status file says the stream is connected "
+                  "and one service wants it, and with extensions off it says neither. The package polls "
+                  "POST /v0/events over its API socket. A poll with nothing to say comes back at its own "
+                  "deadline and not before, with an empty list and the place it already had; the lid "
+                  "opened and closed on the fixture reaches the package as lid events, in order and "
+                  "numbered, within a second, so a waiting poll is woken and not left to time out. The "
+                  "host's slot is its own: with the three ordinary streams taken, the host's subscription "
+                  "is still there and a LAN client that asks for the host's slot by name is refused, "
+                  "because only a loopback peer may claim it. Nothing moves and nothing fires: the lid is "
+                  "the only thing touched. Everything is put back as exthost.service puts it back.")
+def events(ctx):
+    import shutil
+    import tempfile
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(len(_host_pids()) == 1, "the extension host is not one running process: %s", _host_pids())
+    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: settings are locked")
+    prior = fc.settings().get("ext_enabled") or ""
+    raw = read_file(record_path())
+    ctx.check(raw, "no setup record at %s", record_path())
+    ctx.check(not os.path.exists(SAFE_FILE), "%s exists: the machine is in safe mode", SAFE_FILE)
+    found_tree = _tree(EXT_ROOT)
+    dir_mode = os.stat(os.path.dirname(EXT_ROOT)).st_mode & 0o7777
+    st, body, hdrs = request(fc.base, "GET", "/advisories/extensions", headers={"Host": fc.host_header()})
+    etag = hdrs.get("etag")
+    ctx.check(st == 200 and etag, "GET /advisories/extensions -> %s", st)
+    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
+    owner_key = os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub")
+
+    def said():
+        """What the package has written of the events it polled for."""
+        try:
+            return json.loads(_read(os.path.join(EXT_ROOT, "data", REF_ID, "events.json")))
+        except (OSError, ValueError):
+            return {}
+
+    def feed():
+        return _host_status().get("events") or {}
+
+    try:
+        archive, pub = _pack_reference(work, lan_ip(), more_caps=["events"])
+        shutil.copy(pub, owner_key)
+        os.chmod(owner_key, 0o644)
+        r = _forgeext("install", archive, "--consent-community")
+        ctx.check(r.get("ok") is True, "the install -> %s", r.get("error"))
+        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        ctx.check(st == 200, "ext_enabled=1 over the advisory -> %s %r", st, reply)
+        x = _until(ctx, lambda: _svc(REF_ID) if _svc(REF_ID).get("state") == "running" else None, 90, poll=0.5)
+        ctx.check(x, "the service is not running: %s", _svc(REF_ID))
+
+        # One subscription, and only while a package wants it.
+        f = _until(ctx, lambda: feed() if feed().get("connected") else None, 30)
+        ev["feed_with_a_reader"] = f
+        ctx.log("the host's subscription: %s", f)
+        ctx.check(f and f.get("connected") is True and f.get("wanted") == 1,
+                  "with one package that wants events the host says %s", f)
+
+        # A poll that has nothing to say waits for its own deadline. The
+        # first carries no place, so the wait is for one that does.
+        def polled():
+            x = said()
+            return x if [q for q in x.get("polls") or [] if q.get("placed")] else None
+
+        p = _until(ctx, polled, 40)
+        ctx.check(p, "the package has not polled with a place of its own: %s", said())
+        if not p:
+            p = said()
+        ev["first_polls"] = (p.get("polls") or [])[:4]
+        ctx.check(all(q.get("status") == 200 for q in p.get("polls") or []),
+                  "a poll was refused: %s", ev["first_polls"])
+        # The first poll carries no place: it asks where the present is and
+        # is answered at once, by design. Only a poll that named its place
+        # and had nothing to be told waits for its deadline.
+        first = (p.get("polls") or [])[0]
+        ctx.check(first.get("placed") is False and first.get("took", 9) < 1.0,
+                  "the first poll, which asks only where the present is, did not come back at once: %s", first)
+        quiet = [q for q in p.get("polls") or [] if q.get("got") == 0 and q.get("placed")]
+        ctx.check(quiet and all(q.get("took", 0) >= 1.8 for q in quiet),
+                  "a poll with nothing to say came back early: %s", quiet[:4])
+        place = p.get("place")
+        ctx.check(isinstance(place, int), "the package has no place in the stream: %r", place)
+
+        # An edge on the machine reaches it, and wakes a waiting poll.
+        began = time.time()
+        ctx.act("lid", "open", text="The package is to be told of it.")
+        got = _until(ctx, lambda: said() if "lid" in (said().get("seen") or []) else None, 20, poll=0.25)
+        took = round(time.time() - began, 2)
+        ev["lid_event"] = {"after_s": took, "seen": (got or {}).get("seen"), "place": (got or {}).get("place")}
+        ctx.log("the lid reached the package after %.2f s: %s", took, ev["lid_event"]["seen"])
+        ctx.check(got, "the lid did not reach the package: %s", said())
+        ctx.check(got and got.get("place", 0) > place, "the package's place did not move: %r -> %r",
+                  place, (got or {}).get("place"))
+        ctx.act("lid", "close", text="The lid ends as it was found.")
+        ctx.check(_until(ctx, lambda: (said().get("seen") or []).count("lid") >= 2, 20, poll=0.25),
+                  "the lid closing did not reach the package: %s", said().get("seen"))
+        ev["polls_after"] = (said().get("polls") or [])[-4:]
+        woken = [q for q in said().get("polls") or [] if q.get("got") and q.get("placed")]
+        ctx.check(woken and min(q.get("took", 99) for q in woken) < 1.5,
+                  "no poll was woken by an event: every one ran to its deadline: %s", ev["polls_after"])
+
+        # The host's slot is outside the cap, and only a loopback peer may claim it.
+        ctx.check(fc.settings().get("panel_open_reads") in (None, "", "1"),
+                  "panel_open_reads is %r: this test reads /events without a session",
+                  fc.settings().get("panel_open_reads"))
+        held = []
+        try:
+            # Three addresses, because the cap is one stream per address,
+            # and the whole of 127/8 is this host: each stream comes from
+            # one of them, or the kernel would send all three from
+            # 127.0.0.1 and they would replace each other.
+            for i in range(EVENTS_MAX_STREAMS):
+                code, why, sock = _stream("127.0.0.1", keep=True, source="127.0.0.%d" % (i + 2))
+                held.append((code, why, sock))
+            ev["ordinary_streams"] = [h[0] for h in held]
+            ctx.check(all(h[0] == 200 for h in held), "the three ordinary streams: %s",
+                      [(h[0], h[1]) for h in held])
+            code, why, _sock = _stream("127.0.0.1", source="127.0.0.9")
+            ev["fourth_ordinary_stream"] = [code, why]
+            ctx.check(code == 503 and "every event stream is taken" in (why or ""),
+                      "with the three taken a fourth ordinary stream got %s %r", code, why)
+            ctx.check(feed().get("connected") is True, "the host's stream went with the three being taken: %s", feed())
+            code, why, _sock = _stream(lan_ip(), host_client=True)
+            ev["lan_claims_the_host_slot"] = [code, why]
+            ctx.log("a LAN client asking for the host's slot -> %s %s", code, why)
+            ctx.check(code == 503 and "every event stream is taken" in (why or ""),
+                      "a LAN client that asked for the host's slot got %s %r", code, why)
+            ctx.check(feed().get("connected") is True, "the host lost its stream to a LAN client: %s", feed())
+        finally:
+            for h in held:
+                if h[2]:
+                    try:
+                        h[2].close()
+                    except OSError:
+                        pass
+
+        # No package wants events: the subscription is let go.
+        st, reply = fc.post("/settings", params={"ext_enabled": ""})
+        ctx.check(st == 200, "ext_enabled='' -> %s %r", st, reply)
+        f = _until(ctx, lambda: feed() if not feed().get("connected") else None, 30)
+        ev["feed_with_no_reader"] = f
+        ctx.check(f is not None and not f.get("connected") and not f.get("wanted"),
+                  "with no package wanting events the host still holds a stream: %s", feed())
+    finally:
+        _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
+    _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
+
 
 @test("exthost.package-routes", title="The panel's package routes are the extension host's own word",
       subsystem="exthost", kind="auto", est_min=2,
