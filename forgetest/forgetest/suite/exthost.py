@@ -581,6 +581,10 @@ report = {
     "loopback_undeclared_port": dial("127.0.0.1", 80),
     "netlink_socket": family(16),
     "unix_socket": family(1),
+    "api_settings": api("GET", "/v0/settings"),
+    "api_settings_set": api("POST", "/v0/settings", {"threshold": 70, "note": "set from inside"}),
+    "api_settings_undeclared": api("POST", "/v0/settings", {"nothere": 1}),
+    "api_settings_out_of_bounds": api("POST", "/v0/settings", {"threshold": 9000}),
     "api_self": api("GET", "/v0/self"),
     "api_mode": api("GET", "/v0/machine/mode"),
     "api_hold": api("GET", "/v0/hold"),
@@ -739,7 +743,12 @@ def _pack_reference(work, lan, more_caps=()):
     manifest = {"manifest": 1, "id": REF_ID, "name": "forgetest reference", "version": "1.0.0",
                 "author": "forgetest", "license": "MIT", "api": "0.1", "runtime": "python",
                 "service": {"exec": "bin/reference.py", "args": [lan or "-"]},
-                "capabilities": ["net.outbound:%s:443" % REF_DEST, "storage:1", "machine.read"] + list(more_caps)}
+                "settings": {"threshold": {"type": "number", "default": 40, "min": 0, "max": 100},
+                             "note": {"type": "string", "default": "", "max": 32, "label": "A note"},
+                             "when": {"type": "choice", "default": "end",
+                                      "choices": ["start", "end", "never"]}},
+                "capabilities": ["net.outbound:%s:443" % REF_DEST, "storage:1", "machine.read",
+                                 "settings.own"] + list(more_caps)}
     payload = os.path.join(work, "payload.tar.gz")
     with tarfile.open(payload, "w:gz") as t:
         for name, text, mode in (("manifest.json", json.dumps(manifest), 0o644),
@@ -933,8 +942,34 @@ def service(ctx):
         me = rep.get("api_self") or [0, {}]
         ev["api"] = {k: rep.get(k) for k in ("api_self", "api_mode", "api_hold", "api_nowhere", "api_traversal")}
         ctx.check(me[0] == 200 and me[1].get("id") == REF_ID and me[1].get("version") == "1.0.0"
-                  and sorted(me[1].get("capabilities") or []) == sorted(["net.outbound:%s:443" % REF_DEST, "storage:1", "machine.read"]),
+                  and sorted(me[1].get("capabilities") or []) == sorted(["net.outbound:%s:443" % REF_DEST, "storage:1",
+                                                                          "machine.read", "settings.own"]),
                   "GET /v0/self from the inside: %s", me)
+
+        # its own settings: read, set, and what the schema will not take
+        got = rep.get("api_settings") or [0, {}]
+        ev["api_settings"] = got
+        ctx.check(got[0] == 200 and (got[1] or {}).get("settings", {}).get("threshold") == 40
+                  and (got[1] or {}).get("settings", {}).get("when") == "end"
+                  and len((got[1] or {}).get("schema") or []) == 3,
+                  "GET /v0/settings before anything is set, with its schema: %s", got)
+        set_ = rep.get("api_settings_set") or [0, {}]
+        ev["api_settings_set"] = set_
+        ctx.check(set_[0] == 200 and (set_[1] or {}).get("settings", {}).get("threshold") == 70
+                  and (set_[1] or {}).get("settings", {}).get("note") == "set from inside"
+                  and (set_[1] or {}).get("settings", {}).get("when") == "end",
+                  "POST /v0/settings sets what it names and leaves the rest: %s", set_)
+        for key, why in (("api_settings_undeclared", "a setting the package does not declare"),
+                         ("api_settings_out_of_bounds", "a value outside its bounds")):
+            bad_ = rep.get(key) or [0, {}]
+            ev[key] = bad_
+            ctx.check(bad_[0] == 400 and (bad_[1] or {}).get("error"), "%s -> %s", why, bad_)
+        store = "%s/settings/%s.json" % (EXT_ROOT, REF_ID)
+        ev["settings_store"] = {"mode": "%04o" % (os.stat(store).st_mode & 0o7777) if os.path.exists(store) else None}
+        ctx.check(os.path.exists(store) and os.stat(store).st_mode & 0o7777 == 0o600,
+                  "the settings store is not root's alone: %s", ev["settings_store"])
+        ctx.check(os.path.exists(store) and json.loads(_read(store)).get("threshold") == 70,
+                  "the store does not hold what the package set")
         mode_ = rep.get("api_mode") or [0, {}]
         ctx.check(mode_[0] == 200 and mode_[1].get("mode") in ("grbl", "cloud") and "controller" in mode_[1],
                   "GET /v0/machine/mode from the inside is not forgectrl's answer: %s", mode_)
