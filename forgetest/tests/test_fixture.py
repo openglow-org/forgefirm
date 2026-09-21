@@ -207,6 +207,10 @@ class ClientTests(unittest.TestCase):
         f.act("interlock", "open")
         f.act("button", "press")
         self.assertEqual(self.dev.calls[-1], ("POST", "/button", {}))
+        time.sleep(0.15)
+        # a check that must reach the machine while the button is down asks for the longest press
+        f.act("button", "press", ms=500)
+        self.assertEqual(self.dev.calls[-1], ("POST", "/button", {"ms": 500}))
         time.sleep(0.15)                                             # the fake's pulse ends
         self.assertEqual(sorted(fx.Fixture.energized(f.status())), ["interlock", "lid"])
         f.release()
@@ -330,10 +334,10 @@ class StubFixture:
     def covers(self, channel):
         return channel in self.channels and (channel != "button" or self.button_enabled)
 
-    def act(self, channel, state):
+    def act(self, channel, state, ms=None):
         if self.fail:
             raise fx.FixtureError("the box is off")
-        self.acts.append((channel, state))
+        self.acts.append((channel, state) if ms is None else (channel, state, ms))
         if state == "open":
             self.held.append(channel)
         if self.fc is not None and channel in ("lid", "interlock"):

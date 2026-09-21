@@ -141,8 +141,8 @@ class ActTests(unittest.TestCase):
             def covers(self, channel):
                 return channel == "lid"
 
-            def act(self, channel, state):
-                self.done.append((channel, state))
+            def act(self, channel, state, ms=None):
+                self.done.append((channel, state) if ms is None else (channel, state, ms))
                 self_outer.lid(state != "open")
         self_outer = self
 

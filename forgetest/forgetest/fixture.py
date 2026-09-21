@@ -297,11 +297,11 @@ class Fixture:
             return bool(st and st.get("button_enabled"))
         return True
 
-    def act(self, channel, state):
+    def act(self, channel, state, ms=None):
         if channel == "button":
             if state != "press":
                 raise FixtureError("the button is only ever pressed")
-            st, body = self._press()
+            st, body = self._press(ms)
         else:
             if state not in ("open", "close"):
                 raise FixtureError("%s: unknown state %r" % (channel, state))
@@ -312,8 +312,11 @@ class Fixture:
         self.last_state = body
         return body
 
-    def _press(self):
-        """One press, spaced from the last one. The controller detects
+    def _press(self, ms=None):
+        """One press, spaced from the last one. `ms` is how long the box
+        holds it (the firmware clamps it into 20 to 500, and takes 200 when
+        it is not said): a check that must reach the machine *while* the
+        button is down asks for the longest press the box can make. The controller detects
         the button's rising edge, so a press must follow a release it has
         seen: the next press waits for the last pulse to end (the
         fixture's own pulse_ms) plus BUTTON_GAP_S. A 409 for a pulse in
@@ -322,7 +325,7 @@ class Fixture:
         wait = self._pulse_end + BUTTON_GAP_S - time.time()
         if wait > 0:
             time.sleep(wait)
-        st, body = self._request("POST", "/button", {})
+        st, body = self._request("POST", "/button", {"ms": int(ms)} if ms else {})
         if st == 409 and "in progress" in str(body.get("error", "")):
             deadline = time.time() + PULSE_WAIT_S
             while time.time() < deadline:
@@ -331,7 +334,7 @@ class Fixture:
                 if s == 200 and not b.get("button_pulsing"):
                     break
             time.sleep(BUTTON_GAP_S)
-            st, body = self._request("POST", "/button", {})
+            st, body = self._request("POST", "/button", {"ms": int(ms)} if ms else {})
         if st == 200:
             self._pulse_end = time.time() + float(body.get("pulse_ms") or 500) / 1000.0
         return st, body

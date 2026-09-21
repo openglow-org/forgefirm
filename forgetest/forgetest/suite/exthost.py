@@ -1385,7 +1385,10 @@ EXT_STAGE = "/data/forgefirm/tmp/ext-upload.ffx"
                   "the same key added as the owner's, the upload reads community with consent typed: the "
                   "install without the phrase is 400, with the phrase and without the grant 409 in the "
                   "host's words, with a grant that has not the form of a capability 400, and with the phrase "
-                  "and the grant it installs. An install with nothing staged is 409, and a discarded upload "
+                  "and the grant it installs. The key itself goes in through the panel: without the button "
+                  "held it is 409 and no file lands, a name with a space or a path is 400, a key that is no "
+                  "key is 409 from the host, and with the button held it is added and listed with its id; "
+                  "removed again, the same archive reads unverified. An install with nothing staged is 409, and a discarded upload "
                   "is gone. Both packages are removed through the route; the key, the work directory, and "
                   "the staged file are removed and the extension root is as found.")
 def panel_install(ctx):
@@ -1453,7 +1456,7 @@ def panel_install(ctx):
         # until a request has landed inside one.
         for _ in range(10):
             if ctx.act("button", "press", text="HOLD the button now, for a few seconds: an unsigned package is being installed.",
-                       until=held_install, timeout=4, fail=False) is not None:
+                       until=held_install, timeout=4, fail=False, ms=500) is not None:
                 break
         pkg = installed()
         ev["unverified_installed"] = {k: (pkg or {}).get(k) for k in ("tier", "grants", "hold", "enabled")}
@@ -1463,9 +1466,39 @@ def panel_install(ctx):
         st, reply = fc.post("/ext/package", data={"id": REF_ID, "action": "remove"})
         ctx.check(st == 200 and not installed(), "remove through the route -> %s", st)
 
-        # the same key, now the owner's: the typed phrase
-        shutil.copy(pub, owner_key)
-        os.chmod(owner_key, 0o644)
+        # the same key, now the owner's, added through the panel with the machine's button held
+        with open(pub) as f:
+            keytext = f.read().strip()
+        st, reply = fc.post("/ext/key", data={"name": REF_KEY, "key": keytext})
+        ev["key_without_the_button"] = [st, reply if isinstance(reply, str) else ""]
+        ctx.check(st == 409 and isinstance(reply, str) and "button" in reply and not os.path.exists(owner_key),
+                  "a key added without the button held -> %s %r", st, reply)
+        for name, form, want in (("a name with a space", {"name": "a maker", "key": keytext}, 400),
+                                 ("a name that is a path", {"name": "../../etc/passwd", "key": keytext}, 400),
+                                 ("no key at all", {"name": REF_KEY}, 400),
+                                 ("a key that is no key", {"name": REF_KEY, "key": "this is no key"}, 409)):
+            st, reply = fc.post("/ext/key", data=form)
+            ev[name] = st
+            ctx.check(st == want and not os.path.exists(owner_key), "%s -> %s, expected %s", name, st, want)
+        keyed = {}
+
+        def held_key():
+            st_, reply_ = fc.post("/ext/key", data={"name": REF_KEY, "key": keytext})
+            keyed["last"] = [st_, reply_ if isinstance(reply_, str) else "ok"]
+            return st_ == 200
+
+        for _ in range(10):
+            if ctx.act("button", "press", text="HOLD the button now, for a few seconds: a key is being added.",
+                       until=held_key, timeout=4, fail=False, ms=500) is not None:
+                break
+        st, doc = fc.get("/ext/status")
+        keys = {k.get("name"): k.get("key") for k in ((doc or {}).get("keys") or [])}
+        ev["keys"] = keys
+        ctx.log("with the button held: %s, the keys now %s", keyed.get("last"), sorted(keys))
+        ctx.check(REF_KEY in keys and os.path.exists(owner_key), "the key was not added with the button held: %s (%s)",
+                  sorted(keys), keyed.get("last"))
+        ctx.check(len(keys.get(REF_KEY) or "") == 64, "the key is listed without its id: %s", keys)
+
         st, doc = upload(archive)
         ev["community_upload"] = {k: (doc or {}).get(k) for k in ("tier", "consent", "needs_grant")} if isinstance(doc, dict) else doc
         ctx.check(st == 200 and isinstance(doc, dict) and doc.get("tier") == "community" and doc.get("consent") == "typed",
@@ -1488,8 +1521,16 @@ def panel_install(ctx):
         st, reply = fc.post("/ext/package", data={"id": REF_ID, "action": "remove"})
         ctx.check(st == 200 and not installed(), "remove through the route -> %s", st)
 
+        # the key removed: the same archive reads unverified again
+        st, reply = fc.post("/ext/key/remove", data={"name": REF_KEY})
+        ctx.check(st == 200 and not os.path.exists(owner_key), "the key was not removed -> %s %r", st, reply)
+        st, reply = fc.post("/ext/key/remove", data={"name": REF_KEY})
+        ctx.check(st == 409, "removing a key that is not there -> %s", st)
+
         st, doc = upload(archive)
-        ctx.check(st == 200 and os.path.exists(EXT_STAGE), "the third upload -> %s", st)
+        ev["after_the_key_went"] = (doc or {}).get("tier") if isinstance(doc, dict) else doc
+        ctx.check(st == 200 and isinstance(doc, dict) and doc.get("tier") == "unverified" and os.path.exists(EXT_STAGE),
+                  "without the key the same archive reads %s", ev["after_the_key_went"])
         st, reply = fc.post("/ext/upload/discard")
         ctx.check(st == 200 and not os.path.exists(EXT_STAGE), "discard -> %s, staged file %s", st,
                   "kept" if os.path.exists(EXT_STAGE) else "gone")

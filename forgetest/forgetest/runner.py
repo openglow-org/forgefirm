@@ -366,7 +366,7 @@ class Context:
         """One of forgectrl's switch readings (lid, interlock_ok, ...)."""
         return (self.forgectrl.status().get("switches") or {}).get(name)
 
-    def act(self, channel, state, until=None, timeout=ACT_TIMEOUT_S, text="", fail=True):
+    def act(self, channel, state, until=None, timeout=ACT_TIMEOUT_S, text="", fail=True, ms=None):
         """A machine action by name: ("lid", "open"|"close"),
         ("interlock", "open"|"close"), ("button", "press"). The bench's
         actuator performs it when one covers the channel (the runner's
@@ -405,7 +405,7 @@ class Context:
             self.log("ACT %s %s (fixture)", channel, state)
             rec["by"] = "fixture"
             try:
-                fixture.act(channel, state)
+                fixture.act(channel, state, ms)
             except _fixture.FixtureError as e:
                 rec["fixture_error"] = str(e)
                 if self.run.unattended:
