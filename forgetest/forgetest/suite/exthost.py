@@ -1244,3 +1244,107 @@ def hold_pause_tier(ctx):
     ctx.check(not os.listdir(REQUIRED_HOLDS), "a required hold is still named at the end: %s", os.listdir(REQUIRED_HOLDS))
     ctx.check(_until(ctx, lambda: cool().get("verdict") == "OK", 6), "the verdict at the end is %s", cool().get("verdict"))
 
+
+# ------------------------------------------------- the operator's door
+
+@test("exthost.package-routes", title="The panel's package routes are the extension host's own word",
+      subsystem="exthost", kind="auto", est_min=2,
+      covers=[("forgectrl", "src/extpkg.*"), ("forgectrl", "src/main.c"), ("forgeext", "src/main.c"),
+              ("forgeext", "src/install.*"), ("forgeext", "src/state.*")],
+      requires=["exthost.service", "forgectrl.auth"],
+      description="Extensions stay as found (the package is installed and never runs). The reference package is "
+                  "installed with the hold grant through the host's command line. GET /ext/status without "
+                  "the login is refused (403); with it, it lists the package as the host does (tier "
+                  "community, enabled, the hold advisory) beside enabled, safe_mode, and the host's own "
+                  "status with running true. POST /ext/package: hold-required names the package under "
+                  "required-holds and the list says required; disable and enable change the host's state "
+                  "file; an action outside the closed list and an id that has not the form of one are 400 "
+                  "and run nothing; an id that is not installed is 409 in the host's words; without the "
+                  "login 403; remove takes the package, its data, and its name away. The key and the work "
+                  "directory are removed and the extension root is as found.")
+def package_routes(ctx):
+    import shutil
+    import tempfile
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(len(_host_pids()) == 1, "the extension host is not one running process: %s", _host_pids())
+    ctx.check(REF_ID not in [x.get("id") for x in _forgeext("list").get("packages", [])], "%s is already installed", REF_ID)
+    found_tree = _tree(EXT_ROOT)
+    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
+    owner_key = os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub")
+
+    def listed():
+        st, doc = fc.get("/ext/status")
+        ctx.check(st == 200 and isinstance(doc, dict), "GET /ext/status -> %s", st)
+        return doc, next((x for x in doc.get("packages", []) if x.get("id") == REF_ID), None)
+
+    def act(action, pid=REF_ID):
+        return fc.post("/ext/package", data={"id": pid, "action": action})
+
+    def state():
+        return json.loads(_read(EXT_ROOT + "/state.json") or "{}").get("packages", {}).get(REF_ID, {})
+
+    try:
+        archive, pub = _pack_reference(work, lan_ip(), more_caps=["hold"])
+        shutil.copy(pub, owner_key)
+        os.chmod(owner_key, 0o644)
+        r = _forgeext("install", archive, "--consent-community", "--grant", "hold")
+        ctx.check(r.get("ok") is True, "the install -> %s", r.get("error"))
+
+        st, body, hdrs = request(fc.base, "GET", "/ext/status", headers={"Host": fc.host_header()})
+        ev["status_without_login"] = st
+        ctx.check(st == 403, "GET /ext/status without the login -> %s, expected 403", st)
+        doc, pkg = listed()
+        ev["status"] = {k: doc.get(k) for k in ("enabled", "safe_mode")}
+        ev["host"] = {k: (doc.get("host") or {}).get(k) for k in ("running", "pid", "enabled", "off_reason")}
+        ev["package"] = {k: (pkg or {}).get(k) for k in ("tier", "enabled", "quarantined", "grants", "hold", "account")}
+        ctx.log("GET /ext/status: %s, host %s, package %s", ev["status"], ev["host"], ev["package"])
+        ctx.check(set(doc) >= {"enabled", "safe_mode", "host", "packages"} and doc["safe_mode"] is False,
+                  "the status document lacks a key: %s", sorted(doc))
+        ctx.check((doc.get("host") or {}).get("running") is True and doc["host"].get("pid") == _host_pids()[0],
+                  "the host's own status is not passed on as a running host's: %s", ev["host"])
+        ctx.check(pkg and pkg.get("tier") == "community" and pkg.get("enabled") is True and pkg.get("hold") == "advisory"
+                  and pkg.get("grants") == ["hold"] and (pkg.get("package") or {}).get("name") == "forgetest reference",
+                  "the package is not listed as the host lists it: %s", pkg)
+
+        st, reply = act("hold-required")
+        ctx.check(st == 200 and os.listdir(REQUIRED_HOLDS) == [REF_ID] and listed()[1].get("hold") == "required",
+                  "hold-required -> %s, named %s", st, os.listdir(REQUIRED_HOLDS))
+        st, reply = act("hold-advisory")
+        ctx.check(st == 200 and not os.listdir(REQUIRED_HOLDS), "hold-advisory -> %s, still named %s", st, os.listdir(REQUIRED_HOLDS))
+        st, reply = act("disable")
+        ctx.check(st == 200 and state().get("enabled") is False and listed()[1].get("enabled") is False,
+                  "disable -> %s, the host's state says %s", st, state().get("enabled"))
+        st, reply = act("enable")
+        ctx.check(st == 200 and state().get("enabled") is True, "enable -> %s, the host's state says %s", st, state().get("enabled"))
+
+        before = _read(EXT_ROOT + "/state.json")
+        for name, form, want, words in (
+                ("an action outside the list", {"id": REF_ID, "action": "install"}, 400, "action is enable"),
+                ("an action with a shell's words", {"id": REF_ID, "action": "remove; reboot"}, 400, "action is enable"),
+                ("an id that has not the form of one", {"id": "reference; reboot", "action": "disable"}, 400, "id is a package id"),
+                ("an id with a path in it", {"id": "../../etc", "action": "remove"}, 400, "id is a package id"),
+                ("a package that is not installed", {"id": "org.forgetest.nothere", "action": "disable"}, 409, "is not installed")):
+            st, reply = fc.post("/ext/package", data=form)
+            ev[name] = st
+            ctx.log("POST /ext/package, %s -> %s %s", name, st, reply if isinstance(reply, str) else "")
+            ctx.check(st == want and isinstance(reply, str) and words in reply, "%s -> %s %r, expected %s", name, st, reply, want)
+        ctx.check(_read(EXT_ROOT + "/state.json") == before, "a refused request changed the host's state")
+        st, body, hdrs = request(fc.base, "POST", "/ext/package", data={"id": REF_ID, "action": "remove"},
+                                 headers={"Host": fc.host_header()})
+        ctx.check(st == 403 and REF_ID in [x.get("id") for x in _forgeext("list").get("packages", [])],
+                  "POST /ext/package without the login -> %s, expected 403 and the package still there", st)
+
+        st, reply = act("remove")
+        ctx.check(st == 200 and listed()[1] is None and not os.path.isdir(os.path.join(EXT_ROOT, "pkg", REF_ID))
+                  and not os.path.isdir(os.path.join(EXT_ROOT, "data", REF_ID)), "remove -> %s, the package or its data still there", st)
+    finally:
+        if REF_ID in [x.get("id") for x in _forgeext("list").get("packages", [])]:
+            _forgeext("remove", REF_ID)
+        if os.path.exists(owner_key):
+            os.remove(owner_key)
+        shutil.rmtree(work, ignore_errors=True)
+    left = _tree(EXT_ROOT)
+    ctx.check(left == found_tree, "the extension root is not as found: %s", sorted(set(left) ^ set(found_tree)))
+    ctx.check(not os.listdir(REQUIRED_HOLDS), "a required hold is still named at the end: %s", os.listdir(REQUIRED_HOLDS))
+
