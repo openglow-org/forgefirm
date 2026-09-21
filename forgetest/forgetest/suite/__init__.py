@@ -9,7 +9,6 @@ order. Each module registers its tests with @catalog.test."""
 from . import image      # noqa: F401,E402
 from . import kernel     # noqa: F401,E402
 from . import forgectrl  # noqa: F401,E402
-from . import exthost    # noqa: F401,E402
 from . import setup # noqa: F401,E402
 from . import setup_dark  # noqa: F401,E402
 from . import setup_sheet  # noqa: F401,E402
@@ -20,3 +19,5 @@ from . import laser      # noqa: F401,E402
 from . import camera     # noqa: F401,E402
 from . import update     # noqa: F401,E402
 from . import cloud      # noqa: F401,E402
+# Last: it stands on the setup record's consent and on the cloud suite's dark print.
+from . import exthost    # noqa: F401,E402

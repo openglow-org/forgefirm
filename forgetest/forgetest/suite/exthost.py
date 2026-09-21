@@ -15,6 +15,7 @@ import time
 from ..catalog import test
 from .forgectrl import lan_ip
 from .image import kernel_config
+from .cloud import OFFLINE_STEP, Offline, dark_print_body, enter_offline, latch_locked, offline_cleanup, offline_job
 from .setup import SAFETY_PHRASE, read_file, record_path, request, write_file
 
 CG = "/sys/fs/cgroup"
@@ -644,6 +645,44 @@ def _pack_reference(work, lan):
     return signed, key + ".pub"
 
 
+def _put_back(ctx, fc, work, prior, etag, raw, dir_mode):
+    """Everything a test of the host put on the machine, taken away again:
+    safe mode, the package, the owner key, the work directory, the
+    setting, the data directory's mode, and the setup record (under a
+    forgectrl restart)."""
+    import shutil
+    if os.path.exists(SAFE_FILE):
+        os.remove(SAFE_FILE)
+    st, reply = fc.post("/settings", data={"ext_enabled": "0"})
+    r = _forgeext("remove", REF_ID)
+    ctx.log("remove %s -> %s", REF_ID, "ok" if r.get("ok") else r.get("error"))
+    owner_key = os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub")
+    if os.path.exists(owner_key):
+        os.remove(owner_key)
+    shutil.rmtree(work, ignore_errors=True)
+    if prior == "1":
+        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+    elif prior == "":
+        st, reply = fc.post("/settings", params={"ext_enabled": ""})
+    ctx.log("restore ext_enabled=%r -> %s", prior, st)
+    if prior != "1":
+        os.chmod(os.path.dirname(EXT_ROOT), dir_mode)
+    with ctx.takeover():
+        write_file(record_path(), raw)
+    ctx.log("the previous record is back under a restart")
+
+
+def _as_found(ctx, fc, prior, raw, dir_mode, found_tree):
+    ctx.check((fc.settings().get("ext_enabled") or "") == prior, "ext_enabled not restored: %r, was %r",
+              fc.settings().get("ext_enabled"), prior)
+    ctx.check(read_file(record_path()) == raw, "the setup record on disk is not the one found")
+    ctx.check(prior == "1" or os.stat(os.path.dirname(EXT_ROOT)).st_mode & 0o7777 == dir_mode,
+              "the data directory's mode is not the one found")
+    left = _tree(EXT_ROOT)
+    ctx.check(left == found_tree, "the extension root is not as found: %s", sorted(set(left) ^ set(found_tree)))
+    ctx.check(len(_host_pids()) == 1, "the extension host is not running at the end")
+
+
 @test("exthost.service", title="A package's service runs confined under the extension host",
       subsystem="exthost", kind="auto", hardware="takeover", est_min=5,
       covers=[("forgeext", "**"), ("forgectrl", "src/main.c"), ("forgectrl", "src/logs.*")],
@@ -815,30 +854,126 @@ def service(ctx):
         ctx.check("ext_enabled" in (_host_status().get("off_reason") or ""), "the host does not say why nothing runs: %s",
                   _host_status().get("off_reason"))
     finally:
-        if os.path.exists(SAFE_FILE):
-            os.remove(SAFE_FILE)
-        st, reply = fc.post("/settings", data={"ext_enabled": "0"})
-        r = _forgeext("remove", REF_ID)
-        ctx.log("remove %s -> %s", REF_ID, "ok" if r.get("ok") else r.get("error"))
-        if os.path.exists(owner_key):
-            os.remove(owner_key)
-        shutil.rmtree(work, ignore_errors=True)
-        if prior == "1":
-            st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
-        elif prior == "":
-            st, reply = fc.post("/settings", params={"ext_enabled": ""})
-        ctx.log("restore ext_enabled=%r -> %s", prior, st)
-        if prior != "1":
-            os.chmod(data_dir, dir_mode)
-        with ctx.takeover():
-            write_file(record_path(), raw)
-        ctx.log("the previous record is back under a restart")
+        _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
+    _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
 
-    ctx.check((fc.settings().get("ext_enabled") or "") == prior, "ext_enabled not restored: %r, was %r",
-              fc.settings().get("ext_enabled"), prior)
-    ctx.check(read_file(record_path()) == raw, "the setup record on disk is not the one found")
-    ctx.check(prior == "1" or os.stat(data_dir).st_mode & 0o7777 == dir_mode, "the data directory's mode is not the one found")
-    left = _tree(EXT_ROOT)
-    ctx.check(left == found_tree, "the extension root is not as found: %s", sorted(set(left) ^ set(found_tree)))
-    ctx.check(len(_host_pids()) == 1, "the extension host is not running at the end")
+
+# ------------------------------------------------- the armed window
+
+def _frozen(id_):
+    ev = _read("%s/%s/cgroup.events" % (POOL_GROUP, id_))
+    return "frozen 1" in ev if ev else None
+
+
+@test("exthost.armed-freeze", title="A package's service is frozen for the armed window",
+      subsystem="exthost", kind="operator", hardware="takeover", est_min=6,
+      covers=[("forgeext", "src/super.*"), ("forgeext", "src/run.*"), ("forgeext", "src/machine.*"),
+              ("forgeext", "src/cgroup.*"), ("forgectrl", "src/cool.*")],
+      requires=["exthost.service", "cloud.dark-print"], actions=["button"],
+      steps=[OFFLINE_STEP,
+             "Bed clear (the job is dark: a 30 s square at S0, nothing fires). Press the button "
+             "when it lights."],
+      description="The reference package runs, its heartbeat advancing twice a second, and a dark "
+                  "cloud print (cloud.dark-print's own job and checks) opens a real armed window over "
+                  "it. Sampled five times a second from before the button to after the end: the "
+                  "engine's armed flag, the group's frozen state as the kernel reports it, and the "
+                  "heartbeat. The window is open for at least 10 s. From 2 s after it opens to its "
+                  "close the group reads frozen in every sample and the heartbeat does not move, the "
+                  "freeze is in place before the run starts (the latch unlocks only for the run), and "
+                  "within 3 s of the close the group is thawed and the heartbeat advances again. The "
+                  "service is the same process throughout. Everything is put back as exthost.service "
+                  "puts it back.")
+def armed_freeze(ctx):
+    import tempfile
+    import threading
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(len(_host_pids()) == 1, "the extension host is not one running process: %s", _host_pids())
+    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: settings are locked")
+    prior = fc.settings().get("ext_enabled") or ""
+    raw = read_file(record_path())
+    ctx.check(raw, "no setup record at %s", record_path())
+    ctx.check(not os.path.exists(SAFE_FILE), "%s exists: the machine is in safe mode", SAFE_FILE)
+    found_tree = _tree(EXT_ROOT)
+    dir_mode = os.stat(os.path.dirname(EXT_ROOT)).st_mode & 0o7777
+    st, body, hdrs = request(fc.base, "GET", "/advisories/extensions", headers={"Host": fc.host_header()})
+    etag = hdrs.get("etag")
+    ctx.check(st == 200 and etag, "GET /advisories/extensions -> %s", st)
+    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
+    beat_path = os.path.join(EXT_ROOT, "data", REF_ID, "beat")
+    samples = []
+    stop = threading.Event()
+
+    def sampler():
+        while not stop.is_set():
+            st_, cool = fc.get("/cool/status")
+            samples.append((time.time(), bool(cool.get("armed")) if st_ == 200 and isinstance(cool, dict) else None,
+                            _frozen(REF_ID), _read(beat_path).strip(), (_svc(REF_ID) or {}).get("pid"),
+                            latch_locked()))
+            time.sleep(0.2)
+
+    try:
+        archive, pub = _pack_reference(work, lan_ip())
+        with open(pub, "rb") as f:
+            write_file(os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub"), f.read())
+        os.chmod(os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub"), 0o644)
+        r = _forgeext("install", archive, "--consent-community")
+        ctx.check(r.get("ok") is True, "the install -> %s", r.get("error"))
+        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        ctx.check(st == 200, "ext_enabled=1 over the advisory -> %s %r", st, reply)
+        seen = set()
+        ctx.check(_until(ctx, lambda: seen.add(_read(beat_path)) or len(seen) >= 4, 120, poll=0.2),
+                  "the reference service's heartbeat does not advance: %s", _svc(REF_ID) or _host_status())
+        pid = _svc(REF_ID).get("pid")
+
+        offset = enter_offline(ctx)
+        job = offline_job(ctx, "dark.puls", seconds=30)
+        off = Offline().__enter__()
+        t = threading.Thread(target=sampler, daemon=True)
+        t.start()
+        try:
+            dark_print_body(ctx, ev, off, job, offset, fc)
+            ctx.sleep(6)                                # past the close, for the thaw
+        finally:
+            stop.set()
+            t.join(timeout=5)
+            off.__exit__(None, None, None)
+            offline_cleanup(ctx)
+
+        opens = [x for x in samples if x[1]]
+        ctx.check(opens, "the engine never read armed across the print: %d samples", len(samples))
+        t_open, t_close = opens[0][0], opens[-1][0]
+        ev["window_s"] = round(t_close - t_open, 1)
+        ctx.check(t_close - t_open >= 10, "the armed window was open for %.1f s only", t_close - t_open)
+        inside = [x for x in samples if t_open + 2.0 <= x[0] <= t_close]
+        thawed = [x for x in inside if x[2] is not True]
+        ev["samples"] = {"all": len(samples), "inside": len(inside), "not_frozen_inside": len(thawed)}
+        first_frozen = next((x[0] for x in samples if x[0] >= t_open and x[2] is True), None)
+        ev["freeze_lag_s"] = round(first_frozen - t_open, 2) if first_frozen else None
+        ctx.check(inside and not thawed, "inside the armed window the group read not frozen in %d of %d samples "
+                  "(the first %.1f s after it opened)", len(thawed), len(inside), (thawed[0][0] - t_open) if thawed else 0)
+        beats = {x[3] for x in inside}
+        ctx.check(len(beats) == 1, "the heartbeat moved inside the armed window: %s", sorted(beats)[:6])
+        # the latch unlocks only for the run: its first unlocked sample is the run's start
+        run_start = next((x[0] for x in samples if x[5] is False), None)
+        ctx.check(run_start is not None, "the latch never read unlocked: the print did not run under the samples")
+        ctx.check(first_frozen is not None and first_frozen <= run_start,
+                  "the run started before the freeze was in place (frozen %s, the latch unlocked %s after the window opened)",
+                  None if first_frozen is None else round(first_frozen - t_open, 2), round(run_start - t_open, 2))
+        ev["freeze_led_the_run_s"] = round(run_start - first_frozen, 2)
+        after = [x for x in samples if x[0] >= t_close + 3.0]
+        ctx.check(after and all(x[2] is False for x in after), "3 s after the close the group is not thawed: %s",
+                  [x[2] for x in after][:8])
+        ctx.check(len({x[3] for x in after}) >= 2, "the heartbeat did not advance again after the close")
+        last_frozen = max((x[0] for x in samples if x[2] is True), default=None)
+        ev["thaw_lag_s"] = round(last_frozen - t_close, 2) if last_frozen else None
+        ctx.check({x[4] for x in samples if x[4]} == {pid}, "the service did not stay the same process: %s",
+                  sorted({x[4] for x in samples if x[4]}))
+        ctx.log("the armed window was open %.1f s; frozen %.2f s after it opened and %.2f s before the latch unlocked "
+                "for the run, in every one of %d samples from 2 s in to the close, the heartbeat still; thawed %.2f s "
+                "after the close", ev["window_s"], ev["freeze_lag_s"], ev["freeze_led_the_run_s"], len(inside),
+                ev["thaw_lag_s"] if ev["thaw_lag_s"] is not None else -1)
+    finally:
+        _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
+    _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
 
