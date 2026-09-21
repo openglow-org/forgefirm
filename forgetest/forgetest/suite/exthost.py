@@ -8,6 +8,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -99,6 +100,15 @@ elif mode == "eat":
     say(survived=True)
 elif mode == "net":
     say(results=[[t, reach(*t)] for t in json.loads(arg)])
+elif mode == "unix":
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(4.0)
+    try:
+        s.connect(arg)
+        say(result="connected")
+    except OSError as e:
+        say(result=word(e))
+    s.close()
 elif mode == "landlock":
     target = json.loads(arg)
     before = {"etc": None, "usr": None, "tcp": reach(*target)[0]}
@@ -476,6 +486,7 @@ EXT_ROOT = "/data/forgefirm/ext"
 HOST_STATUS = "/run/forgefirm/ext/status.json"
 SAFE_FILE = "/run/forgefirm/ext-safe"
 HOST_LOG = "/data/log/forgefirm/forgeext/forgeext.log"
+API_DIR = "/run/forgefirm/ext/api"
 REF_ID = "org.forgetest.reference"
 REF_KEY = "forgetest-reference"
 REF_DEST = "192.0.2.1"                      # TEST-NET-1: declared so that port 443 is, and never dialed
@@ -492,6 +503,31 @@ if os.path.exists(os.path.join(data, "stop")):
 
 def word(e):
     return errno.errorcode.get(e.errno, str(e.errno))
+
+
+def api(method, path, body=None):
+    """One request to the host over the socket named in FFX_API: (status, JSON)."""
+    payload = json.dumps(body).encode() if body is not None else b""
+    head = "%s %s HTTP/1.1\r\nHost: forgeext\r\n" % (method, path)
+    if body is not None:
+        head += "Content-Type: application/json\r\nContent-Length: %d\r\n" % len(payload)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    try:
+        s.connect(os.environ["FFX_API"])
+        s.sendall(head.encode() + b"\r\n" + payload)
+        buf = b""
+        while True:
+            c = s.recv(65536)
+            if not c:
+                break
+            buf += c
+        top, _, text = buf.partition(b"\r\n\r\n")
+        return int(top.split()[1]), json.loads(text or b"null")
+    except (OSError, ValueError, IndexError) as e:
+        return 599, {"error": str(e)}
+    finally:
+        s.close()
 
 
 def opened(path, mode="r"):
@@ -544,6 +580,11 @@ report = {
     "loopback_undeclared_port": dial("127.0.0.1", 80),
     "netlink_socket": family(16),
     "unix_socket": family(1),
+    "api_self": api("GET", "/v0/self"),
+    "api_mode": api("GET", "/v0/machine/mode"),
+    "api_hold": api("GET", "/v0/hold"),
+    "api_nowhere": api("GET", "/v0/nowhere"),
+    "api_traversal": api("GET", "/v0/machine/../../settings"),
 }
 with open(os.path.join(data, "report.json.new"), "w") as f:
     json.dump(report, f)
@@ -554,6 +595,15 @@ while True:
     n += 1
     with open(os.path.join(data, "beat"), "w") as f:
         f.write(str(n))
+    # the test's word to the service: what to say of its hold
+    say = os.path.join(data, "say")
+    if os.path.exists(say):
+        with open(say) as f:
+            words = json.load(f)
+        os.remove(say)
+        with open(os.path.join(data, "said.new"), "w") as f:
+            json.dump(api("POST", "/v0/hold", words), f)
+        os.rename(os.path.join(data, "said.new"), os.path.join(data, "said"))
     time.sleep(0.5)
 '''
 
@@ -626,7 +676,7 @@ def _pack_reference(work, lan, more_caps=()):
     manifest = {"manifest": 1, "id": REF_ID, "name": "forgetest reference", "version": "1.0.0",
                 "author": "forgetest", "license": "MIT", "api": "0.1", "runtime": "python",
                 "service": {"exec": "bin/reference.py", "args": [lan or "-"]},
-                "capabilities": ["net.outbound:%s:443" % REF_DEST, "storage:1"] + list(more_caps)}
+                "capabilities": ["net.outbound:%s:443" % REF_DEST, "storage:1", "machine.read"] + list(more_caps)}
     payload = os.path.join(work, "payload.tar.gz")
     with tarfile.open(payload, "w:gz") as t:
         for name, text, mode in (("manifest.json", json.dumps(manifest), 0o644),
@@ -700,7 +750,10 @@ def _as_found(ctx, fc, prior, raw, dir_mode, found_tree):
                   "package, writes its data directory and nothing else, cannot read the settings file, the "
                   "setup record, or the pulse device, is refused by the machine on loopback and on its LAN "
                   "address even on the port it declared, cannot connect on a port it did not declare, and "
-                  "cannot open a netlink socket; its output is in the forgeext log under its id. Safe mode "
+                  "cannot open a netlink socket. Its one way to the machine is its API socket (root's and its "
+                  "account's, 0660, refused to another pool account): GET /v0/self names it and what it may use, "
+                  "GET /v0/machine/mode is forgectrl's answer relayed, a hold it was not granted is 403, a path "
+                  "the API does not have 404, a path with .. 400; its output is in the forgeext log under its id. Safe mode "
                   "stops it and its end starts it again. A host killed outright takes its services with it "
                   "at once (the init wrapper), comes back, and starts the service again. ext_enabled=0 "
                   "stops it and leaves no group and no chain. The package, the key, the setting, and the "
@@ -809,10 +862,31 @@ def service(ctx):
         for k, v in want.items():
             ctx.check(rep.get(k) == v, "from the inside, %s is %r, expected %r", k, rep.get(k), v)
         # LC_CTYPE is the interpreter's own doing (it coerces the C locale at its start)
-        fixed = {"PATH", "LANG", "HOME", "TMPDIR", "FFX_ID", "FFX_PKG", "FFX_DATA", "PYTHONDONTWRITEBYTECODE",
+        fixed = {"PATH", "LANG", "HOME", "TMPDIR", "FFX_ID", "FFX_PKG", "FFX_DATA", "FFX_API", "PYTHONDONTWRITEBYTECODE",
                  "PYTHONUNBUFFERED"}
         ctx.check(rep.get("cwd") == os.path.join(EXT_ROOT, "data", REF_ID) and set(rep.get("env") or []) - {"LC_CTYPE"} == fixed,
                   "its working directory or its environment is not the fixed one: %s %s", rep.get("cwd"), rep.get("env"))
+        # its one way to the machine: the API socket, and the broker behind it
+        me = rep.get("api_self") or [0, {}]
+        ev["api"] = {k: rep.get(k) for k in ("api_self", "api_mode", "api_hold", "api_nowhere", "api_traversal")}
+        ctx.check(me[0] == 200 and me[1].get("id") == REF_ID and me[1].get("version") == "1.0.0"
+                  and sorted(me[1].get("capabilities") or []) == sorted(["net.outbound:%s:443" % REF_DEST, "storage:1", "machine.read"]),
+                  "GET /v0/self from the inside: %s", me)
+        mode_ = rep.get("api_mode") or [0, {}]
+        ctx.check(mode_[0] == 200 and mode_[1].get("mode") in ("grbl", "cloud") and "controller" in mode_[1],
+                  "GET /v0/machine/mode from the inside is not forgectrl's answer: %s", mode_)
+        ctx.check((rep.get("api_hold") or [0])[0] == 403 and (rep.get("api_nowhere") or [0])[0] == 404
+                  and (rep.get("api_traversal") or [0])[0] == 400,
+                  "a hold it was not granted, a path the API does not have, a path with ..: %s %s %s",
+                  rep.get("api_hold"), rep.get("api_nowhere"), rep.get("api_traversal"))
+        sock = "%s/%s.sock" % (API_DIR, REF_ID)
+        st_ = os.stat(sock)
+        ctx.check(stat.S_ISSOCK(st_.st_mode) and stat.S_IMODE(st_.st_mode) == 0o660 and (st_.st_uid, st_.st_gid) == (0, uid),
+                  "its API socket is not root's and its account's at 0660: %o %d:%d", stat.S_IMODE(st_.st_mode), st_.st_uid, st_.st_gid)
+        other = POOL_FIRST + POOL_SIZE - 1 if uid != POOL_FIRST + POOL_SIZE - 1 else POOL_FIRST
+        rc, lines, errtext = _probe("-", other, "unix", sock)
+        ev["another_account_at_its_socket"] = lines
+        ctx.check(lines and lines[0].get("result") == "eacces", "another pool account at its socket: %s %s", lines, errtext)
         ctx.check(_until(ctx, lambda: ("ext %s: reference service up" % REF_ID) in _read(HOST_LOG), 20, poll=1),
                   "the service's output is not in %s under its id", HOST_LOG)
 
@@ -995,7 +1069,9 @@ REQUIRED_HOLDS = EXT_ROOT + "/required-holds"
       description="The reference package is installed with the hold grant and its hold is marked required "
                   "(the package is then named under required-holds for forgectrl). Until its service has "
                   "run healthy (60 s) the required hold stands in the host's words; from then on the host "
-                  "keeps its hold file fresh and clear and the engine's verdict is OK. The test then "
+                  "keeps its hold file fresh and clear and the engine's verdict is OK. The package then raises "
+                  "its hold itself over its API socket (POST /v0/hold): EXT with the package's own words, "
+                  "words the form does not take refused with the hold unchanged, and cleared again. The test then "
                   "makes the service end at every start: the host raises the hold in its own words and GET "
                   "/cool/status reads verdict EXT, fire_ok false, hold true, with the reason naming the "
                   "package. Safe mode ends the hold within two ticks and leaving it brings the hold back; "
@@ -1079,6 +1155,29 @@ def hold_pause_tier(ctx):
         h = hold_file()
         ctx.check(h and h["raised"] is False and h["age"] < 1.5, "healthy: the hold file is not fresh and clear: %s", h)
         ctx.check(_svc(REF_ID).get("hold") == "required", "the status file does not say the hold is required: %s", _svc(REF_ID))
+
+        # the package's own word, over its API socket: raised in its words, and cleared
+        def tell(words):
+            said = os.path.join(EXT_ROOT, "data", REF_ID, "said")
+            if os.path.exists(said):
+                os.remove(said)
+            _write(os.path.join(EXT_ROOT, "data", REF_ID, "say"), json.dumps(words))
+            ctx.check(_until(ctx, lambda: os.path.exists(said), 10), "the service did not pass %s on", words)
+            return json.loads(_read(said))
+
+        r = tell({"raised": True, "reason": "no badge presented"})
+        ctx.check(r[0] == 200 and r[1] == {"raised": True, "reason": "no badge presented"}, "POST /v0/hold raise -> %s", r)
+        t0 = time.time()
+        c = verdict_is("EXT", 6, REF_ID + ": no badge presented")
+        ev["raised_by_the_package"] = {"after_s": round(time.time() - t0, 1), "cool": {k: (c or cool()).get(k) for k in ("verdict", "fire_ok", "hold", "reason")}}
+        ctx.log("the package raised its hold: %s", ev["raised_by_the_package"])
+        ctx.check(c and c.get("fire_ok") is False and c.get("hold") is True, "the package's own hold does not withhold fire: %s", c or cool())
+        r = tell({"raised": True, "reason": "a \"quote\""})
+        ctx.check(r[0] == 400 and verdict_is("EXT", 3, REF_ID + ": no badge presented"), "words the form does not take -> %s, and the "
+                  "hold now reads %s", r, cool().get("reason"))
+        r = tell({"raised": False})
+        ctx.check(r[0] == 200 and r[1].get("raised") is False and verdict_is("OK", 6), "POST /v0/hold clear -> %s, verdict %s", r,
+                  cool().get("verdict"))
 
         # the package can no longer speak for itself
         _write(stop_path, "")
