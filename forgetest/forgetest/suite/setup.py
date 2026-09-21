@@ -1011,6 +1011,146 @@ def cloud_disabled_surface(ctx):
               "the list did not come back as found: %s, was %s", back, e)
 
 
+# ----------------------------------------------------------- extensions
+
+@test("setup.extensions-consent", title="Extensions are turned on over their own advisory",
+      subsystem="setup", kind="auto", hardware="takeover", est_min=3,
+      covers=[("forgectrl", "src/main.c"), ("forgectrl", "src/advisories.*"), ("forgectrl", "src/setup.*"),
+              ("forgectrl", "src/wiz.c"), ("forgectrl", "src/settings.*"),
+              ("forgectrl", "docs/advisories/extensions.md"), ("forgectrl", "src/ui/embed_docs.cmake")],
+      requires=["forgectrl.settings-bounds", "setup.advisories-rehash"],
+      description="The Extensions advisory is on demand: GET /wiz does not list it among the "
+                  "first-run documents, GET /advisories/extensions serves it as markdown with an "
+                  "ETag equal to the SHA-256 of the body, and the first-run accept refuses it (400) "
+                  "and leaves the press. The test turns ext_enabled off itself and puts it back as "
+                  "found. From off, POST /settings ext_enabled=1 is refused without the advisory's "
+                  "hash and with a stale one (409), and without the typed phrase and with the phrase "
+                  "in another case (400); each refusal leaves the setting at 0 and the record on "
+                  "disk untouched. A request that carries the hash and the phrase beside a write the "
+                  "daemon refuses (controller_mode=cloud with cloud_enabled=0, 409) is refused whole "
+                  "and records nothing. With the "
+                  "hash and the phrase it is accepted (200): the setting reads 1, the record on disk "
+                  "holds on_demand.extensions with that hash and the typed method, the first-run "
+                  "documents and their press are as they were, and the data directory has gained "
+                  "the search bit for group and others and nothing else (a package's account walks "
+                  "through it to its own files). Re-sending 1 while it stands and "
+                  "sending 0 ask for nothing. The previous record is put back under a forgectrl "
+                  "restart.")
+def extensions_consent(ctx):
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: settings are locked")
+    raw = read_file(record_path())
+    ctx.check(raw, "no setup record at %s", record_path())
+    before = wiz(fc)
+    ev["before"] = wiz_summary(before)
+    prior = fc.settings().get("ext_enabled") or ""
+    dir_mode = os.stat(data_dir()).st_mode & 0o7777
+    ev["found"] = {"ext_enabled": prior, "data_dir_mode": "%04o" % dir_mode}
+
+    def on_disk():
+        try:
+            return json.loads((read_file(record_path()) or b"{}").decode("utf-8"))
+        except ValueError:
+            return {}
+
+    ctx.check("extensions" not in [d.get("id") for d in before.get("documents") or []],
+              "GET /wiz lists the Extensions advisory among the first-run documents")
+    st, body, hdrs = request(fc.base, "GET", "/advisories/extensions", headers={"Host": fc.host_header()})
+    etag = hdrs.get("etag")
+    ev["etag"] = etag
+    ctx.log("GET /advisories/extensions -> %s, %d bytes, ETag %s", st, len(body), etag)
+    ctx.check(st == 200 and body, "GET /advisories/extensions -> %s", st)
+    ctx.check((hdrs.get("content-type") or "").startswith("text/markdown"),
+              "the document is not served as markdown: %r", hdrs.get("content-type"))
+    ctx.check(etag == hashlib.sha256(body).hexdigest(), "the ETag is not the SHA-256 of the body")
+
+    try:
+        st, reply = fc.post("/wiz/advisories/accept",
+                            data={"doc": "extensions", "hash": etag, "phrase": SAFETY_PHRASE})
+        ev["first_run_accept"] = st
+        ctx.log("the first-run accept of the on-demand document -> %s %s", st, reply)
+        ctx.check(st == 400, "the first-run accept of the on-demand document -> %s, expected 400", st)
+        ctx.check(wiz(fc).get("acceptance_done") == before.get("acceptance_done"),
+                  "the refused accept changed the press record")
+
+        if prior == "1":
+            st, reply = fc.post("/settings", data={"ext_enabled": "0"})
+            ctx.check(st == 200, "ext_enabled=0 -> %s %s", st, reply)
+            ctx.log("extensions turned off for the test (found %r)", prior)
+        ctx.check((fc.settings().get("ext_enabled") or "0") == "0", "ext_enabled does not read off")
+        start = on_disk()
+
+        for name, form, want, words in (
+                ("no hash", {"ext_enabled": "1"}, 409, "read the Extensions advisory first"),
+                ("stale hash", {"ext_enabled": "1", "advisory": "0" * 64, "phrase": SAFETY_PHRASE}, 409,
+                 "read the Extensions advisory first"),
+                ("no phrase", {"ext_enabled": "1", "advisory": etag}, 400, "type I UNDERSTAND"),
+                ("phrase in another case", {"ext_enabled": "1", "advisory": etag,
+                                            "phrase": SAFETY_PHRASE.lower()}, 400, "type I UNDERSTAND"),
+                ("good consent beside a refused write", {"ext_enabled": "1", "advisory": etag,
+                                                         "phrase": SAFETY_PHRASE, "cloud_enabled": "0",
+                                                         "controller_mode": "cloud"},
+                 409, "cloud mode is not enabled on this machine")):
+            st, reply = fc.post("/settings", data=form)
+            ev[name] = st
+            ctx.log("POST /settings ext_enabled=1, %s -> %s %s", name, st, reply if isinstance(reply, str) else "")
+            ctx.check(st == want, "%s -> %s, expected %s", name, st, want)
+            ctx.check(isinstance(reply, str) and words in reply, "%s was refused in other words: %r", name, reply)
+            ctx.check((fc.settings().get("ext_enabled") or "0") == "0", "%s: a refused write turned extensions on", name)
+            ctx.check(on_disk() == start, "%s: a refused write changed the record on disk", name)
+
+        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        ev["accept"] = st
+        ctx.log("POST /settings ext_enabled=1 with the hash and the phrase -> %s", st)
+        ctx.check(st == 200, "the consent -> %s %r", st, reply)
+        ctx.check(fc.settings().get("ext_enabled") == "1", "ext_enabled does not read 1")
+        rec = on_disk()
+        entry = (rec.get("on_demand") or {}).get("extensions") or {}
+        ev["recorded"] = entry
+        ctx.check(entry.get("hash") == etag and entry.get("method") == "typed" and entry.get("accepted"),
+                  "the record on disk does not carry the acceptance: %s", entry)
+        ctx.check("extensions" not in (rec.get("advisories") or {}),
+                  "the acceptance landed among the first-run documents")
+        # a package's account walks through the data directory to its own files: the
+        # consent adds the search bit, and nothing else
+        now_mode = os.stat(data_dir()).st_mode & 0o7777
+        ev["data_dir_mode_after"] = "%04o" % now_mode
+        ctx.check(now_mode == dir_mode | 0o011, "the data directory went from %04o to %04o, expected %04o",
+                  dir_mode, now_mode, dir_mode | 0o011)
+        ctx.check(rec.get("advisories") == start.get("advisories") and rec.get("acceptance") == start.get("acceptance"),
+                  "the first-run documents or their press moved")
+        after = wiz(fc)
+        ctx.check(after.get("acceptance_done") == before.get("acceptance_done") and after.get("gate") == before.get("gate"),
+                  "the machine's gate moved with the consent: %s", wiz_summary(after))
+        for form in ({"ext_enabled": "1"}, {"ext_enabled": "0"}):
+            st, reply = fc.post("/settings", data=form)
+            ctx.check(st == 200, "%s while on -> %s, expected 200", form, st)
+        ctx.check(fc.settings().get("ext_enabled") == "0", "ext_enabled=0 did not turn extensions off")
+    finally:
+        if prior == "":
+            st, reply = fc.post("/settings", params={"ext_enabled": ""})
+        elif prior == "1":
+            st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        else:
+            st, reply = fc.post("/settings", data={"ext_enabled": prior})
+        ctx.log("restore ext_enabled=%r -> %s", prior, st)
+        if prior != "1":
+            os.chmod(data_dir(), dir_mode)
+        with ctx.takeover():
+            write_file(record_path(), raw)
+        ctx.log("the previous record is back under a restart")
+
+    ctx.check((fc.settings().get("ext_enabled") or "") == prior, "ext_enabled not restored: %r, was %r",
+              fc.settings().get("ext_enabled"), prior)
+    ctx.check(read_file(record_path()) == raw, "the record on disk is not the one found")
+    ctx.check(prior == "1" or os.stat(data_dir()).st_mode & 0o7777 == dir_mode, "the data directory's mode is not the one found")
+    final = wiz(fc)
+    ev["after_restore"] = wiz_summary(final)
+    ctx.check(final.get("acceptance_done") == before.get("acceptance_done") and final.get("gate") == before.get("gate"),
+              "the machine does not read as before: %s", wiz_summary(final))
+
+
 # ---------------------------------------------------------- the operator
 
 @test("setup.factory-return", title="The return to the factory firmware is guarded",

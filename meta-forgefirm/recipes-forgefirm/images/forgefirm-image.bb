@@ -68,8 +68,10 @@ IMAGE_INSTALL:append = " forgefirm-users forgefirm-hostname forgefirm-banner for
 # any package exists: the ffx account pool, the cgroup v2 tree with the cpu,
 # memory, and pids controllers, and the nftables rules (nft comes with it)
 # that refuse everything a pool uid sends, loaded from rcS before the
-# network starts.
-IMAGE_INSTALL:append = " forgefirm-sandbox"
+# network starts. forgeext: the extension host that verifies, installs,
+# and runs packages inside it. It starts after forgectrl and runs nothing
+# while ext_enabled is 0, which is the default.
+IMAGE_INSTALL:append = " forgefirm-sandbox forgeext"
 
 # The rootfs mounts read-only on both images; /data (p3) is the writable
 # partition. read-only-rootfs is poky's feature for it: the root line of

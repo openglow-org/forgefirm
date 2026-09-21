@@ -15,6 +15,7 @@ import time
 from ..catalog import test
 from .forgectrl import lan_ip
 from .image import kernel_config
+from .setup import SAFETY_PHRASE, read_file, record_path, request, write_file
 
 CG = "/sys/fs/cgroup"
 POOL_GROUP = CG + "/ffx"
@@ -464,3 +465,380 @@ def platform(ctx):
     ctx.check(not os.path.isdir(PROBE_GROUP), "the probe group stayed behind")
     ctx.log("PASS: the kernel, the cgroup tree, the account pool, and the deny rules are in place, and each "
             "held a probe process the way it will hold a package")
+
+
+# ------------------------------------------------------------ the host
+
+FORGEEXT = "/usr/bin/forgeext"
+FWUP = "/usr/bin/fwup"
+EXT_ROOT = "/data/forgefirm/ext"
+HOST_STATUS = "/run/forgefirm/ext/status.json"
+SAFE_FILE = "/run/forgefirm/ext-safe"
+HOST_LOG = "/data/log/forgefirm/forgeext/forgeext.log"
+REF_ID = "org.forgetest.reference"
+REF_KEY = "forgetest-reference"
+REF_DEST = "192.0.2.1"                      # TEST-NET-1: declared so that port 443 is, and never dialed
+
+# The reference package's service. It looks at its own confinement from the
+# inside, leaves what it found in its data directory, and stays up.
+REF_SERVICE = r'''
+import errno, json, os, socket, sys, time
+lan = sys.argv[1]
+data, pkg = os.environ["FFX_DATA"], os.environ["FFX_PKG"]
+
+
+def word(e):
+    return errno.errorcode.get(e.errno, str(e.errno))
+
+
+def opened(path, mode="r"):
+    try:
+        with open(path, mode) as f:
+            if "r" in mode:
+                f.read(1)
+            else:
+                f.write("x")
+        return "ok"
+    except OSError as e:
+        return word(e)
+
+
+def dial(addr, port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(4.0)
+    try:
+        s.connect((addr, port))
+        return "connected"
+    except socket.timeout:
+        return "timeout"
+    except OSError as e:
+        return word(e)
+    finally:
+        s.close()
+
+
+def family(af):
+    try:
+        socket.socket(af, socket.SOCK_RAW if af == 16 else socket.SOCK_DGRAM).close()
+        return "ok"
+    except OSError as e:
+        return word(e)
+
+
+report = {
+    "uid": os.getuid(), "gid": os.getgid(), "groups": os.getgroups(), "cwd": os.getcwd(),
+    "env": sorted(os.environ),
+    "read_settings": opened("/data/forgefirm/forgefirm.conf"),
+    "read_setup": opened("/data/forgefirm/setup.json"),
+    "read_etc": opened("/etc/hostname"),
+    "read_pkg": opened(os.path.join(pkg, "manifest.json")),
+    "write_pkg": opened(os.path.join(pkg, "x"), "w"),
+    "write_data": opened(os.path.join(data, "scratch"), "w"),
+    "write_tmp": opened("/tmp/forgetest-reference", "w"),
+    "pulse_device": opened("/dev/glowforge"),
+    "loopback_declared_port": dial("127.0.0.1", 443),
+    "lan_declared_port": dial(lan, 443) if lan != "-" else "skipped",
+    "loopback_undeclared_port": dial("127.0.0.1", 80),
+    "netlink_socket": family(16),
+    "unix_socket": family(1),
+}
+with open(os.path.join(data, "report.json.new"), "w") as f:
+    json.dump(report, f)
+os.rename(os.path.join(data, "report.json.new"), os.path.join(data, "report.json"))
+print("reference service up", flush=True)
+n = 0
+while True:
+    n += 1
+    with open(os.path.join(data, "beat"), "w") as f:
+        f.write(str(n))
+    time.sleep(0.5)
+'''
+
+
+def _host_pids():
+    """The extension host: /usr/bin/forgeext run, and not an install or a
+    check someone has under way."""
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            if os.readlink("/proc/%s/exe" % d) != FORGEEXT:
+                continue
+            with open("/proc/%s/cmdline" % d, "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if argv[:2] == [FORGEEXT.encode(), b"run"]:
+            out.append(int(d))
+    return out
+
+
+def _host_status():
+    try:
+        with open(HOST_STATUS) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _svc(id_):
+    return next((x for x in _host_status().get("services", []) if x.get("id") == id_), {})
+
+
+def _forgeext(*args, wait=120):
+    p = subprocess.run([FORGEEXT] + list(args), capture_output=True, text=True, timeout=wait)
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        return {"ok": False, "error": "no JSON answer (exit %s): %s %s" % (p.returncode, p.stdout[-200:], p.stderr[-200:])}
+
+
+def _until(ctx, cond, seconds, poll=0.25):
+    end = time.time() + seconds
+    while time.time() < end:
+        v = cond()
+        if v:
+            return v
+        ctx.checkpoint()
+        time.sleep(poll)
+    return cond()
+
+
+def _tree(root):
+    """Every path under the extension root but the host's own bookkeeping."""
+    out = []
+    for base, dirs, files in os.walk(root):
+        for n in dirs + files:
+            rel = os.path.relpath(os.path.join(base, n), root)
+            if rel not in ("state.json", "lock"):
+                out.append(rel)
+    return sorted(out)
+
+
+def _pack_reference(work, lan):
+    """The reference package, signed with a key made here: (archive, public key)."""
+    import io
+    import tarfile
+    manifest = {"manifest": 1, "id": REF_ID, "name": "forgetest reference", "version": "1.0.0",
+                "author": "forgetest", "license": "MIT", "api": "0.1", "runtime": "python",
+                "service": {"exec": "bin/reference.py", "args": [lan or "-"]},
+                "capabilities": ["net.outbound:%s:443" % REF_DEST, "storage:1"]}
+    payload = os.path.join(work, "payload.tar.gz")
+    with tarfile.open(payload, "w:gz") as t:
+        for name, text, mode in (("manifest.json", json.dumps(manifest), 0o644),
+                                 ("bin/reference.py", REF_SERVICE, 0o755)):
+            info = tarfile.TarInfo(name)
+            data = text.encode()
+            info.size, info.mode = len(data), mode
+            t.addfile(info, io.BytesIO(data))
+    conf = os.path.join(work, "fwup.conf")
+    _write(conf, 'meta-product = "ForgeFIRM extension"\nmeta-description = "%s"\nmeta-version = "1.0.0"\n'
+                 'meta-platform = "forgefirm-ext"\nfile-resource payload.tar.gz {\n    host-path = "%s"\n}\n'
+           % (REF_ID, payload))
+    key = os.path.join(work, REF_KEY)
+    raw, signed = os.path.join(work, "raw.ffx"), os.path.join(work, "reference.ffx")
+    for cmd in ([FWUP, "-g", "-o", key], [FWUP, "-c", "-f", conf, "-o", raw],
+                [FWUP, "-S", "-s", key + ".priv", "-i", raw, "-o", signed]):
+        subprocess.run(cmd, check=True, capture_output=True, timeout=60, cwd=work)
+    return signed, key + ".pub"
+
+
+@test("exthost.service", title="A package's service runs confined under the extension host",
+      subsystem="exthost", kind="auto", hardware="takeover", est_min=5,
+      covers=[("forgeext", "**"), ("forgectrl", "src/main.c"), ("forgectrl", "src/logs.*")],
+      requires=["exthost.platform", "setup.extensions-consent"],
+      description="The extension host is one running process (/usr/bin/forgeext run) and the status "
+                  "file is its word, and with extensions off it runs nothing and says why. The test builds a reference "
+                  "package on the board, signs it with a key it makes there, and adds that key as an owner "
+                  "key: an install without the community consent is refused, with it the package is "
+                  "installed at the community tier. It turns extensions on over the advisory. The service "
+                  "then runs as its pool account with no_new_privs and a seccomp filter, in its own group "
+                  "under /sys/fs/cgroup/ffx with the limits of a service (25 percent of the core, 48 MiB, 32 "
+                  "processes), with its chain in the rule table. From the inside it reads /etc and its "
+                  "package, writes its data directory and nothing else, cannot read the settings file, the "
+                  "setup record, or the pulse device, is refused by the machine on loopback and on its LAN "
+                  "address even on the port it declared, cannot connect on a port it did not declare, and "
+                  "cannot open a netlink socket; its output is in the forgeext log under its id. Safe mode "
+                  "stops it and its end starts it again. A host killed outright takes its services with it "
+                  "at once (the init wrapper), comes back, and starts the service again. ext_enabled=0 "
+                  "stops it and leaves no group and no chain. The package, the key, the setting, and the "
+                  "setup record are put back as found, the record under a forgectrl restart. The layer "
+                  "content (the recipe, the init script's install, the image list) is in the platform "
+                  "identity of every fingerprint.")
+def service(ctx):
+    import shutil
+    import tempfile
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(os.path.isfile(FORGEEXT) and os.access("/etc/init.d/forgeext", os.X_OK),
+              "the image has no forgeext, or no init script for it")
+    hosts = _host_pids()
+    ev["host_pids"] = hosts
+    ctx.check(len(hosts) == 1, "the extension host is not one running process: %s", hosts)
+    ctx.check(_until(ctx, lambda: _host_status().get("pid") == hosts[0], 10),
+              "the status file %s is not the running host's: %s", HOST_STATUS, _host_status().get("pid"))
+    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: settings are locked")
+    prior = fc.settings().get("ext_enabled") or ""
+    raw = read_file(record_path())
+    ctx.check(raw, "no setup record at %s", record_path())
+    ctx.check(not os.path.exists(SAFE_FILE), "%s exists: the machine is in safe mode", SAFE_FILE)
+    ctx.check(REF_ID not in [x.get("id") for x in _forgeext("list").get("packages", [])],
+              "%s is already installed", REF_ID)
+    found_tree = _tree(EXT_ROOT)
+    data_dir = os.path.dirname(EXT_ROOT)
+    dir_mode = os.stat(data_dir).st_mode & 0o7777
+    ev["data_dir_mode_found"] = "%04o" % dir_mode
+    if prior != "1":
+        st = _host_status()
+        ev["off"] = {k: st.get(k) for k in ("enabled", "off_reason")}
+        ctx.check(st.get("enabled") is False and "ext_enabled" in (st.get("off_reason") or "")
+                  and not [x for x in st.get("services", []) if x.get("state") == "running"],
+                  "with extensions off the host does not say so: %s", ev["off"])
+
+    st, body, hdrs = request(fc.base, "GET", "/advisories/extensions", headers={"Host": fc.host_header()})
+    etag = hdrs.get("etag")
+    ctx.check(st == 200 and etag, "GET /advisories/extensions -> %s", st)
+    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
+    owner_key = os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub")
+    uid = None
+
+    def cg(name):
+        return _read("%s/%s/%s" % (POOL_GROUP, REF_ID, name)).strip()
+
+    def chains():
+        return subprocess.run([NFT, "list", "table", "inet", "ffx"], capture_output=True, text=True, timeout=30).stdout
+
+    def running(other_than=0):
+        # The status file outlives a killed host: a pid that is the old one is no news.
+        x = _svc(REF_ID)
+        return x if x.get("state") == "running" and x.get("pid") and x["pid"] != other_than             and os.path.exists("/proc/%d" % x["pid"]) else None
+
+    try:
+        lan = lan_ip()
+        archive, pub = _pack_reference(work, lan)
+        r = _forgeext("inspect", archive)
+        ev["inspect_without_the_key"] = r.get("tier")
+        ctx.check(r.get("ok") and r.get("tier") == "unverified", "before its key is the owner's the package reads %s", r)
+        shutil.copy(pub, owner_key)
+        os.chmod(owner_key, 0o644)
+        r = _forgeext("inspect", archive)
+        ctx.check(r.get("ok") and r.get("tier") == "community", "with the owner's key the package reads %s", r)
+        r = _forgeext("install", archive)
+        ev["install_without_consent"] = r.get("error")
+        ctx.log("install without the consent -> %s", r.get("error"))
+        ctx.check(r.get("ok") is False, "a community package was installed without the consent")
+        r = _forgeext("install", archive, "--consent-community")
+        ctx.check(r.get("ok") is True, "the install -> %s", r.get("error"))
+        ctx.check(_forgeext("check", REF_ID).get("ok") is True, "the installed tree fails its integrity check")
+
+        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        ctx.check(st == 200, "ext_enabled=1 over the advisory -> %s %r", st, reply)
+        x = _until(ctx, running, 90, poll=0.5)
+        ev["status_at_start"] = _host_status()
+        ctx.check(x, "the service is not running: %s", {k: ev["status_at_start"].get(k) for k in ("enabled", "off_reason", "not_ready")}
+                  if not _svc(REF_ID) else _svc(REF_ID))
+        pid = x["pid"]
+        uid = POOL_FIRST + int(x["account"][3:])
+        proc = _read("/proc/%d/status" % pid)
+        ev["service"] = {"pid": pid, "account": x["account"], "cgroup": _read("/proc/%d/cgroup" % pid).strip(),
+                         "cpu.max": cg("cpu.max"), "memory.max": cg("memory.max"), "pids.max": cg("pids.max"),
+                         "memory.current": cg("memory.current")}
+        ctx.log("the service: %s", ev["service"])
+        ctx.check(("Uid:\t%d\t%d\t%d\t%d" % ((uid,) * 4)) in proc and ("Gid:\t%d\t%d\t%d\t%d" % ((uid,) * 4)) in proc,
+                  "the service does not run as %s alone", x["account"])
+        ctx.check("NoNewPrivs:\t1" in proc and "Seccomp:\t2" in proc, "no no_new_privs or no seccomp filter on the service")
+        ctx.check(ev["service"]["cgroup"] == "0::/ffx/" + REF_ID, "the service's group is %s", ev["service"]["cgroup"])
+        ctx.check(cg("cpu.max").split() == ["25000", "100000"] and cg("memory.max") == str(48 << 20) and cg("pids.max") == "32",
+                  "the group's limits are not a service's: %s", ev["service"])
+        table = chains()
+        ctx.check(("chain u%d " % uid) in table and REF_DEST in table, "the service's chain is not in the rule table")
+
+        report_path = os.path.join(EXT_ROOT, "data", REF_ID, "report.json")
+        ctx.check(_until(ctx, lambda: os.path.isfile(report_path), 60, poll=0.5), "the service left no report")
+        rep = json.loads(_read(report_path))
+        ev["from_the_inside"] = rep
+        ctx.log("from the inside: %s", rep)
+        want = {"uid": uid, "gid": uid, "groups": [], "read_etc": "ok", "read_pkg": "ok", "write_data": "ok",
+                "read_settings": "EACCES", "read_setup": "EACCES", "write_pkg": "EACCES", "write_tmp": "EACCES",
+                "pulse_device": "EACCES", "loopback_declared_port": "ECONNREFUSED",
+                "loopback_undeclared_port": "EACCES", "unix_socket": "ok", "netlink_socket": "EPERM"}
+        if lan:
+            want["lan_declared_port"] = "ECONNREFUSED"
+        for k, v in want.items():
+            ctx.check(rep.get(k) == v, "from the inside, %s is %r, expected %r", k, rep.get(k), v)
+        # LC_CTYPE is the interpreter's own doing (it coerces the C locale at its start)
+        fixed = {"PATH", "LANG", "HOME", "TMPDIR", "FFX_ID", "FFX_PKG", "FFX_DATA", "PYTHONDONTWRITEBYTECODE",
+                 "PYTHONUNBUFFERED"}
+        ctx.check(rep.get("cwd") == os.path.join(EXT_ROOT, "data", REF_ID) and set(rep.get("env") or []) - {"LC_CTYPE"} == fixed,
+                  "its working directory or its environment is not the fixed one: %s %s", rep.get("cwd"), rep.get("env"))
+        ctx.check(_until(ctx, lambda: ("ext %s: reference service up" % REF_ID) in _read(HOST_LOG), 20, poll=1),
+                  "the service's output is not in %s under its id", HOST_LOG)
+
+        _write(SAFE_FILE, "")
+        ctx.check(_until(ctx, lambda: not running() and "safe mode" in (_host_status().get("off_reason") or ""), 15),
+                  "safe mode did not stop the service: %s", _host_status())
+        ctx.check(not os.path.exists("/proc/%d" % pid) and not os.path.isdir("%s/%s" % (POOL_GROUP, REF_ID)),
+                  "safe mode left the process or its group")
+        os.remove(SAFE_FILE)
+        x = _until(ctx, lambda: running(pid), 60, poll=0.5)
+        ctx.check(x, "out of safe mode the service did not start again: %s", _svc(REF_ID))
+        pid = x["pid"]
+        ctx.log("safe mode stopped it and its end started it again (pid %d)", pid)
+
+        host = _host_pids()
+        ctx.check(len(host) == 1, "the extension host is not one process: %s", host)
+        # Only once the service is in its quiet loop: a service still on its way up ends by
+        # itself when its first line meets the dead host's pipe, and that would prove nothing.
+        beat_path = os.path.join(EXT_ROOT, "data", REF_ID, "beat")
+        seen = set()
+        ctx.check(_until(ctx, lambda: seen.add(_read(beat_path)) or len(seen) >= 3, 30, poll=0.2),
+                  "the service's heartbeat does not advance")
+        t0 = time.time()
+        os.kill(host[0], signal.SIGKILL)
+        ctx.check(_until(ctx, lambda: not os.path.exists("/proc/%d" % pid), 2, poll=0.05),
+                  "a killed host left its service running for 2 s: nobody would freeze it in an armed window")
+        ev["service_outlived_a_killed_host_s"] = round(time.time() - t0, 2)
+        x = _until(ctx, lambda: running(pid) if _host_status().get("pid") in _host_pids() else None, 60, poll=0.5)
+        ev["host_back_s"] = round(time.time() - t0, 1)
+        ctx.check(x, "the host did not come back and start the service again: %s", _host_status())
+        pid = x["pid"]
+        ctx.log("a killed host: its service gone in %.2f s, the host back and the service running after %.1f s",
+                ev["service_outlived_a_killed_host_s"], ev["host_back_s"])
+
+        st, reply = fc.post("/settings", data={"ext_enabled": "0"})
+        ctx.check(st == 200, "ext_enabled=0 -> %s %r", st, reply)
+        ctx.check(_until(ctx, lambda: not running() and not os.path.exists("/proc/%d" % pid), 15),
+                  "ext_enabled=0 did not stop the service: %s", _svc(REF_ID))
+        ctx.check(not os.path.isdir("%s/%s" % (POOL_GROUP, REF_ID)) and ("chain u%d " % uid) not in chains(),
+                  "ext_enabled=0 left the service's group or its chain")
+        ctx.check("ext_enabled" in (_host_status().get("off_reason") or ""), "the host does not say why nothing runs: %s",
+                  _host_status().get("off_reason"))
+    finally:
+        if os.path.exists(SAFE_FILE):
+            os.remove(SAFE_FILE)
+        st, reply = fc.post("/settings", data={"ext_enabled": "0"})
+        r = _forgeext("remove", REF_ID)
+        ctx.log("remove %s -> %s", REF_ID, "ok" if r.get("ok") else r.get("error"))
+        if os.path.exists(owner_key):
+            os.remove(owner_key)
+        shutil.rmtree(work, ignore_errors=True)
+        if prior == "1":
+            st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        elif prior == "":
+            st, reply = fc.post("/settings", params={"ext_enabled": ""})
+        ctx.log("restore ext_enabled=%r -> %s", prior, st)
+        if prior != "1":
+            os.chmod(data_dir, dir_mode)
+        with ctx.takeover():
+            write_file(record_path(), raw)
+        ctx.log("the previous record is back under a restart")
+
+    ctx.check((fc.settings().get("ext_enabled") or "") == prior, "ext_enabled not restored: %r, was %r",
+              fc.settings().get("ext_enabled"), prior)
+    ctx.check(read_file(record_path()) == raw, "the setup record on disk is not the one found")
+    ctx.check(prior == "1" or os.stat(data_dir).st_mode & 0o7777 == dir_mode, "the data directory's mode is not the one found")
+    left = _tree(EXT_ROOT)
+    ctx.check(left == found_tree, "the extension root is not as found: %s", sorted(set(left) ^ set(found_tree)))
+    ctx.check(len(_host_pids()) == 1, "the extension host is not running at the end")
+

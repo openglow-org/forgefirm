@@ -12,7 +12,7 @@ require forgeext-pin.inc
 
 S = "${WORKDIR}/git"
 
-inherit cmake pkgconfig forgefirm-manifest
+inherit cmake pkgconfig update-rc.d forgefirm-manifest
 
 # jansson (the manifest, state.json, every answer), libarchive (the .ffx and
 # its payload, read streaming), libsodium (the archive's signature and the
@@ -23,3 +23,13 @@ DEPENDS += "jansson libarchive libsodium"
 # extension is never signed with; forgefirm-sandbox is the account pool,
 # the cgroup tree, and the deny rules a package's service runs inside.
 RDEPENDS:${PN} = "fwup forgefirm-keys forgefirm-sandbox"
+
+# After forgectrl (90), whose read-only routes the host takes the machine's
+# state from, and down before it.
+INITSCRIPT_NAME = "forgeext"
+INITSCRIPT_PARAMS = "start 91 2 3 4 5 . stop 9 0 1 6 ."
+
+do_install:append() {
+    install -d ${D}${sysconfdir}/init.d
+    install -m 0755 ${S}/init/forgeext.init ${D}${sysconfdir}/init.d/forgeext
+}
