@@ -1800,7 +1800,9 @@ def motion_jog(ctx):
       description="A package that asks for ui must ship ui/index.html, and one that ships the file must "
                   "ask: the install refuses each of those the other way round, in words. With both, GET "
                   "/ext/ui hands the page back as a JSON string, byte for byte what the package shipped, "
-                  "and a package that is not installed is refused. The page is a string in JSON and never "
+                  "and a package that is not installed is refused, as is one the operator disabled - "
+                  "disabling a package is the way out of everything it does, its interface included. "
+                  "The page is a string in JSON and never "
                   "markup this daemon composed. Nothing runs and nothing moves: the machine is only asked "
                   "for files. The frame the panel builds around the page is a browser's to judge, and that "
                   "is exthost.ui-frame-isolation's, which is a browser harness and not this catalog.")
@@ -1856,6 +1858,20 @@ def ui_delivery(ctx):
         st_, why = fc.get("/ext/ui", params={"id": "org.forgetest.nothere"})
         ev["ui_absent"] = [st_, why]
         ctx.check(st_ >= 400, "a package that is not installed -> %s %s", st_, why)
+
+        # Disabled, it has no page. Disabling a package is the operator's
+        # way out of everything it does, and the interface is part of
+        # that: the page reaches the machine through the panel's bridge,
+        # and a door that is shut is shut.
+        r = _forgeext("disable", REF_ID)
+        ctx.check(r.get("ok") is True, "disable -> %s", r.get("error"))
+        st_, why = fc.get("/ext/ui", params={"id": REF_ID})
+        ev["ui_disabled"] = [st_, why]
+        ctx.check(st_ >= 400 and "disabled" in json.dumps(why), "a disabled package's page -> %s %s", st_, why)
+        r = _forgeext("enable", REF_ID)
+        ctx.check(r.get("ok") is True, "enable -> %s", r.get("error"))
+        st_, doc = fc.get("/ext/ui", params={"id": REF_ID})
+        ctx.check(st_ == 200 and (doc or {}).get("ok"), "enabled again, its page is served -> %s", st_)
     finally:
         _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
     _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
@@ -2009,7 +2025,9 @@ def motion_job(ctx):
       description="Extensions stay as found (the package is installed and never runs). The reference package is "
                   "installed with the hold grant through the host's command line. GET /ext/status without "
                   "the login is refused (403); with it, it lists the package as the host does (tier "
-                  "community, enabled, the hold advisory) beside enabled, safe_mode, and the host's own "
+                  "community, enabled, the hold advisory, and the capabilities it may use - what needs no "
+                  "grant and what the operator granted, which is what the panel's bridge decides on and "
+                  "is never wider than what the manifest asked for) beside enabled, safe_mode, and the host's own "
                   "status with running true. POST /ext/package: hold-required names the package under "
                   "required-holds and the list says required; disable and enable change the host's state "
                   "file; an action outside the closed list and an id that has not the form of one are 400 "
@@ -2073,6 +2091,23 @@ def package_routes(ctx):
         ctx.check(pkg and pkg.get("tier") == "community" and pkg.get("enabled") is True and pkg.get("hold") == "advisory"
                   and pkg.get("grants") == ["hold"] and (pkg.get("package") or {}).get("name") == "forgetest reference",
                   "the package is not listed as the host lists it: %s", pkg)
+
+        # What the package may use, beside what it asked for. The panel's
+        # bridge decides on this list and not on the manifest's, so a
+        # capability the operator did not grant must not be in it.
+        asked = set((pkg.get("package") or {}).get("capabilities") or [])
+        effective = set(pkg.get("effective") or [])
+        granted = set(pkg.get("grants") or [])
+        ev["capabilities"] = {"asked": sorted(asked), "effective": sorted(effective), "granted": sorted(granted)}
+        ctx.log("the reference package asked for %s, may use %s", sorted(asked), sorted(effective))
+        ctx.check(effective and effective <= asked, "it may use what it did not ask for: %s", ev["capabilities"])
+        ctx.check(granted <= effective, "a capability the operator granted is not in what it may use: %s",
+                  ev["capabilities"])
+        st, reply = act("hold-advisory")                 # no change; the grant stands either way
+        r = _forgeext("list", REF_ID)
+        host_eff = set(((r.get("packages") or [{}])[0]).get("effective") or [])
+        ctx.check(host_eff == effective, "the panel's list and the host's own do not agree: %s vs %s",
+                  sorted(effective), sorted(host_eff))
 
         st, reply = act("hold-required")
         ctx.check(st == 200 and os.listdir(REQUIRED_HOLDS) == [REF_ID] and listed()[1].get("hold") == "required",
