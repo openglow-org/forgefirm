@@ -787,7 +787,11 @@ def _stream(addr, host_client=False, keep=False, source=None):
         return 0, str(e), None
 
 
-def _pack_reference(work, lan, more_caps=()):
+REF_UI = ("<!doctype html><title>forgetest reference</title>\n"
+          "<p>the reference package's own page</p>\n")
+
+
+def _pack_reference(work, lan, more_caps=(), ui=None):
     """The reference package, signed with a key made here: (archive, public key)."""
     import io
     import tarfile
@@ -802,8 +806,13 @@ def _pack_reference(work, lan, more_caps=()):
                                  "settings.own", "camera.lid"] + list(more_caps)}
     payload = os.path.join(work, "payload.tar.gz")
     with tarfile.open(payload, "w:gz") as t:
-        for name, text, mode in (("manifest.json", json.dumps(manifest), 0o644),
-                                 ("bin/reference.py", REF_SERVICE, 0o755)):
+        files = [("manifest.json", json.dumps(manifest), 0o644),
+                 ("bin/reference.py", REF_SERVICE, 0o755)]
+        if ui is None:
+            ui = "ui" in (manifest.get("capabilities") or [])
+        if ui:
+            files.append(("ui/index.html", REF_UI, 0o644))
+        for name, text, mode in files:
             info = tarfile.TarInfo(name)
             data = text.encode()
             info.size, info.mode = len(data), mode
@@ -1739,6 +1748,75 @@ def motion_jog(ctx):
         back = ask_jog({"x": -20, "feed": 3000})
         ctx.check(back and back[0] == 200, "the head was not jogged back: %s", back)
         ctx.sleep(1.5)
+    finally:
+        _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
+    _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
+
+
+@test("exthost.ui-delivery", title="A package's interface is served, and only when it has one",
+      subsystem="exthost", kind="auto", hardware="api", est_min=4,
+      covers=[("forgeext", "src/install.*"), ("forgeext", "src/main.c"), ("forgectrl", "src/extpkg.*"),
+              ("forgectrl", "src/main.c")],
+      requires=["exthost.service"],
+      description="A package that asks for ui must ship ui/index.html, and one that ships the file must "
+                  "ask: the install refuses each of those the other way round, in words. With both, GET "
+                  "/ext/ui hands the page back as a JSON string, byte for byte what the package shipped, "
+                  "and a package that is not installed is refused. The page is a string in JSON and never "
+                  "markup this daemon composed. Nothing runs and nothing moves: the machine is only asked "
+                  "for files. The frame the panel builds around the page is a browser's to judge, and that "
+                  "is exthost.ui-frame-isolation's, which is a browser harness and not this catalog.")
+def ui_delivery(ctx):
+    import shutil
+    import tempfile
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: settings are locked")
+    prior = fc.settings().get("ext_enabled") or ""
+    raw = read_file(record_path())
+    found_tree = _tree(EXT_ROOT)
+    dir_mode = os.stat(os.path.dirname(EXT_ROOT)).st_mode & 0o7777
+    st, body, hdrs = request(fc.base, "GET", "/advisories/extensions", headers={"Host": fc.host_header()})
+    etag = hdrs.get("etag")
+    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
+    owner_key = os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub")
+
+    try:
+        archive, pub = _pack_reference(work, lan_ip(), more_caps=["ui"])
+        shutil.copy(pub, owner_key)
+        os.chmod(owner_key, 0o644)
+
+        # Asking for an interface without shipping one, and shipping one
+        # without asking: each refused, and neither installed.
+        # Each archive is packed in a directory of its own: the packer
+        # makes a signing key there, and fwup will not remake one over an
+        # existing file.
+        for caps, want_ui, why_, words in ((["ui"], False, "asks_without_the_file", "ui/index.html"),
+                                           ([], True, "ships_without_asking", "does not ask for ui")):
+            wn = tempfile.mkdtemp(prefix="forgetest-ffxn.")
+            try:
+                arch, _k = _pack_reference(wn, lan_ip(), more_caps=caps, ui=want_ui)
+                r = _forgeext("inspect", arch)
+                ev[why_] = r.get("error")
+                ctx.check(r.get("ok") is False and words in (r.get("error") or ""),
+                          "%s -> %s", why_.replace("_", " "), r)
+            finally:
+                shutil.rmtree(wn, ignore_errors=True)
+
+        r = _forgeext("install", archive, "--consent-community")
+        ctx.check(r.get("ok") is True, "the install of a package with an interface -> %s", r.get("error"))
+        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        ctx.check(st == 200, "ext_enabled=1 -> %s %r", st, reply)
+
+        st_, doc = fc.get("/ext/ui", params={"id": REF_ID})
+        ev["ui"] = {"status": st_, "bytes": (doc or {}).get("bytes")}
+        ctx.log("GET /ext/ui -> %s, %s bytes", st_, (doc or {}).get("bytes"))
+        ctx.check(st_ == 200 and isinstance(doc, dict) and doc.get("ok"), "GET /ext/ui -> %s %s", st_, doc)
+        ctx.check(doc.get("html") == REF_UI, "the page served is not the one the package shipped")
+        ctx.check(doc.get("bytes") == len(REF_UI), "the length does not match the page: %s", doc.get("bytes"))
+
+        st_, why = fc.get("/ext/ui", params={"id": "org.forgetest.nothere"})
+        ev["ui_absent"] = [st_, why]
+        ctx.check(st_ >= 400, "a package that is not installed -> %s %s", st_, why)
     finally:
         _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
     _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
