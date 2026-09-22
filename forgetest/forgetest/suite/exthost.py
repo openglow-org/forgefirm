@@ -1188,7 +1188,8 @@ def _frozen(id_):
 @test("exthost.armed-freeze", title="A package's service is frozen for the armed window",
       subsystem="exthost", kind="operator", hardware="takeover", est_min=6,
       covers=[("forgeext", "src/super.*"), ("forgeext", "src/run.*"), ("forgeext", "src/machine.*"),
-              ("forgeext", "src/cgroup.*"), ("forgectrl", "src/cool.*")],
+              ("forgeext", "src/cgroup.*"), ("forgectrl", "src/cool.*"), ("forgectrl", "src/cam.*"),
+              ("forgectrl", "src/main.c")],
       requires=["exthost.service", "cloud.dark-print"], actions=["button"],
       steps=[OFFLINE_STEP,
              "Bed clear (the job is dark: a 30 s square at S0, nothing fires). Press the button "
@@ -1201,8 +1202,11 @@ def _frozen(id_):
                   "close the group reads frozen in every sample and the heartbeat does not move, the "
                   "freeze is in place before the run starts (the latch unlocks only for the run), and "
                   "within 3 s of the close the group is thawed and the heartbeat advances again. The "
-                  "service is the same process throughout. Everything is put back as exthost.service "
-                  "puts it back.")
+                  "service is the same process throughout. A background capture is refused in words "
+                  "while the window is open and served again once it closes, which is the other half "
+                  "of keeping a package off the step stream: a capture costs kernel-side work that a "
+                  "thread priority does not cover. Everything is put back as exthost.service puts it "
+                  "back.")
 def armed_freeze(ctx):
     import tempfile
     import threading
@@ -1222,14 +1226,21 @@ def armed_freeze(ctx):
     work = tempfile.mkdtemp(prefix="forgetest-ffx.")
     beat_path = os.path.join(EXT_ROOT, "data", REF_ID, "beat")
     samples = []
+    probe = {}
     stop = threading.Event()
 
     def sampler():
         while not stop.is_set():
             st_, cool = fc.get("/cool/status")
-            samples.append((time.time(), bool(cool.get("armed")) if st_ == 200 and isinstance(cool, dict) else None,
-                            _frozen(REF_ID), _read(beat_path).strip(), (_svc(REF_ID) or {}).get("pid"),
-                            latch_locked()))
+            armed = bool(cool.get("armed")) if st_ == 200 and isinstance(cool, dict) else None
+            samples.append((time.time(), armed, _frozen(REF_ID), _read(beat_path).strip(),
+                            (_svc(REF_ID) or {}).get("pid"), latch_locked()))
+            # One background capture from inside the window. The refusal is
+            # decided before any frame is taken, so it costs the cut nothing;
+            # if it were served instead, that is what this case is here to
+            # catch, and the capture is the one the rule forbids.
+            if armed and "in" not in probe:
+                probe["in"] = fc.get("/cam/snapshot", params={"cam": "lid", "background": "1"}, raw=True)
             time.sleep(0.2)
 
     try:
@@ -1289,6 +1300,21 @@ def armed_freeze(ctx):
         ev["thaw_lag_s"] = round(last_frozen - t_close, 2) if last_frozen else None
         ctx.check({x[4] for x in samples if x[4]} == {pid}, "the service did not stay the same process: %s",
                   sorted({x[4] for x in samples if x[4]}))
+
+        # The camera, inside the window and after it.
+        ctx.check("in" in probe, "no background capture was tried inside the armed window")
+        cam_st, cam_body = probe.get("in", (None, b""))
+        words = cam_body.decode("utf-8", "replace")[:200] if isinstance(cam_body, bytes) else str(cam_body)[:200]
+        ev["camera_in_window"] = {"status": cam_st, "said": words}
+        ctx.check(cam_st == 409, "a background capture inside the armed window -> %s (%d bytes)", cam_st,
+                  len(cam_body or b""))
+        ctx.check("armed" in words, "the refusal does not say why: %s", words)
+        st, after_body = fc.get("/cam/snapshot", params={"cam": "lid", "background": "1"}, raw=True)
+        ev["camera_after_window"] = {"status": st, "bytes": len(after_body or b"")}
+        ctx.check(st == 200 and (after_body or b"")[:2].hex() == "ffd8",
+                  "a background capture after the window -> %s (%d bytes)", st, len(after_body or b""))
+        ctx.log("a background capture inside the window -> %s (%s); after it -> %s, %d bytes", cam_st, words, st,
+                len(after_body or b""))
         ctx.log("the armed window was open %.1f s; frozen %.2f s after it opened and %.2f s before the latch unlocked "
                 "for the run, in every one of %d samples from 2 s in to the close, the heartbeat still; thawed %.2f s "
                 "after the close", ev["window_s"], ev["freeze_lag_s"], ev["freeze_led_the_run_s"], len(inside),
