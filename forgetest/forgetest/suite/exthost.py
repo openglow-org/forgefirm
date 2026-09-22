@@ -654,6 +654,19 @@ while True:
             json.dump({"place": place, "seen": seen, "polls": polls, "last": ans,
                        "connected": ans.get("connected") if isinstance(ans, dict) else None}, f)
         os.rename(os.path.join(data, "events.json.new"), os.path.join(data, "events.json"))
+    # the test's word to the service: write a program and run it
+    runf = os.path.join(data, "run")
+    if os.path.exists(runf):
+        with open(runf) as f:
+            words = json.load(f)
+        os.remove(runf)
+        if words.get("program_text") is not None:
+            with open(os.path.join(data, words.get("program", "job.gcode")), "w") as f:
+                f.write(words["program_text"])
+        body = {k: v for k, v in words.items() if k not in ("program_text",)}
+        with open(os.path.join(data, "ran.new"), "w") as f:
+            json.dump(api("POST", "/v0/motion/job", body), f)
+        os.rename(os.path.join(data, "ran.new"), os.path.join(data, "ran"))
     # the test's word to the service: jog now
     jog = os.path.join(data, "jog")
     if os.path.exists(jog):
@@ -1817,6 +1830,145 @@ def ui_delivery(ctx):
         st_, why = fc.get("/ext/ui", params={"id": "org.forgetest.nothere"})
         ev["ui_absent"] = [st_, why]
         ctx.check(st_ >= 400, "a package that is not installed -> %s %s", st_, why)
+    finally:
+        _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
+    _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
+
+
+@test("exthost.motion-job", title="A package runs a program, under every gate a sender is under",
+      subsystem="exthost", kind="auto", hardware="takeover", mode="grbl", est_min=9,
+      covers=[("forgeext", "src/api.*"), ("forgeext", "src/machine.*"), ("forgeext", "src/run.*"),
+              ("forgectrl", "src/jobpost.*"), ("forgectrl", "src/jobrun.*"), ("forgectrl", "src/tokens.*")],
+      requires=["exthost.service", "motion.job"],
+      steps=["Setup: lid closed, nothing in the bed."],
+      description="The reference package is installed with motion.job, which the operator grants. It "
+                  "writes a program into its own data directory and asks the host to run it. The program "
+                  "is dark: it moves and never commands the laser. The job reaches the machine as the "
+                  "package, under the machine lease, and the machine's own job record names it as the "
+                  "owner and counts the program's lines. A dark program commands no laser, so no armed "
+                  "window opens and there is nothing for a press to arm: the arm gates are in force and "
+                  "are never reached, and a job that fires is cloud.dark-print's and "
+                  "laser.emission-witness's. Every line is sent and acknowledged, and the runner ends the "
+                  "job as one that ended without a discharge - which is what a program that commands no "
+                  "laser is, and is the outcome this test wants. The job's own emission witnesses are all "
+                  "zero. The head accelerometer sees the motion and the "
+                  "laser's own witnesses stay at zero throughout: the latch locked before the window and "
+                  "after it, and no emission at any point. A program named with a path, or one that is not "
+                  "a file of the package's own data, is refused by the host with the machine never asked. "
+                  "Everything is put back as exthost.service puts it back.")
+def motion_job(ctx):
+    import shutil
+    import tempfile
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: settings are locked")
+    prior = fc.settings().get("ext_enabled") or ""
+    raw = read_file(record_path())
+    found_tree = _tree(EXT_ROOT)
+    dir_mode = os.stat(os.path.dirname(EXT_ROOT)).st_mode & 0o7777
+    st, body, hdrs = request(fc.base, "GET", "/advisories/extensions", headers={"Host": fc.host_header()})
+    etag = hdrs.get("etag")
+    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
+    owner_key = os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub")
+
+    # A program that moves and never fires: no M3, no S above zero.
+    PROGRAM = "G21\nG91\nG1 X10 F2000\nG1 X-10 F2000\nG90\nM2\n"
+
+    try:
+        archive, pub = _pack_reference(work, lan_ip(), more_caps=["motion.job"])
+        shutil.copy(pub, owner_key)
+        os.chmod(owner_key, 0o644)
+        r = _forgeext("install", archive, "--consent-community", "--grant", "motion.job")
+        ctx.check(r.get("ok") is True, "the install with the operator's grant -> %s", r.get("error"))
+        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
+        ctx.check(st == 200, "ext_enabled=1 -> %s %r", st, reply)
+        x = _until(ctx, lambda: _svc(REF_ID) if _svc(REF_ID).get("state") == "running" else None, 90, poll=0.5)
+        ctx.check(x, "the service is not running: %s", _svc(REF_ID))
+
+        data_dir = os.path.join(EXT_ROOT, "data", REF_ID)
+        ran = os.path.join(data_dir, "ran")
+
+        def ask_run(body, seconds=60):
+            if os.path.exists(ran):
+                os.remove(ran)
+            _write(os.path.join(data_dir, "run"), json.dumps(body))
+            return _until(ctx, lambda: json.loads(_read(ran)) if os.path.exists(ran) else None,
+                          seconds, poll=0.5)
+
+        # A program the host will not read: a path, and one that is not there.
+        for body_, why_ in (({"program": "../../../etc/passwd", "program_text": None}, "a program with a path"),
+                            ({"program": "nothere.gcode", "program_text": None}, "a program that is not there")):
+            got = ask_run(body_)
+            ev[why_.replace(" ", "_")] = got
+            ctx.check(got and got[0] == 400, "%s -> %s", why_, got)
+
+        # The real one: dark, and under the button like any other sender.
+        before = fc.get("/status")[1] or {}
+        ctx.check((before.get("laser") or {}).get("emission_samples") == 0 and before.get("laser_locked") is True,
+                  "the laser is not dark and locked before the job: %s", before.get("laser"))
+        accel = hw.AccelSampler()
+        ctx.check(accel.available, "no head accelerometer found: the motion witness is missing")
+        t0 = time.time()
+        with accel:
+            got = ask_run({"program": "job.gcode", "program_text": PROGRAM, "lit_within_s": 120,
+                           "timeout_s": 300})
+            ev["job"] = got
+            ctx.check(got and got[0] == 200, "the package's job was refused: %s", got)
+            # The machine's own record of the job: it took it, and it took
+            # it as this package. A dark program commands no laser, so no
+            # armed window opens and there is nothing for a press to arm -
+            # the arm gates are in force and simply never reached. A job
+            # that fires is cloud.dark-print's and laser.emission-witness's.
+            def job_rec():
+                st_, j_ = fc.get("/job")
+                return j_ if isinstance(j_, dict) else {}
+
+            # The lease owner is the job's, named for the package.
+            def owned():
+                r = job_rec()
+                return r if (r.get("owner") or "").endswith(REF_ID) and r.get("program") else None
+
+            took = _until(ctx, owned, 60, poll=0.5)
+            ev["job_record"] = {k: (took or {}).get(k) for k in ("state", "owner", "lines")}
+            ctx.log("the machine's job record: %s", ev["job_record"])
+            ctx.check(took, "the machine did not take the job as the package: %s", job_rec())
+            ctx.check((took or {}).get("lines", 0) > 0, "the machine read no lines of the program: %s", took)
+
+            ended = _until(ctx, lambda: job_rec() if job_rec().get("state") in ("done", "failed", "idle")
+                           else None, 180, poll=1.0)
+            r = ended or job_rec()
+            em = r.get("emission") or {}
+            ev["job_end"] = {"state": r.get("state"), "reason": r.get("reason"), "lit": r.get("lit"),
+                             "sent": r.get("sent"), "acked": r.get("acked"), "emission": em}
+            ctx.log("the job ended: %s", ev["job_end"])
+            ctx.check(ended, "the job did not end: %s", job_rec())
+            ctx.check(r.get("sent") == r.get("lines") and r.get("acked") == r.get("lines"),
+                      "the machine did not send and acknowledge every line: %s", ev["job_end"])
+            # A program that commands no laser ends without a discharge,
+            # and the runner says so rather than calling it a clean run.
+            # That is the outcome this test wants: the whole program ran
+            # and nothing fired.
+            ctx.check(r.get("state") == "failed" and "without a discharge" in (r.get("reason") or ""),
+                      "a program that never fires did not end as one: %s", ev["job_end"])
+            ctx.check(r.get("lit") is False and em.get("laser_on_samples") == 0
+                      and em.get("lit_s") == 0 and em.get("thermopile_delta") == 0,
+                      "the job's own emission witnesses are not all zero: %s", em)
+            ctx.sleep(1.0)
+        t1 = time.time()
+        p2px, p2py, n = accel.p2p(t0, t1)
+        ev["accel"] = {"p2p_x": p2px, "p2p_y": p2py, "samples": n}
+        ctx.log("the package's job moved the head: accel p2p x=%d y=%d over %d samples", p2px, p2py, n)
+        ctx.check(n > 0 and max(p2px, p2py) > 0, "the accelerometer saw no motion for the job: %s", ev["accel"])
+
+        after = fc.get("/status")[1] or {}
+        ev["laser"] = {"before": {"locked": before.get("laser_locked"),
+                                  "emission": (before.get("laser") or {}).get("emission_samples")},
+                       "after": {"locked": after.get("laser_locked"),
+                                 "emission": (after.get("laser") or {}).get("emission_samples")}}
+        ctx.log("the laser across the package's job: %s", ev["laser"])
+        ctx.check(after.get("laser_locked") is True, "the laser latch is not locked after the job: %s", ev["laser"])
+        ctx.check((after.get("laser") or {}).get("emission_samples") == 0,
+                  "the emission witness is not zero across a dark job: %s", ev["laser"])
     finally:
         _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
     _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
