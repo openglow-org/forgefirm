@@ -37,6 +37,7 @@ from forgetest import manifest as manifest_mod  # noqa: E402
 RECIPES = [
     # (component, recipe path relative to the repo or meta-openglow, layer)
     ("forgectrl", "meta-forgefirm/recipes-forgefirm/forgectrl/forgectrl.bb", "forgefirm"),
+    ("forgeext", "meta-forgefirm/recipes-forgefirm/forgeext/forgeext.bb", "forgefirm"),
     ("grblhal-glowforge", "meta-forgefirm/recipes-forgefirm/grblhal-glowforge/grblhal-glowforge.bb", "forgefirm"),
     ("forgefirm-app", "meta-forgefirm/recipes-forgefirm/forgefirm-app/forgefirm-app.inc", "forgefirm"),
     ("kernel-module-glowforge", "meta-glowforge-bsp/recipes-kernel/kernel-modules/kernel-module-glowforge.bb", "meta-openglow"),
@@ -201,12 +202,21 @@ def main(argv=None):
         base = REPO if layer == "forgefirm" else args.meta_openglow
         path = os.path.join(base, rel)
         url, rev = parse_recipe(path)
-        repo = fetch(url, rev, args.cache)
         files = []
-        ls_tree(repo, rev, url, args.cache, "", files)
-        files.sort()
+        if set(rev) == {"0"}:
+            # A pin nothing has been pushed to yet, which is how a work
+            # branch carries a component until the merge. The component is
+            # named with no files, so the coverage lint reports its covers
+            # entries as empty and fails - which is what a pin that has not
+            # been bumped should do - rather than the manifest failing to
+            # build at all.
+            print("%s: the pin is not set (nothing pushed to it yet): no files" % name, file=sys.stderr)
+        else:
+            repo = fetch(url, rev, args.cache)
+            ls_tree(repo, rev, url, args.cache, "", files)
+            files.sort()
+            print("%s: %s (%d files)" % (name, rev[:12], len(files)), file=sys.stderr)
         components[name] = {"srcrev": rev, "source": url, "files": files, "recipes": [os.path.basename(rel)]}
-        print("%s: %s (%d files)" % (name, rev[:12], len(files)), file=sys.stderr)
     for name, rel, layer, recipe in FILE_COMPONENTS:
         base = REPO if layer == "forgefirm" else args.meta_openglow
         files = dir_files(os.path.join(base, rel))
