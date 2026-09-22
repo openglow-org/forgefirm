@@ -25,7 +25,7 @@ def _read(path, default=None):
 
 
 _LOG_COVERS = [("forgectrl", "src/logs.*"), ("forgectrl", "src/fflog.*"), ("forgectrl", "src/sanitize.*"),
-               ("forgectrl", "src/main.c")]
+               ("forgectrl", "src/extpkg.*"), ("forgectrl", "src/main.c")]
 
 LOGS_ROOT = "/data/log/forgefirm"
 # What the export test plants in the installer's directory: a line to find
@@ -44,7 +44,10 @@ _PROBE_IP = "192.0.2.77"
                   "also carries the installer's directory of the tree (logs/install/), which no "
                   "logger feeds: a probe file planted there for the export comes back in the "
                   "bundle with its addresses redacted, and an install log that the installer "
-                  "left is in the bundle too.")
+                  "left is in the bundle too. system/extensions.json is in it as well: what is "
+                  "installed that is not the firmware, with each package's tier, whether it is "
+                  "enabled, and what the operator granted it, which is what a report about a "
+                  "machine running extensions has to be read against.")
 def tree_tail_export(ctx):
     install_dir = os.path.join(LOGS_ROOT, "install")
     probe = os.path.join(install_dir, "forgetest-probe.txt")
@@ -133,6 +136,25 @@ def _tree_tail_export(ctx, probe):
     if os.path.isfile(os.path.join(os.path.dirname(probe), "install.log")):
         ctx.check(any(name.endswith("logs/install/install.log") for name in by_name),
                   "the machine has an install log and the bundle does not")
+
+    # What is installed that is not the firmware. A report that starts "it
+    # stopped working" reads differently with packages on the machine, and
+    # the bundle is where that is read.
+    import json
+
+    ext = [name for name in by_name if name.endswith("system/extensions.json")]
+    ctx.check(ext, "the bundle carries no system/extensions.json")
+    if ext:
+        doc = json.loads(by_name[ext[0]].decode("utf-8", "replace"))
+        ev["extensions"] = {"enabled": doc.get("enabled"), "safe_mode": doc.get("safe_mode"),
+                            "packages": [{k: p.get(k) for k in ("id", "version", "tier", "enabled", "grants")}
+                                         for p in doc.get("packages", [])]}
+        ctx.log("the bundle's extension listing: %s", ev["extensions"])
+        ctx.check(set(doc) >= {"enabled", "safe_mode", "host", "packages"},
+                  "the listing is not the status document: %s", sorted(doc))
+        for p in doc.get("packages", []):
+            ctx.check(set(p) >= {"id", "version", "tier", "enabled", "grants"},
+                      "a listed package does not say what it is: %s", sorted(p))
 
 
 # The routing test proves the whole path every logger takes: emitter (or
