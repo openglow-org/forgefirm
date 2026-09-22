@@ -40,7 +40,7 @@ from .exthost import FWUP, _forgeext, _read, _write
                   "build writes. This test asks the host what it made of that file rather than reading the "
                   "file and believing it. On the dev image a campaign runs on, the first word is a build "
                   "stamp and no version: inspect answers core_checked false, and a package asking for a "
-                  "minimum far above or a maximum far below is installed all the same, because a range "
+                  "minimum far above or a maximum far below is accepted all the same, because a range "
                   "cannot be judged against a stamp and the host does not guess one. A dev image that "
                   "began stamping something version-shaped would fail here, which is the regression this "
                   "test is for; the judging branch belongs to forgeext's version_test, since no image "
@@ -59,8 +59,7 @@ def core_range(ctx):
     version = stamp[1:] if stamp[:1] == "v" and stamp[1:2].isdigit() else stamp
     looks_like_a_version = bool(re.match(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$", version))
     ctx.log("/etc/forgefirm-version: %r -> %r", stamp, version)
-    ev.note("firmware version", {"file": stamp, "version": version,
-                                 "looks_like_a_version": looks_like_a_version})
+    ev["firmware_version"] = {"file": stamp, "version": version, "looks_like_a_version": looks_like_a_version}
 
     # The suite ships on the dev image alone, so this is the only shape a
     # campaign can meet. If it ever is not, the image changed and the
@@ -99,16 +98,17 @@ def core_range(ctx):
         ctx.check(r.get("ok") is True, "a package with no core range was refused: %s", r.get("error"))
         ctx.check(r.get("core_checked") is False,
                   "the host judged a range against the stamp %r: core_checked %s", stamp, r.get("core_checked"))
-        ev.note("no range", r)
+        ev["no_range"] = r
 
         # A stamp is no version, so neither end of a range is judged and
         # neither refuses the package. The host says so rather than
         # refusing on a comparison it cannot make.
+        ev["ranges"] = []
         for core in ({"min": "99.0.0"}, {"max": "0.0.1"}, {"min": "0.0.1", "max": "0.0.2"}):
             r = _forgeext("inspect", packed(core))
             ctx.check(r.get("ok") is True and r.get("core_checked") is False,
                       "the host judged %s against the stamp anyway: %s", core, r)
-            ev.note("stamp vs %s" % core, r)
+            ev["ranges"].append({"core": core, "inspect": r})
 
         ctx.check("org.forgetest.corerange" not in
                   [x.get("id") for x in (_forgeext("list").get("packages") or [])],
