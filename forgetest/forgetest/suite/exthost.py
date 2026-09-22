@@ -1857,7 +1857,9 @@ def ui_delivery(ctx):
 
         st_, why = fc.get("/ext/ui", params={"id": "org.forgetest.nothere"})
         ev["ui_absent"] = [st_, why]
-        ctx.check(st_ >= 400, "a package that is not installed -> %s %s", st_, why)
+        # The host's refusal in its words, and 404: a 502 here is a relay
+        # that took the host's refusal for no answer.
+        ctx.check(st_ == 404 and "not installed" in json.dumps(why), "a package that is not installed -> %s %s", st_, why)
 
         # Disabled, it has no page. Disabling a package is the operator's
         # way out of everything it does, and the interface is part of
@@ -1872,6 +1874,21 @@ def ui_delivery(ctx):
         ctx.check(r.get("ok") is True, "enable -> %s", r.get("error"))
         st_, doc = fc.get("/ext/ui", params={"id": REF_ID})
         ctx.check(st_ == 200 and (doc or {}).get("ok"), "enabled again, its page is served -> %s", st_)
+
+        # Its settings come through the same relay, the page's way to them
+        # through the bridge. A value the host refuses is 400 in the host's
+        # words, and what is stored does not move.
+        st_, doc = fc.get("/ext/settings", params={"id": REF_ID})
+        ev["settings"] = [st_, (doc or {}).get("settings")]
+        ctx.check(st_ == 200 and (doc or {}).get("ok") and (doc.get("settings") or {}).get("threshold") == 40,
+                  "GET /ext/settings -> %s %s", st_, doc)
+        st_, why = fc.post("/ext/settings", data={"id": REF_ID, "set": json.dumps({"threshold": 101})})
+        ev["settings_refused"] = [st_, why]
+        ctx.log("POST /ext/settings, a threshold over its bound -> %s %s", st_, why)
+        ctx.check(st_ == 400 and "at most 100" in json.dumps(why), "a value the host refuses -> %s %s", st_, why)
+        st_, doc = fc.get("/ext/settings", params={"id": REF_ID})
+        ctx.check(st_ == 200 and ((doc or {}).get("settings") or {}).get("threshold") == 40,
+                  "a refused value moved the stored one: %s %s", st_, doc)
     finally:
         _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
     _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
