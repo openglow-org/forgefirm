@@ -283,6 +283,17 @@ TOOLS = [
              "wait, and a wait under an open armed window with M3 S500 ships no FIRE tick. Imports its "
              "sender and port client from ctlport_test.py. A CI harness (the grblHAL repo): needs the "
              "host-built null-sink controller, not the machine, so it is not a bench-page tool."},
+    {"id": "envelope-test", "title": "Measured envelope harness", "script": "envelope_test.py",
+     "safety": "dry", "where": "host", "ported": False, "args": [],
+     "desc": "The measured work envelope and the bed check's port op, on the null-sink controller with a "
+             "scripted sender and a port client: unset keys are the axis travel, envelope_x_mm and _y are the "
+             "far edges at a home and are held to 50 mm up to the travel plus 30 mm, the port's envelope open "
+             "is refused before a home and under an open armed window and lets the port's jogs reach the "
+             "travel plus 30 mm, envelope apply puts the keys' edges back, and the sender's first line (never "
+             "a status poll or an empty line), a soft reset, and the port client going away each close an "
+             "open envelope, the sender's line only after it closed. Imports its sender and port client from "
+             "ctlport_test.py. A CI harness (the grblHAL repo): needs the host-built null-sink controller, "
+             "not the machine, so it is not a bench-page tool."},
     {"id": "manual-home-test", "title": "Manual home and motor release harness", "script": "manual_home_test.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
      "desc": "The manual homing provider and the motor release on the null-sink controller: $H under manual "
