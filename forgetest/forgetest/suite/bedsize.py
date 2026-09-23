@@ -29,7 +29,10 @@ X_STEPS = ["X+10"] * 6 + ["X+1", "X+0.1", "X-1"]
 Y_STEPS = ["Y+10"] * 6 + ["Y+1", "Y+0.1"]
 X_OUT, Y_OUT = 60.1, 61.1
 MARGIN_MM = 1.0
-KEYS = ("envelope_x_mm", "envelope_y_mm", "homing_mode")
+# The head is back on the home's step: half a step (213.3 steps/mm) and
+# the port's three decimals.
+HOME_TOL_MM = 0.003
+KEYS =("envelope_x_mm", "envelope_y_mm", "homing_mode")
 CLOSED = "closed the check's envelope"
 CLOSED_MSG = "Bed check envelope closed: a sender line"
 
@@ -107,20 +110,31 @@ def _put_back(ctx, fc, found):
 
 
 def _back_home(ctx, fc, home):
-    """The head back where the home put it, in the port's bounded steps, so
-    the run ends where it began."""
-    for _ in range(8):
-        at = _port(fc).get("mpos") or [home[0], home[1]]
-        dx, dy = home[0] - at[0], home[1] - at[1]
-        if abs(dx) < 0.005 and abs(dy) < 0.005:
-            return
-        st, body = _jog(fc, max(-100.0, min(100.0, dx)), max(-100.0, min(100.0, dy)))
-        if st != 200:
-            ctx.log("the jog back to the home -> %s %s", st, body)
-            ctx.wait_for(lambda: fc.status().get("state") == "idle", 10, poll=0.5)
-            continue
-        _port_idle(ctx, fc)
-    ctx.log("the head is not back at the home: %s", _port(fc).get("mpos"))
+    """The head back where the home put it: one jog to the home in machine
+    coordinates, from a Grbl client. A relative jog aimed at the home from
+    the port's position can be refused whole: the port reports the step
+    counters, the core adds a relative jog to its own position, which the
+    check's jogs leave up to half a step off the counters, and the envelope
+    begins at the home, so the target can land microns behind it (error:15).
+    Where the head stands after, from the port; None when unread."""
+    # 0.5 um inside an envelope that begins at the home (a camera home
+    # behind the origin), far under half a step: the head lands on the
+    # home's own step.
+    line = "$J=G90 G53 X%.4f Y%.4f F1200" % (home[0] + 0.0005, home[1] + 0.0005)
+    try:
+        with ctx.grbl() as g:
+            reply = g.command(line, timeout=10)
+            ctx.log("the jog back to the home: %s -> %s", line, " | ".join(reply))
+            if reply[-1:] == ["ok"]:
+                t0 = time.time()
+                ctx.wait_for(lambda: time.time() - t0 > 0.5 and g.status_report()["state"].startswith("Idle"),
+                             60, poll=0.2)
+    except (OSError, ValueError) as e:
+        ctx.log("the jog back to the home: %s", e)
+    ctx.wait_for(lambda: _port(fc).get("sender") is False and _port(fc).get("state") == "Idle", 20, poll=0.5)
+    at = _port(fc).get("mpos")
+    ctx.log("the head after the jog back: %s (the home %s)", at, home)
+    return at
 
 
 def _port_idle(ctx, fc):
@@ -171,8 +185,9 @@ def _edge(ctx, fc, ev, axis, edge):
                   "closed the envelope and then ok; the port's state then says the envelope is closed, and the "
                   "next answer ends the check in words, with the keys as the "
                   "first run left them and the edges still in force. The keys, the homing mode, and the setup "
-                  "record are put back as found, the record under a restart, and the head is jogged back to "
-                  "the home.")
+                  "record are put back as found, the record under a restart, and the head goes back to the "
+                  "home by a Grbl client's jog in machine coordinates; the run fails unless the port reads "
+                  "the head on the home's step before the restart.")
 def check_envelope(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -181,7 +196,7 @@ def check_envelope(ctx):
     raw = read_file(record_path())
     found = {k: s0.get(k) or "" for k in KEYS}
     ev["found"] = found
-    home = None
+    home = back = None
     try:
         st, body = fc.post("/settings", data={"homing_mode": "gfcloud"})
         ctx.check(st == 200, "homing_mode=gfcloud -> %s %s", st, body)
@@ -245,7 +260,7 @@ def check_envelope(ctx):
         fc.post("/wiz/%s/abort" % WID)
         if home and home[0] is not None:
             ctx.wait_for(lambda: not dark(fc).get("running"), 30, poll=0.5)
-            _back_home(ctx, fc, home)
+            back = _back_home(ctx, fc, home)
         _put_back(ctx, fc, found)
         # The check records itself when it completes; the record goes back
         # as found under a restart, which also ends the envelope it set.
@@ -253,3 +268,9 @@ def check_envelope(ctx):
             with ctx.takeover():
                 write_file(record_path(), raw)
             ctx.log("the previous setup record is back under a restart")
+    # Judged from the reading before the restart: the restart zeroes the
+    # counters where the head stands, so the baseline's position check
+    # after it cannot see a head left out.
+    ev["back"] = back
+    ctx.check(back and all(abs(back[i] - home[i]) < HOME_TOL_MM for i in (0, 1)),
+              "the head is not back at the home %s: %s", home, back)
