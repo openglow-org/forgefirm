@@ -616,6 +616,9 @@ report = {
     "api_camera": shot({"camera": "lid", "resolution": "half"}),
     "api_camera_head": shot({"camera": "head"}),
     "api_camera_bad": shot({"camera": "bed"}),
+    "api_camera_dark": shot({"camera": "lid", "resolution": "half", "lamp": 0}),
+    "api_camera_lit": shot({"camera": "lid", "resolution": "half", "lamp": 1023}),
+    "api_camera_lamp_bad": shot({"camera": "lid", "lamp": 5000}),
     "api_settings": api("GET", "/v0/settings"),
     "api_settings_set": api("POST", "/v0/settings", {"threshold": 70, "note": "set from inside"}),
     "api_settings_undeclared": api("POST", "/v0/settings", {"nothere": 1}),
@@ -897,7 +900,9 @@ def _as_found(ctx, fc, prior, raw, dir_mode, found_tree):
                   "address even on the port it declared, cannot connect on a port it did not declare, and "
                   "cannot open a netlink socket. Its one way to the machine is its API socket (root's and its "
                   "account's, 0660, refused to another pool account): GET /v0/self names it and what it may use, "
-                  "GET /v0/machine/mode is forgectrl's answer relayed, a hold it was not granted is 403, a path "
+                  "GET /v0/machine/mode is forgectrl's answer relayed, POST /v0/camera gives it a JPEG from the "
+                  "lid camera it holds (with the camera's lamp at 0 and at 1023 two different pictures, the lit "
+                  "one the larger) and refuses the head camera and a lamp past its range, a hold it was not granted is 403, a path "
                   "the API does not have 404, a path with .. 400; its output is in the forgeext log under its id. Safe mode "
                   "stops it and its end starts it again. A host killed outright takes its services with it "
                   "at once (the init wrapper), comes back, and starts the service again. ext_enabled=0 "
@@ -1034,6 +1039,22 @@ def service(ctx):
         badcam = rep.get("api_camera_bad") or [0, ""]
         ev["api_camera_bad"] = badcam[:2]
         ctx.check(badcam[0] == 400, "a camera there is none of -> %s", badcam[:2])
+        # The camera's own lamp for one frame: the machine lights it for
+        # the shot and puts its level back, so a frame with the lamp off
+        # and one with it full are two different pictures, the lit one the
+        # larger, and a level past the range is refused before the machine
+        # is asked.
+        dark = rep.get("api_camera_dark") or [0, "", False, False]
+        lit = rep.get("api_camera_lit") or [0, "", False, False]
+        ev["api_camera_lamp"] = {"dark": dark[:3], "lit": lit[:3]}
+        ctx.log("the lid camera with its lamp at 0 and at 1023: %s", ev["api_camera_lamp"])
+        ctx.check(dark[0] == 200 and dark[2] and lit[0] == 200 and lit[2],
+                  "a frame with the lamp named did not come back as a JPEG: %s", ev["api_camera_lamp"])
+        ctx.check(isinstance(lit[1], int) and isinstance(dark[1], int) and lit[1] > dark[1],
+                  "the lamp did not reach the camera: %d bytes at 1023, %d at 0", lit[1] or 0, dark[1] or 0)
+        lampbad = rep.get("api_camera_lamp_bad") or [0, ""]
+        ev["api_camera_lamp_bad"] = lampbad[:2]
+        ctx.check(lampbad[0] == 400 and "lamp" in str(lampbad[1]), "a lamp past its range -> %s", lampbad[:2])
 
         # A package's capture yields to somebody watching a camera: it is
         # never the person standing at the machine.
