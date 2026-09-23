@@ -120,6 +120,19 @@ class CoverageReportTests(unittest.TestCase):
         self.assertNotIn("forgetest", m.coverage_report(man, [], allow=[]),
                          "dev-only components are outside the report")
 
+    def test_behavioral_paths_are_never_allowed_away(self):
+        # An advisory document is behavior (the consent is to its hash): the allowlist's docs/** and
+        # **/*.md do not take it out of the report, as they do not take it out of a fingerprint.
+        man = helpers.with_file(helpers.make_manifest(), "forgectrl", "docs/advisories/privacy.md", "text")
+        rest = helpers.make_test("a.one", [("forgectrl", "src/**"), ("grblhal-glowforge", "**"),
+                                           ("kernel-module-glowforge", "**"), ("linux-fslc", "**")])
+        self.assertEqual(m.coverage_report(man, [rest]), {"forgectrl": ["docs/advisories/privacy.md"]})
+        doc = helpers.make_test("a.two", [("forgectrl", "docs/advisories/privacy.md")])
+        self.assertEqual(m.coverage_report(man, [rest, doc]), {})
+        self.assertNotEqual(m.fingerprint(man, doc.covers),
+                            m.fingerprint(helpers.with_file(man, "forgectrl", "docs/advisories/privacy.md", "new"),
+                                          doc.covers))
+
     def test_non_behavioral_paths_are_outside_every_fingerprint(self):
         man = helpers.make_manifest()
         t = helpers.make_test("a.one", [("forgectrl", "**")])

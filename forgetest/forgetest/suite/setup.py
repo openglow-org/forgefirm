@@ -495,7 +495,9 @@ def override_until_reboot(ctx):
       subsystem="setup", kind="auto", hardware="takeover", est_min=3,
       covers=[("forgectrl", "src/advisories.*"), ("forgectrl", "src/setup.*"),
               ("forgectrl", "src/wiz.*"), ("forgectrl", "src/sha256.*"), ("forgectrl", "src/main.c"),
-              ("forgectrl", "src/ui/md.js"), ("forgectrl", "src/ui/embed_docs.cmake")],
+              ("forgectrl", "src/ui/md.js"), ("forgectrl", "src/ui/embed_docs.cmake"),
+              ("forgectrl", "docs/advisories/safety-and-risk.md"), ("forgectrl", "docs/advisories/licenses.md"),
+              ("forgectrl", "docs/advisories/privacy.md"), ("forgectrl", "docs/advisories/cloud-service.md")],
       requires=["forgectrl.auth"],
       description="GET /advisories/safety-and-risk serves the document as markdown with an ETag "
                   "equal to the SHA-256 of the body and to the hash GET /wiz lists; an unknown "

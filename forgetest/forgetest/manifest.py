@@ -221,7 +221,8 @@ def coverage_report(manifest, tests, allow=NON_BEHAVIORAL):
     """Which manifest paths no test covers.
 
     tests: iterable with .covers. allow: iterable of (component, glob)
-    that need no coverage (docs, CI, licenses...). Returns
+    that need no coverage (docs, CI, licenses...); a BEHAVIORAL path is
+    never allowed away, as it is never taken out of a fingerprint. Returns
     {component: [uncovered paths]} for the non-dev-only components.
     """
     covered = {}
@@ -235,11 +236,14 @@ def coverage_report(manifest, tests, allow=NON_BEHAVIORAL):
     for comp in manifest.component_names():
         if comp in DEV_ONLY_COMPONENTS:
             continue
-        rxs = covered.get(comp, []) + allowed.get(comp, [])
-        star = allowed.get("*", [])
+        rxs = covered.get(comp, [])
+        free = allowed.get(comp, []) + allowed.get("*", [])
+        behavior = [glob_to_regex(pat) for c, pat in BEHAVIORAL if c == comp]
         missing = []
         for p, _b in manifest.files(comp):
-            if any(rx.match(p) for rx in rxs) or any(rx.match(p) for rx in star):
+            if any(rx.match(p) for rx in rxs):
+                continue
+            if any(rx.match(p) for rx in free) and not any(rx.match(p) for rx in behavior):
                 continue
             missing.append(p)
         if missing:
