@@ -5,12 +5,16 @@
 
 """What keeps the page answering the operator instead of the timer.
 
-Two things went wrong on the bench and are pinned here:
+Three things went wrong on the bench and are pinned here:
 
   - the state cost. Every poll re-read and re-parsed the whole result log,
     and recomputed every test's domain fingerprint. A result record carries
     its run log, so the file reaches megabytes over a campaign and the poll
     grew with it. Both are now parsed and computed once.
+  - the first state's cost. Hashing the implementations parsed a test's
+    module and every module it imports once per test, and each poll the
+    page timed out on started the same work again beside the first. Each
+    module is now parsed once, and a poll waits for the work in progress.
   - the wasted payload. An idle page polls an unchanged state; it now gets
     a 304 instead of the whole thing.
 
@@ -169,6 +173,63 @@ class FingerprintCacheTests(unittest.TestCase):
         files = self.man.files("forgectrl")
         self.assertEqual(files, self.man.files("forgectrl"))
         self.assertIsNone(self.man.files("no-such-component"))
+
+
+class ImplementationCostTests(unittest.TestCase):
+    """The first state after a start hashes every test's implementation.
+    It parses each suite module once, and a poll that arrives while it
+    runs waits for it: on the board a parse per test took minutes, and
+    the page's timed-out polls each started the work again beside it."""
+
+    def test_each_suite_module_is_parsed_once(self):
+        import ast
+        import inspect
+        reg = catalog.load_suite()
+        paths = sorted({inspect.getsourcefile(t.fn) for t in catalog.all_tests(reg)})
+        for p in os.listdir(catalog.suite_dir()):
+            catalog.forget(os.path.join(catalog.suite_dir(), p))
+        for p in paths:
+            catalog.forget(p)
+        real_parse, parsed = ast.parse, []
+
+        def counting_parse(source, *a, **kw):
+            parsed.append(source[:40])
+            return real_parse(source, *a, **kw)
+
+        ast.parse = counting_parse
+        try:
+            for t in catalog.all_tests(reg):
+                catalog.implementation_sha(inspect.getsourcefile(t.fn), t.id)
+        finally:
+            ast.parse = real_parse
+        modules = [p for p in os.listdir(catalog.suite_dir()) if p.endswith(".py")]
+        self.assertLessEqual(len(parsed), len(modules),
+                             "%d parses for %d suite modules" % (len(parsed), len(modules)))
+
+    def test_a_concurrent_fill_waits_instead_of_repeating(self):
+        import threading
+        import time
+        t = helpers.make_test("fake.impl", [("forgectrl", "src/ui.c")], fn=t_noop)
+        real, calls = catalog.implementation_sha, []
+
+        def slow(path, test_id):
+            calls.append(test_id)
+            time.sleep(0.3)
+            return real(path, test_id)
+
+        catalog.implementation_sha = slow
+        try:
+            got = []
+            threads = [threading.Thread(target=lambda: got.append(t.source_sha)) for _ in range(3)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(10)
+        finally:
+            catalog.implementation_sha = real
+        self.assertEqual(calls, ["fake.impl"], "the implementation hash was computed %d times" % len(calls))
+        self.assertEqual(len(set(got)), 1)
+        self.assertEqual(len(got), 3)
 
 
 class PageTests(unittest.TestCase):

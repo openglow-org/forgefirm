@@ -75,8 +75,12 @@ class Test:
         invalidates the tests of that module. A test the module does not
         define in the @test form hashes its whole file."""
         if self._source_sha is None:
-            path = inspect.getsourcefile(self.fn) or inspect.getfile(self.fn)
-            self._source_sha = implementation_sha(path, self.id)
+            # One filler at a time: a second poll that arrives while the
+            # first computes waits for it rather than repeating the work.
+            with _IMPL_LOCK:
+                if self._source_sha is None:
+                    path = inspect.getsourcefile(self.fn) or inspect.getfile(self.fn)
+                    self._source_sha = implementation_sha(path, self.id)
         return self._source_sha
 
     def fingerprint(self, manifest):
@@ -140,8 +144,38 @@ def source_file_sha(path):
     return hashlib.sha256(data).hexdigest()
 
 
-_PARTS = {}                 # path -> (shared sha, {test id: own sha}); the files never change under a run
-_PARTS_LOCK = threading.Lock()
+# The files never change under a run, so each is read and parsed once:
+# path -> (text, tree or None), path -> (shared sha, {test id: own sha}),
+# path -> the sibling modules it imports itself.
+_PARSED = {}
+_PARTS = {}
+_SIBLINGS = {}
+_PARTS_LOCK = threading.RLock()
+_IMPL_LOCK = threading.Lock()
+
+
+def forget(path):
+    """Drop what is known about a module: its file changed (the unit tests
+    edit their modules between readings)."""
+    with _PARTS_LOCK:
+        for cache in (_PARSED, _PARTS, _SIBLINGS):
+            cache.pop(path, None)
+
+
+def _parsed(path):
+    """(text, tree) of a suite module, line endings normalized; the tree
+    is None when the file does not parse."""
+    with _PARTS_LOCK:
+        hit = _PARSED.get(path)
+        if hit is None:
+            with open(path, "rb") as f:
+                text = f.read().replace(b"\r\n", b"\n").decode("utf-8")
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                tree = None
+            hit = _PARSED[path] = (text, tree)
+        return hit
 
 
 def module_parts(path):
@@ -154,14 +188,9 @@ def module_parts(path):
         hit = _PARTS.get(path)
     if hit is not None:
         return hit
-    with open(path, "rb") as f:
-        text = f.read().replace(b"\r\n", b"\n").decode("utf-8")
+    text, tree = _parsed(path)
     lines = text.split("\n")
     spans = {}
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        tree = None
     for node in (tree.body if tree is not None else []):
         if not isinstance(node, ast.FunctionDef):
             continue
@@ -188,20 +217,28 @@ def sibling_imports(path, seen=None):
     test's fingerprint."""
     if seen is None:
         seen = []
-    with open(path, "rb") as f:
-        text = f.read().replace(b"\r\n", b"\n").decode("utf-8")
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return seen
-    here = os.path.dirname(path)
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
-            sib = os.path.join(here, node.module.replace(".", os.sep) + ".py")
-            if os.path.isfile(sib) and sib not in seen and sib != path:
-                seen.append(sib)
-                sibling_imports(sib, seen)
+    for sib in _direct_siblings(path):
+        if sib not in seen and sib != path:
+            seen.append(sib)
+            sibling_imports(sib, seen)
     return seen
+
+
+def _direct_siblings(path):
+    """The suite modules one module imports itself, in import order."""
+    with _PARTS_LOCK:
+        hit = _SIBLINGS.get(path)
+        if hit is None:
+            _text, tree = _parsed(path)
+            here = os.path.dirname(path)
+            hit = []
+            for node in (tree.body if tree is not None else []):
+                if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+                    sib = os.path.join(here, node.module.replace(".", os.sep) + ".py")
+                    if os.path.isfile(sib):
+                        hit.append(sib)
+            _SIBLINGS[path] = hit
+        return hit
 
 
 def implementation_sha(path, test_id):

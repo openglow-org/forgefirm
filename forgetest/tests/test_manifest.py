@@ -244,7 +244,7 @@ def two(ctx):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def write(self, text):
-        catalog._PARTS.pop(self.path, None)
+        catalog.forget(self.path)
         with open(self.path, "w", newline="\n") as f:
             f.write(text)
 
@@ -279,12 +279,12 @@ def two(ctx):
         sib = os.path.join(self.tmp, "judge.py")
         with open(sib, "w", newline="\n") as f:
             f.write("def judge(x):\n    return x > 1\n")
-        catalog._PARTS.pop(sib, None)
+        catalog.forget(sib)
         self.write("from .judge import judge\n" + self.MODULE)
         a1, b1 = self.shas()
         with open(sib, "w", newline="\n") as f:
             f.write("def judge(x):\n    return x > 2\n")
-        catalog._PARTS.pop(sib, None)
+        catalog.forget(sib)
         a2, b2 = self.shas()
         self.assertNotEqual(a1, a2)
         self.assertNotEqual(b1, b2)
@@ -296,7 +296,7 @@ def two(ctx):
 
     def test_line_endings_do_not_count(self):
         a1, b1 = self.shas()
-        catalog._PARTS.pop(self.path, None)
+        catalog.forget(self.path)
         with open(self.path, "wb") as f:
             f.write(self.MODULE.replace("\n", "\r\n").encode())
         self.assertEqual((a1, b1), self.shas())
