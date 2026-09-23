@@ -35,6 +35,10 @@ def job_locks(ctx):
     ev = ctx.evidence
     ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle")
     st, rel = fc.get("/update/release")
+    if st == 200 and isinstance(rel, dict) and not rel.get("checked"):
+        # the kept answer does not outlive a restart of the daemon: ask now
+        st, rel = fc.post("/update/check")
+        ctx.log("the release was not checked since the daemon started: POST /update/check -> %s", st)
     ev["release"] = {k: (rel or {}).get(k) for k in ("available", "version", "bytes")} if isinstance(rel, dict) else rel
     ctx.check(st == 200 and isinstance(rel, dict) and rel.get("available"), "no release is published to download: %s", rel)
     had = os.path.exists(DL_FW)
