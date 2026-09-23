@@ -94,10 +94,27 @@ NON_BEHAVIORAL = [
     ("*", ".env.example"),
     ("forgectrl", "tools/**"),        # host-side dev tools (panel dev server)
     ("forgectrl", "examples/**"),     # clients of the remote API, run on another computer
+    # forgeext's recipe installs the binary and its init script, and nothing of these: the official
+    # packages carry their own acceptance artifact, and the author's kit and host tools run off the image.
+    ("forgeext", "packages/**"),
+    ("forgeext", "sdk/**"),
+    ("forgeext", "template/**"),
+    ("forgeext", "tools/**"),
+]
+
+
+# Paths the list above would take out that are behavior all the same: forgectrl embeds its advisory
+# documents in the binary, serves them, and records the operator's consent to a document by its hash, so
+# an edited advisory is a changed consent and must move every fingerprint that covers it.
+BEHAVIORAL = [
+    ("forgectrl", "docs/advisories/**"),
 ]
 
 
 def non_behavioral(comp, path, allow=NON_BEHAVIORAL):
+    for c, pat in BEHAVIORAL:
+        if c == comp and glob_to_regex(pat).match(path):
+            return False
     for c, pat in allow:
         if c in ("*", comp) and glob_to_regex(pat).match(path):
             return True

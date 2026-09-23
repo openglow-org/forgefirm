@@ -132,6 +132,18 @@ class CoverageReportTests(unittest.TestCase):
                                              t.covers))
         self.assertTrue(m.non_behavioral("forgectrl", "tools/devserver.py"))
         self.assertFalse(m.non_behavioral("grblhal-glowforge", "tools/devserver.py"))
+        # forgeext's image content is its binary and init script: the packages, the kit, the template and
+        # the host tools are not, and the host's sources are
+        for path in ("packages/alignment/ui/index.html", "sdk/js/ffx-bridge.js", "template/manifest.json",
+                     "tools/ffx"):
+            self.assertTrue(m.non_behavioral("forgeext", path), path)
+        for path in ("src/api.c", "init/forgeext.init", "CMakeLists.txt"):
+            self.assertFalse(m.non_behavioral("forgeext", path), path)
+        # an advisory is a document forgectrl serves and records consent to by its hash: behavior, though
+        # it is Markdown under docs/
+        self.assertFalse(m.non_behavioral("forgectrl", "docs/advisories/extensions.md"))
+        self.assertTrue(m.non_behavioral("forgectrl", "docs/SERVICES.md"))
+        self.assertTrue(m.non_behavioral("grblhal-glowforge", "docs/advisories/x.md"))
 
     def test_an_entry_that_selects_nothing_is_reported(self):
         man = helpers.make_manifest()
