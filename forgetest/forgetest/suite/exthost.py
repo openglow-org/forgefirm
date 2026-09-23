@@ -1693,7 +1693,7 @@ def events(ctx):
 
 
 @test("exthost.motion-jog", title="A package jogs the machine, bounded and dark",
-      subsystem="exthost", kind="auto", hardware="takeover", est_min=7,
+      subsystem="exthost", kind="auto", hardware="takeover", mode="grbl", est_min=7,
       covers=[("forgeext", "src/api.*"), ("forgeext", "src/machine.*"), ("forgeext", "src/run.*"),
               ("forgectrl", "src/tokens.*"), ("forgectrl", "src/auth.*"), ("forgectrl", "src/main.c"),
               ("forgectrl", "src/grblport.*")],
