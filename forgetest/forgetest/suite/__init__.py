@@ -24,3 +24,5 @@ from . import exthost    # noqa: F401,E402
 from . import extcore    # noqa: F401,E402
 from . import extcall    # noqa: F401,E402
 from . import extdest    # noqa: F401,E402
+from . import extlife    # noqa: F401,E402
+from . import evmore     # noqa: F401,E402
