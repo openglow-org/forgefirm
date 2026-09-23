@@ -419,26 +419,6 @@ cat >> "$STAGE/notes.md" <<'EOF'
 
 ## Installing your own build
 
-This is the Installation Information that GPLv3 section 6 asks for. The
-machine runs firmware you built yourself, and no key is needed to install it.
-
-- **From the control panel.** Upload the `.fw` on the System tab. An archive
-  no key on the machine verifies is reported as unsigned and installs when
-  you hold the machine button while confirming it.
-- **From a root shell.** The serial console gives a root shell with no
-  password, and `fwup` is stock upstream. Write the archive to the slot the
-  machine is not running from and select it:
-  `fwup -a -d /dev/mmcblk2p2 -i my-build.fw -t upgrade.b` then `ffboot b`
-  (`upgrade.a` writes slot A, `/dev/mmcblk2p1`; `ffboot -l` says which slot
-  is running).
-- **From an SD card.** Write `forgefirm-image-glowforge.rootfs.wic.gz` to a
-  card and boot from it.
-
-The trust anchor is replaceable: `/etc/forgefirm/keys` holds public keys only,
-as ordinary world-readable files. Put your own public key in
-`forgefirm-release.pub` and the automatic paths verify against your key
-instead; sign your builds with `fwup -S` and they install with no button held.
-
 Full instructions: <https://docs.forgefirm.org/install/updating/#installing-your-own-build>.
 Building the image is documented at
 <https://docs.forgefirm.org/developers/building/>.
