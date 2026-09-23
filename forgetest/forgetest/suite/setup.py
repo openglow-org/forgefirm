@@ -427,8 +427,12 @@ def gate_blocks_controllers(ctx):
         ev["override_mode"] = m
         ctx.check(took is not None and isinstance(m, dict) and m.get("controller") == "running",
                   "the controller did not come back under the override: %s", m)
-        ctx.check(hw.grbl_port_open(timeout=5), "the Grbl port is closed with the controller running")
-        ctx.log("override: the controller is back (%s)", m)
+        # /mode reads running from the fork; the controller binds its port
+        # a few tens of milliseconds later
+        opened = ctx.wait_for(lambda: hw.grbl_port_open(timeout=1), 10, poll=0.05)
+        ev["port_open_after_s"] = opened
+        ctx.check(opened is not None, "the Grbl port is closed with the controller running")
+        ctx.log("override: the controller is back (%s), the Grbl port accepts after %.3f s", m, opened)
 
     # the real record is back under a restart; the override reads as found
     after = wiz(fc)
@@ -1419,25 +1423,30 @@ def first_run(ctx):
     except OSError:
         homes_before = set()
     state = {"temp_account": None}
-    with Restore(ctx, FIRST_RUN_SETTINGS):
-        with installed(ctx, {record_path(): seed, users_path(): None, override_path(): b""}):
-            w = wiz(fc)
-            ev["fresh"] = wiz_summary(w)
-            ctx.check(w.get("first_run") is True and not (w.get("users") or {}).get("exists")
-                      and w.get("advisories_complete") is False and w.get("acceptance_done") is False,
-                      "the machine does not read as a first run: %s", wiz_summary(w))
-            m = mode(fc)
-            ctx.check(m.get("controller") == "gated", "the controller is %s on a first run", m.get("controller"))
-            yield state
-    # the real records are back; the system accounts follow the record
-    rc, out = hw.initd("forgefirm-users", "reload")
-    ev["users_reload_rc"] = rc
-    ctx.log("forgefirm-users reload -> rc %s %s", rc, out.strip()[:200])
-    temp = state.get("temp_account")
-    if temp and temp not in homes_before and temp != ev["account_before"]:
-        import shutil
-        shutil.rmtree(os.path.join(homes, temp), ignore_errors=True)
-        ctx.log("removed the temporary home directory of %r", temp)
+    try:
+        with Restore(ctx, FIRST_RUN_SETTINGS):
+            with installed(ctx, {record_path(): seed, users_path(): None, override_path(): b""}):
+                w = wiz(fc)
+                ev["fresh"] = wiz_summary(w)
+                ctx.check(w.get("first_run") is True and not (w.get("users") or {}).get("exists")
+                          and w.get("advisories_complete") is False and w.get("acceptance_done") is False,
+                          "the machine does not read as a first run: %s", wiz_summary(w))
+                m = mode(fc)
+                ctx.check(m.get("controller") == "gated", "the controller is %s on a first run",
+                          m.get("controller"))
+                yield state
+    finally:
+        # the real records are back, whether or not the block passed; the
+        # system accounts follow the record, and a temporary account the
+        # block created goes with its home
+        rc, out = hw.initd("forgefirm-users", "reload")
+        ev["users_reload_rc"] = rc
+        ctx.log("forgefirm-users reload -> rc %s %s", rc, out.strip()[:200])
+        temp = state.get("temp_account")
+        if temp and temp not in homes_before and temp != ev["account_before"]:
+            import shutil
+            shutil.rmtree(os.path.join(homes, temp), ignore_errors=True)
+            ctx.log("removed the temporary home directory of %r", temp)
     after = wiz(fc)
     ev["after"] = wiz_summary(after)
     ctx.check((after.get("users") or {}).get("name") == ev["account_before"],
