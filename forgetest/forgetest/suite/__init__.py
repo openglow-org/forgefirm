@@ -27,3 +27,4 @@ from . import extdest    # noqa: F401,E402
 from . import extlife    # noqa: F401,E402
 from . import evmore     # noqa: F401,E402
 from . import extcat     # noqa: F401,E402
+from . import extmcode   # noqa: F401,E402

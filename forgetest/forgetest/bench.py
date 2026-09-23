@@ -273,6 +273,16 @@ TOOLS = [
              "(a CR LF with a header behind it included) never reaches the wire, and the homing runner the "
              "controller starts does not inherit it. A CI harness (the grblHAL repo): needs the host-built "
              "null-sink controller, not the machine, so it is not a bench-page tool."},
+    {"id": "mcode-test", "title": "Package M-code barrier harness", "script": "mcode_test.py",
+     "safety": "dry", "where": "host", "ported": False, "args": [],
+     "desc": "The M-codes extension packages answer (M160 to M179), on the null-sink controller with a "
+             "scripted sender and a stand-in for the machine daemon on the port: the table and its refusals, "
+             "a number nothing answers is error:20 where it is parsed, an answered one waits with the head "
+             "still and a port jog refused while the port's state names it, the answer's words, an answer "
+             "that the work was not done and no answer in time each hold the job, a soft reset ends the "
+             "wait, and a wait under an open armed window with M3 S500 ships no FIRE tick. Imports its "
+             "sender and port client from ctlport_test.py. A CI harness (the grblHAL repo): needs the "
+             "host-built null-sink controller, not the machine, so it is not a bench-page tool."},
     {"id": "manual-home-test", "title": "Manual home and motor release harness", "script": "manual_home_test.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
      "desc": "The manual homing provider and the motor release on the null-sink controller: $H under manual "
