@@ -185,7 +185,10 @@ class CloudSuiteTests(unittest.TestCase):
         self.engine_line = EFFECTIVE_LINE      # what the engine logs at the print; None = nothing
         self.client_limits = True              # the client names its header limits
         cloud.QUIET_S = 0.4
-        cloud.QUIET_TIMEOUT_S = 3
+        # A deadline, not a wait: a quiet machine is seen at once. The
+        # replays land their lines from threads, so under a loaded host a
+        # tighter deadline expires before the last of them is written.
+        cloud.QUIET_TIMEOUT_S = 15
         cloud.HUNT_TIMEOUT_S = 8
         self.script = None
 
@@ -556,6 +559,7 @@ class CloudSuiteTests(unittest.TestCase):
         self.append(fixture("huntlid"))
         # a motion in flight (never idle within the timeout) fails, and says so
         self.fc.state["status"]["state"] = "running"
+        cloud.QUIET_TIMEOUT_S = 3                   # this one waits the deadline out; tearDown puts it back
         self.assertFails(cloud.enter_cloud, "still running service moves")
 
     # -- the hunt with the lid open ------------------------------------------
