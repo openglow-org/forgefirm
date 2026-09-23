@@ -322,7 +322,12 @@ def settings_bounds(ctx):
               ("forgectrl", "src/cam.c"), ("forgectrl", "src/main.c"), ("forgectrl", "src/super.c"),
               ("grblhal-glowforge", "src/glowforge_status.c"), ("grblhal-glowforge", "src/serial.c"),
               ("forgectrl", "src/curverec.*")],
-      description="The panel page is served, /status carries the machine telemetry the panel and "
+      description="The panel page is served, with a policy that lets no frame navigate anywhere "
+                  "(frame-src 'none': a package's page renders in a frame of it, and a frame that "
+                  "could go to another address could carry what it was shown in the URL; what the "
+                  "header does in each browser is the frame-isolation harness's to prove, and this "
+                  "holds the machine's own page to carrying it), /status carries the machine "
+                  "telemetry the panel and "
                   "the acceptance tool read (including the sys block: CPU busy percent over the "
                   "interval since the previous read, memory used percent; and homed_axes, "
                   "the axes that carry a reference, Z alone once the lens has taken its "
@@ -350,6 +355,12 @@ def panel_serves(ctx):
     # the head script sets and the one save bar every settings tab shares.
     ctx.check("data-bs-theme" in text, "the panel lacks the theme attribute (inflate failed?)")
     ctx.check('id="savebar"' in text, "the panel lacks the save bar")
+    from .setup import request
+    st_h, _page, hdrs = request(fc.base, "GET", "/", headers={"Host": fc.host_header()})
+    ev["page_policy"] = hdrs.get("content-security-policy")
+    ctx.log("GET / Content-Security-Policy: %s", ev["page_policy"])
+    ctx.check(st_h == 200 and "frame-src 'none'" in (ev["page_policy"] or ""),
+              "the panel page lets a frame navigate: %s %r", st_h, ev["page_policy"])
 
     s = fc.status()
     for key in ("state", "switches", "coolant", "fans"):
