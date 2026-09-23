@@ -23,3 +23,4 @@ from . import cloud      # noqa: F401,E402
 from . import exthost    # noqa: F401,E402
 from . import extcore    # noqa: F401,E402
 from . import extcall    # noqa: F401,E402
+from . import extdest    # noqa: F401,E402
