@@ -169,7 +169,7 @@ _ROUTING_COVERS = [("forgectrl", "src/logs.*"), ("forgectrl", "src/fflog.*"), ("
                    ("forgefirm-app", "forgefirm-app/ffmachine.py"), ("forgefirm-app", "forgefirm-app/gfcloud.py"),
                    ("forgefirm-app", "forgefirm-app/gfhome.py")]
 
-LOGGERS =("forgectrl", "grblhal", "gfcloud", "gfhome", "kernel", "system")
+LOGGERS =("forgectrl", "grblhal", "gfcloud", "gfhome", "forgeext", "kernel", "system")
 _LINE_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?[+-]\d\d:\d\d (?P<prog>[A-Za-z0-9_.-]+)\[(?P<pid>[-\d]+)\] "
                       r"(?P<sev>EMERG|ALERT|CRIT|ERR|WARNING|NOTICE|INFO|DEBUG) (?P<msg>.*)$")
 _SEV_RANK = {"off": -1, "error": 3, "warning": 4, "notice": 5, "info": 6, "debug": 7}
@@ -284,7 +284,7 @@ def routing(ctx):
     # a probe under another name must NOT leak into these files
     rc, out = hw.run(["logger", "-t", "forgetest-stray", "-p", "daemon.err", "%s stray" % nonce])
     time.sleep(1.5)
-    for name in ("grblhal", "gfhome", "forgectrl"):
+    for name in ("grblhal", "gfhome", "forgectrl", "forgeext"):
         path = os.path.join(LOGS_ROOT, name, name + ".log")
         ctx.check(not any((nonce + " stray") in l for l in _tail_lines(path, 100)),
                   "a stray program's line landed in %s", path)
