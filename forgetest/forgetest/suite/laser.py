@@ -671,8 +671,11 @@ def disarm_in_hold(ctx):
         stream(g, ["G91", "G21", "M4", "S400", "G1 X40 F300"])
         ctx.log("armed; waiting for motion to start (arm + your button press)...")
         w = Watch(g)
-        ctx.act("button", "press", text="The button is lit white: the press arms the job and the "
-                "move starts.", until=w.in_state("Run"), timeout=180, fail=False)
+        # The press waits for the button to light: pressed before the job
+        # reaches its arm wait, it is lost, and the move never starts.
+        ctx.arm_press()
+        ctx.wait_for(w.in_state("Run"), 180)
+        ctx.clear_notice()
         st = w.last["state"] if w.last else None
         ctx.check(st and st.startswith("Run"), "motion never started (state=%s) - arm refused or no press", st)
         ctx.log("moving under laser: %s; feed-hold in 2 s", st)
@@ -850,11 +853,15 @@ def armed_kill(ctx):
              "Press the physical button when it lights white (the arm). Nothing else: the test "
              "takes the cooling verdict away itself and gives it back."],
       description="A 40 mm line at constant power (M3 S400/F300, 8 s). About 1.5 s in, the test "
-                  "pauses the machine-services daemon for 3.5 s, so the cooling verdict the "
+                  "pauses the machine-services daemon for 3.0 s, so the cooling verdict the "
                   "controller reads goes stale: the controller's pause tier. The controller must "
                   "hold the job (grbl Hold) under the still-open armed window with the stream "
-                  "masked dark, so the kernel's LASER_ON sample count reads 0 before the cut "
-                  "resumes, and it must not write the latch: a lock sets the hardware button "
+                  "masked dark: the gated LASER_ON output (cnc/laser_on), read about 3300 times a "
+                  "second, reads the laser off in every read that falls inside the hold from 0.3 s "
+                  "after the first Hold:0 (the pause tier's lit deceleration still playing out of "
+                  "the kernel's 200 ms queue) until the cut resumes, at least 500 reads, and the "
+                  "same reads saw the cut lit in the second before the pause. It must not write "
+                  "the latch: a lock sets the hardware button "
                   "latch, which only a press clears, so both bit 3 (the SoC lock) and bit 2 "
                   "(the button latch) of interlock_circuit stay clear through the whole run. "
                   "When the daemon returns (the verdict fresh, clean, resume_ok), the controller "
@@ -877,6 +884,61 @@ def verdict_cut(ctx):
     # freeze must stay under 4.0 s; 3.0 s clears the stale floor with room
     # to see the hold and stays a full second under the dead-man.
     PAUSE_S = 3.0
+    # The dark judge's witness is the gated LASER_ON output itself
+    # (cnc/laser_on, 1 = on), read fast. The kernel's sampled count latches
+    # once a second over the second before, so it reads 0 only once a whole
+    # window has closed inside the hold, up to 2 s in, and the hold can be
+    # shorter than that. About 3300 reads a second on the bench reference;
+    # each read yields the CPU to anything runnable (the controller).
+    FAST_S = 0.1
+    # The pause tier's first deceleration is lit on purpose (a pause leaves
+    # no gap in the cut), and the controller reports Hold:0 once it has
+    # produced the deceleration, not once the kernel has played it: the
+    # driver's queue depth (200 ms, GFSINK_DEPTH_MS's default) and its
+    # producer lead (10 ms) are still to play. The dark span starts that
+    # long after the first Hold:0, with margin.
+    DRAIN_S = 0.3
+    MIN_DARK_READS = 500
+    MIN_LIT_READS = 10
+
+    def fast_reads(seconds, t_ref):
+        """Reads of cnc/laser_on for `seconds`: [start, end] in seconds
+        from t_ref, then the reads taken, the reads that saw the laser on,
+        and the reads that failed."""
+        start = time.time()
+        n = on = bad = 0
+        while time.time() - start < seconds:
+            v = hw.sysfs_int("cnc/laser_on")
+            n += 1
+            if v is None:
+                bad += 1
+            elif v:
+                on += 1
+            _os.sched_yield()
+        return [round(start - t_ref, 3), round(time.time() - t_ref, 3), n, on, bad]
+
+    def dark_span(rows, drain_s):
+        """The fast reads that fell wholly inside the hold, drain_s or more
+        after the first Hold:0 row: a burst counts when the rows either side
+        of it both read Hold, so the hold held through it. [reads, on,
+        failed, bursts, from_s, to_s], or None without a Hold:0 row. Pure:
+        tests/test_laser_verdict.py runs it over synthetic trails."""
+        hold0 = next((r["t"] for r in rows if r["gstate"].startswith("Hold:0")), None)
+        if hold0 is None:
+            return None
+        reads = on = bad = bursts = 0
+        first = last = None
+        for a, b in zip(rows, rows[1:]):
+            f = a.get("fast")
+            if not f or not a["gstate"].startswith("Hold") or not b["gstate"].startswith("Hold"):
+                continue
+            if f[0] < hold0 + drain_s:
+                continue
+            reads, on, bad, bursts = reads + f[2], on + f[3], bad + f[4], bursts + 1
+            first = f[0] if first is None else first
+            last = f[1]
+        return [reads, on, bad, bursts, first, last]
+
     pids = hw.pidof("forgectrl")
     ctx.check(pids, "no forgectrl process found to pause")
     ev["daemon_pids"] = pids
@@ -909,7 +971,10 @@ def verdict_cut(ctx):
         smp = arm_and_fire(ctx, g, room="40 mm +X", job=job)
         beams = [(smp.get("beam"), smp.get("beam_d"))]
         ctx.log("emission live (%s); pausing the daemon in 1 s", smp["emission"])
-        ctx.sleep(1.0)
+        # The witness's own proof: over the lit cut the same reads see it lit.
+        lit_ctl = fast_reads(1.0, time.time())
+        ctx.log("fast reads of cnc/laser_on over the lit cut: %d of %d on, %d failed", lit_ctl[3],
+                lit_ctl[2], lit_ctl[4])
         g.drain()
         t0 = time.time()
         try:
@@ -925,7 +990,10 @@ def verdict_cut(ctx):
                 trail.append({"t": round(time.time() - t0, 2), "gstate": st, "il": il,
                               "emission": hw.sysfs_int("cnc/laser_on_sampled"),
                               "armed": '"armed":true' in grbl_state_file()})
-                time.sleep(0.12)
+                if st.startswith("Hold"):
+                    trail[-1]["fast"] = fast_reads(FAST_S, t0)
+                else:
+                    time.sleep(0.12)
         finally:
             resume_daemon()
             ctx.log("daemon resumed (SIGCONT) at +%.2f s", time.time() - t0)
@@ -951,7 +1019,10 @@ def verdict_cut(ctx):
                 resumed_at = time.time() - t0
             if st.startswith("Idle") and resumed_at is not None and time.time() - t0 > resumed_at + 3.0:
                 break
-            time.sleep(0.12)
+            if resumed_at is None and st.startswith("Hold"):
+                row["fast"] = fast_reads(FAST_S, t0)
+            else:
+                time.sleep(0.12)
         for r in trail:
             ctx.log("  %s", r)
         ev["trail"] = trail
@@ -986,13 +1057,22 @@ def verdict_cut(ctx):
               "the armed window closed during the pause")
     ctx.check("press the button" not in text, "the resume asked for a button press")
     ctx.check(DISARMED_MSG not in text.split("resuming")[0], "the pause tier disarmed the job")
-    # Dark from the hold until the resume: the gate masked the stream.
-    span = [r for r in trail if held and r["t"] >= held[0]["t"]
-            and (resumed_at is None or r["t"] < resumed_at)]
-    zero = next((r for r in span if r["emission"] == 0), None)
-    ev["emission_zero_after_hold_s"] = round(zero["t"] - held[0]["t"], 2) if zero else None
-    ctx.check(zero is not None and zero["t"] - held[0]["t"] <= 2.5,
-              "emission did not read 0 within 2.5 s of the hold (before the resume)")
+    # Dark through the hold: the gate masked the stream. First the witness:
+    # the reads that judge the dark saw the cut lit before the pause.
+    ev["fast_lit_control"] = {"reads": lit_ctl[2], "on": lit_ctl[3], "failed": lit_ctl[4]}
+    ctx.check(lit_ctl[4] == 0 and lit_ctl[3] >= MIN_LIT_READS,
+              "the fast reads of cnc/laser_on did not see the lit cut before the pause (%d of %d on, "
+              "%d failed): they cannot witness the dark", lit_ctl[3], lit_ctl[2], lit_ctl[4])
+    dark = dark_span(trail, DRAIN_S)
+    ev["fast_dark"] = (dict(zip(("reads", "on", "failed", "bursts", "from_s", "to_s"), dark))
+                       if dark else None)
+    ctx.check(dark is not None, "no Hold:0 was seen, so the hold cannot be judged dark")
+    ctx.check(dark[2] == 0, "cnc/laser_on could not be read %d times inside the hold", dark[2])
+    ctx.check(dark[1] == 0, "the laser was on in %d of %d reads of cnc/laser_on inside the hold "
+              "(%s s to %s s, %.1f s or more after the first Hold:0)", dark[1], dark[0], dark[4], dark[5],
+              DRAIN_S)
+    ctx.check(dark[0] >= MIN_DARK_READS, "only %d reads of cnc/laser_on fell inside the hold after the "
+              "drain: too few to judge it dark (at least %d)", dark[0], MIN_DARK_READS)
     ctx.check(resumed_at is not None, "the clean verdict did not resume the cut")
     ctx.check("resuming" in text, "the controller did not report the resume")
     after = [r for r in trail if resumed_at and r["t"] >= resumed_at]
@@ -1002,9 +1082,9 @@ def verdict_cut(ctx):
     beam_witness(ctx, ev, [{"beam": b, "beam_d": d} for b, d in beams], base)
     judge_beam(ctx, ev["beam"], "the cut")
     check_button_dark(ctx, ev)
-    ctx.log("PASS: held at +%s s with the latch untouched, emission 0 %s s after the hold, resumed "
-            "lit at +%s s with no press, disarmed %.1f s after Idle", ev["held_at_s"],
-            ev["emission_zero_after_hold_s"], ev["resumed_at_s"], dt)
+    ctx.log("PASS: held at +%s s with the latch untouched, the laser off in all %d reads inside the "
+            "hold (%s s to %s s), resumed lit at +%s s with no press, disarmed %.1f s after Idle",
+            ev["held_at_s"], dark[0], dark[4], dark[5], ev["resumed_at_s"], dt)
 
 
 DISARMED_MSG = "laser disarmed - latch locked"
