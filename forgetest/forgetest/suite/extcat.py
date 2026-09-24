@@ -22,7 +22,6 @@ import tempfile
 
 from ..catalog import test
 from .exthost import FWUP, _forgeext, _write
-from .setup import request
 
 INDEX_URL = "https://github.com/openglow-org/forgefirm-extensions/releases/latest/download/index.ffi"
 STAGE_DIR = "/data/forgefirm/tmp"
@@ -83,11 +82,12 @@ def _staged():
                   "index (signed by a key that is not the OpenGlow extension key) is refused in words, a package "
                   "handed over as an index is refused by the product gate, and the index kept is left as it was. "
                   "POST /ext/catalog/get refuses an id with no such form (400), and one the kept index does not "
-                  "list (404, or 409 with no index kept), before anything is fetched. POST /ext/catalog/refresh "
-                  "asks the fixed https:// address: it keeps OpenGlow's index when one is published there, and "
-                  "when none is, it is 502 in curl's words with the kept index left as it was. Nothing is left in "
-                  "the staging directory. The fetch of a listed package, held to its size and SHA-256, and the "
-                  "tiers an install takes from it, are forgectrl's extpkg_test and forgeext's install_test.")
+                  "list (404, or 409 with no index kept), before anything is fetched. Nothing is left in the "
+                  "staging directory. POST /ext/catalog/refresh is not asked here: GitHub counts every request "
+                  "of the index's address as a download, and that count is the operators'. The refresh (curl, "
+                  "https alone and bounded, 502 in curl's words, 409 in the host's, the file removed), the fetch "
+                  "of a listed package held to its size and SHA-256, and the tiers an install takes from it, "
+                  "are forgectrl's extpkg_test and forgeext's install_test.")
 def catalog(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -150,21 +150,7 @@ def catalog(ctx):
         want = (404, "not in the catalog") if kept.get("index") else (409, "fetch it first")
         ev["get_unlisted"] = [st, why]
         ctx.check(st == want[0] and want[1] in json.dumps(why), "an id the kept index does not list -> %s %s", st, why)
-
-        # The fetch from the one address.
-        st, body, _h = request(fc.base, "POST", "/ext/catalog/refresh", data={},
-                               headers={"X-ForgeFIRM-Token": fc.token, "Host": fc.host_header()}, timeout=90)
-        text = body.decode("utf-8", "replace")
-        ev["refresh"] = [st, text[:400]]
-        ctx.log("POST /ext/catalog/refresh -> %s %s", st, text[:200])
-        if st == 200:
-            doc = json.loads(text)
-            ctx.check(isinstance(doc.get("index"), dict) and doc["index"].get("version"),
-                      "a kept index has its version: %s", text[:200])
-        else:
-            ctx.check(st == 502 and "could not be fetched" in text, "a fetch that fails is 502 in curl's words: %s %s",
-                      st, text[:200])
-            ctx.check(_forgeext("index").get("index") == kept.get("index"), "a failed fetch changed the index kept")
+        ctx.check(_forgeext("index").get("index") == kept.get("index"), "the refusals changed the index kept")
         ctx.check(_staged() == staged_before, "the staging directory holds %s, and held %s before", _staged(), staged_before)
     finally:
         shutil.rmtree(work, ignore_errors=True)
