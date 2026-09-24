@@ -905,6 +905,14 @@ class Baseline:
                          "not a leftover" % (now, was, act, POSITION_DEADBAND_MM))
             else:
                 left.append(Leftover("position", now, was, act))
+        # A controller restart during the run (a takeover's) re-zeroed the
+        # counters wherever the head then stood, so a head left out before
+        # it reads as home from here. The takeover judged it on the spot
+        # (runner.Takeover); what it recorded is a leftover, never moved.
+        for r in captured.get("restart_positions") or []:
+            left.append(Leftover("position at the %s" % r["where"], r["found"], r["expected"],
+                                 "unrestorable: a controller restart re-zeroed the counters there, "
+                                 "so the head is not moved"))
         was = captured.get("settings")
         if was:
             st, body = self.fc_get("/settings")

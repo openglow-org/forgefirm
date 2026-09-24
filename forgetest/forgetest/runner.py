@@ -539,7 +539,7 @@ class Context:
         return hw.Grbl()
 
     def takeover(self):
-        return Takeover(self.run.log, self.test.id)
+        return Takeover(self.run.log, self.test.id, run=self.run)
 
     def counters_rezeroed(self):
         """Tell the baseline the kernel position counters were re-zeroed
@@ -550,6 +550,9 @@ class Context:
         if cap and cap.get("position") is not None:
             cap["position"] = [0, 0, 0]
             cap["rezero_declared"] = True   # the test vouches for the new frame
+            # ... and it is the frame now in force, so a takeover later in
+            # the run can still judge where the head stands against it
+            cap["frame"] = _baseline.counter_frame()
             self.log("position counters re-zeroed at the starting position; the baseline "
                      "expects (0,0,0) at the end")
 
@@ -579,11 +582,15 @@ class Takeover:
                 "cnc/x_mode", "cnc/y_mode", "cnc/x_decay", "cnc/y_decay",
                 "pic/x_step_current", "pic/y_step_current")
 
-    def __init__(self, log, who):
+    def __init__(self, log, who, run=None):
         self.log = log            # callable(str)
         self.who = who
         self.marker = marker_path()
         self.saved = {}
+        self.run = run            # the test's run, whose baseline the head is judged against
+        self.cloud = False
+        self.frame = None         # the counters' frame, read before the controller is stopped
+        self.found = None         # (counters, microstep mode) once the controller is gone
 
     def wait_settled(self):
         return _baseline.Baseline(self.log).wait_settled()
@@ -610,6 +617,14 @@ class Takeover:
                 self.saved[attr] = v
         if self.saved:
             log("takeover: preserving %s" % ", ".join("%s=%s" % kv for kv in self.saved.items()))
+        try:
+            st, mode = hw.Forgectrl().get("/mode")
+            self.cloud = st == 200 and isinstance(mode, dict) and mode.get("mode") == "cloud"
+        except hw.HwError:
+            pass
+        # The frame is read while the controller runs: its exit takes the
+        # anchor with it (forgectrl unlinks it), though not the counters.
+        self.frame = _baseline.counter_frame()
         log("takeover: stopping the controller through forgectrl")
         try:
             st, body = hw.Forgectrl().post("/controller/stop")
@@ -632,9 +647,67 @@ class Takeover:
             self.__exit__(None, None, None)
             raise Failed("takeover: processes still alive after stop: %s" % left)
         log("takeover: pulse device free")
+        try:
+            self.position_at_start()
+        except Exception as e:  # noqa: BLE001 - a reading never keeps forgectrl down
+            log("takeover: WARNING the head's position could not be judged: %s: %s" % (type(e).__name__, e))
         return self
 
+    # A controller start re-zeroes the step counters where the head then
+    # stands, and forgectrl's start after a takeover is one, so the
+    # baseline's check after the run cannot see a head left out before it.
+    # The takeover judges it at the two moments it can: as the controller
+    # goes away (against where the run expects the head) and before it
+    # comes back (against where the takeover found it). A miss is recorded
+    # for the baseline's post pass, which fails the run; nothing is moved,
+    # because a jog sized from these counters is only as good as the frame
+    # they are in. Cloud mode is not judged: its counters are the cloud
+    # client's, as in the baseline.
+
+    def _record(self, where, found, expected):
+        cap = self.run.baseline_captured if self.run is not None else None
+        if cap is not None:
+            cap.setdefault("restart_positions", []).append(
+                {"where": where, "found": found, "expected": expected})
+        self.log("takeover: the head is not where it belongs at the %s: counters %s, expected %s; "
+                 "recorded as a leftover, nothing moved" % (where, found, expected))
+
+    def position_at_start(self):
+        cap = self.run.baseline_captured if self.run is not None else None
+        if not cap or self.cloud:
+            return
+        now = _baseline.read_position()
+        self.found = (now, hw.sysfs_read("cnc/x_mode"))
+        was = cap.get("position")
+        if now is None or was is None:
+            return
+        if self.frame is None or cap.get("frame") != self.frame:
+            self.log("takeover: the counters are not in the frame the run began in (a controller "
+                     "start or a home the test did not declare), so the head is not judged here")
+            return
+        if now != was and not _baseline.position_quantized(was, now, _baseline.counter_steps_per_mm()):
+            self._record("takeover start", now, was)
+
+    def position_at_end(self):
+        if self.found is None:
+            return
+        was, mode = self.found
+        now = _baseline.read_position()
+        if was is None or now is None:
+            return
+        if hw.sysfs_read("cnc/x_mode") != mode:
+            self.log("takeover: the microstep mode changed under the takeover, so the counters "
+                     "before and after it are not one scale; the head is not judged here")
+            return
+        if now != was and not _baseline.position_quantized(was, now, _baseline.counter_steps_per_mm()):
+            self._record("takeover end", now, was)
+
     def __exit__(self, exc_type, exc, tb):
+        try:
+            self.position_at_end()
+        except Exception as e:  # noqa: BLE001 - a reading never keeps forgectrl down
+            self.log("takeover: WARNING the head's position could not be judged: %s: %s"
+                     % (type(e).__name__, e))
         self.restore_attrs()
         rc, out = hw.initd("forgectrl", "start")
         self.log("takeover: forgectrl start -> rc %s" % rc)
