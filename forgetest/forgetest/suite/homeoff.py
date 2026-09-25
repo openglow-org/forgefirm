@@ -21,10 +21,11 @@ from ..baseline import XY_STEPS_PER_MM, counter_frame, counter_steps_per_mm, rea
 from ..catalog import test
 from ..runner import Failed
 from . import cloud as logs     # the log paths, read at each call
-from .cloud import RETURN_MAX_MM, _HOMING_PATH, gfhome_homing, log_lines_since, log_size
+from .cloud import _HOMING_PATH, gfhome_homing, log_lines_since, log_size
 from .motion import _drop_reference, clean_slate, machine_idle, wait_idle, wait_state
 
 HOME_X, HOME_Y = 4.5, -3.25
+RETURN_MAX_MM = 600.0       # no hand-back jogs farther on an axis: the bed is smaller
 # The client's own record of a motion's end: the kernel counters, which
 # the motion zeroed at its start (the "(actual/expected)" line of the same
 # motion is not this one). A print's park keeps the counters and drives

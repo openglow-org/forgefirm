@@ -563,6 +563,29 @@ class CloudSuiteTests(unittest.TestCase):
         cloud.QUIET_TIMEOUT_S = 3                   # this one waits the deadline out; tearDown puts it back
         self.assertFails(cloud.enter_cloud, "still running service moves")
 
+    def test_the_quiet_waits_out_the_service_thinking_after_a_lid_image(self):
+        # Between a lid image and the service's next move the log is silent
+        # while the service works on the image (the re-hunt on the bench
+        # reference, 2026-09-25). The quiet counts from the image's own
+        # lines, so it is not declared in that gap: it comes after the move.
+        cloud.QUIET_S = 1.0
+        offset = cloud.log_size(self.log)
+        p = "2026-09-25T16:43:%s+00:00 gfcloud[12821] INFO "
+        self.append([p % "20.103479" + "gfuiservice:run service action request: motion (ready)",
+                     p % "20.105376" + "machine:_motion start motion",
+                     p % "22.617720" + "machine:_motion_locked end positions (12120, 7402, 0)",
+                     p % "22.618542" + "machine:_motion end motion",
+                     p % "22.619218" + "basemachine:_finish_action motion [1588864337]: finished with event "
+                                       "\":completed\""])
+        self.append([p % "23.249589" + "gfuiservice:run service action request: lid_image (ready)",
+                     p % "24.686536" + "websocket:img_upload COMPLETE"], delay=0.8)
+        self.append([p % "29.667978" + "gfuiservice:run service action request: motion (ready)",
+                     p % "29.671663" + "machine:_motion start motion"], delay=1.6)
+        run = Run("test", "cloud.x", "cloud.x")
+        ctx = Context(run, None, helpers.make_test("cloud.x", []))
+        self.assertTrue(cloud.wait_quiet(ctx, offset))
+        self.assertIn("service action request: motion", cloud.log_lines_since(self.log, offset)[-2])
+
     # -- the hunt with the lid open ------------------------------------------
     # -- the mode switch: hunt with the lid open, then $H -----------------------
     HUNT_RUN_SAMPLE = {"phase": "run", "verdict": "ok", "armed": False,

@@ -95,7 +95,6 @@ SESSION_MARKS = ("authenticate_machine SUCCESS", "ws_connect ESTABLISHED")
 # The service's connect-time hunt, as the client logs its request: a few
 # seconds after the controller starts, right behind the session.
 HUNT_REQUEST = "service action request: hunt"
-RETURN_MAX_MM = 600.0       # the head comes back from the home corner across the bed
 
 
 def log_size(path):
@@ -118,39 +117,6 @@ def session_lines(path, offset):
 
 def session_established(lines):
     return all(any(m in ln for ln in lines) for m in SESSION_MARKS)
-
-
-def return_head(ctx, feed=2400):
-    """Jog the head back to where the run found it: cloud mode re-zeroed the
-    kernel counters at the starting position, so the counters now read the
-    displacement (the home corner). Ends on the machine idle."""
-    fc = ctx.forgectrl
-    pos = fc.status().get("pos") or {}
-    x, y = float(pos.get("x", 0.0)), float(pos.get("y", 0.0))
-    ctx.log("head displacement since the switch: X %.3f Y %.3f mm", x, y)
-    ctx.check(abs(x) <= RETURN_MAX_MM and abs(y) <= RETURN_MAX_MM,
-              "displacement %.1f/%.1f mm exceeds %.0f mm - not jogging back", x, y, RETURN_MAX_MM)
-    if abs(x) < 0.05 and abs(y) < 0.05:
-        return
-    with ctx.grbl() as g:
-        st = g.status_report()["state"]
-        if st.startswith("Alarm"):
-            g.command("$X")
-        r = g.command("$J=G91X%.3fY%.3fF%d" % (-x, -y, feed))
-        ctx.check(not any(k.startswith("error") for k in r), "return jog refused: %s", r)
-        t0 = time.time()
-        while time.time() - t0 < 120:
-            ctx.checkpoint()
-            st = g.status_report()["state"]
-            if st.startswith("Idle") and time.time() - t0 > 0.5:
-                break
-            time.sleep(0.2)
-        g.command("G90")
-    ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle after the return jog")
-    pos = fc.status().get("pos") or {}
-    ctx.log("head returned: counters X %.3f Y %.3f mm", float(pos.get("x", 0)), float(pos.get("y", 0)))
-    ctx.check(abs(float(pos.get("x", 0))) < 0.1 and abs(float(pos.get("y", 0))) < 0.1,
-              "head not back at the start after the return jog: %s", pos)
 
 
 def wait_mode(ctx, fc, want_mode, want_controller="running", timeout=90, poll=1.0):
@@ -536,9 +502,18 @@ NOHUNT_MARK = "NO-HUNT:"
 NOHUNT_MARKER = "/run/gfcloud-nohunt"
 HUNT_DONE = "hunt ["
 WS_MARKS = ("RX-EVENT: ready", "RX-EVENT: closed", "RECONNECTING", "CLOSING", OFFLINE_MARK)
-ACTIVITY_MARKS = ("start motion", "start return home", "starting run", "starting z homing cycle")
+# The service at work: every line of a service action, the requests, the image
+# uploads and the ends included. Between a lid image and its next move the
+# service is thinking and the log is silent, so the ends count: the quiet is
+# measured from the last line of any action.
+ACTIVITY_MARKS = ("service action request:", "img_upload COMPLETE", "finished with event",
+                  "start motion", "end motion", "start return home", "return home complete",
+                  "starting run", "finished run", "starting z homing cycle")
 LOG_TAIL_BYTES = 4 << 20
-QUIET_S = 8                 # the re-hunt's motions are ~4 s apart (a lid image between them)
+# The service's think time after an image, on the bench reference: over 1901
+# motion, lid-image and hunt requests, half came within 1.6 s of the line before,
+# 99 percent within 12.8 s, and two after more than 30 s (32.8 and 62.2 s).
+QUIET_S = 30
 QUIET_TIMEOUT_S = 180
 HUNT_TIMEOUT_S = 180
 
@@ -763,9 +738,9 @@ def client_offline(pid):
 
 
 def wait_quiet(ctx, offset, quiet_s=None, timeout=None):
-    """The service's moves are over: the machine idle and no new service
-    activity in the log (a motion, a park, a run, a lens homing) for
-    quiet_s (default QUIET_S; timeout QUIET_TIMEOUT_S). False on timeout."""
+    """The service's moves are over: the machine idle and no new line of any
+    service action in the log (ACTIVITY_MARKS) for quiet_s (default QUIET_S;
+    timeout QUIET_TIMEOUT_S). False on timeout."""
     quiet_s = QUIET_S if quiet_s is None else quiet_s
     timeout = QUIET_TIMEOUT_S if timeout is None else timeout
     fc = ctx.forgectrl
