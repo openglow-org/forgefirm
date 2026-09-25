@@ -17,6 +17,7 @@ import time
 
 from ..catalog import test
 from .cloud import _HOMING_PATH, gfhome_homing
+from .homeoff import camera_home_return, judge_whole_motions, session_mark
 from .setup import read_file, record_path, write_file
 from .setup_dark import DARK_COVERS, answer, dark, start
 
@@ -173,8 +174,9 @@ def _edge(ctx, fc, ev, axis, edge):
                                            ("grblhal-glowforge", "src/driver.c")],
       requires=["forgectrl.auth", "motion.pacing"],
       steps=["Bed clear, lid closed; cloud credentials configured; the machine on the network. The head moves "
-             "at most about 62 mm out from the camera home in X and in Y."],
-      description="With cloud mode on, the machine is homed with the camera (the web-service session). "
+             "at most about 62 mm out from the camera home in X and in Y, and ends where it was found."],
+      description="With cloud mode on, the machine is homed with the camera (the web-service session), every "
+                  "service motion of it run whole. "
                   "POST /wiz/motion.envelope/start runs the Bed size check; its prompts are jogs with This is the "
                   "end among the options, and are answered as the page would, out 60.1 mm in X and 61.1 mm in Y "
                   "(steps of 10, 1, and 0.1 mm). The check ends complete: the ends it reports are the home plus "
@@ -187,7 +189,8 @@ def _edge(ctx, fc, ev, axis, edge):
                   "first run left them and the edges still in force. The keys, the homing mode, and the setup "
                   "record are put back as found, the record under a restart, and the head goes back to the "
                   "home by a Grbl client's jog in machine coordinates; the run fails unless the port reads "
-                  "the head on the home's step before the restart.")
+                  "the head on the home's step before the restart. Then the camera home is dropped and the "
+                  "head goes back to where the test found it, by the travel the session's motions logged.")
 def check_envelope(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -196,13 +199,15 @@ def check_envelope(ctx):
     raw = read_file(record_path())
     found = {k: s0.get(k) or "" for k in KEYS}
     ev["found"] = found
-    home = back = None
+    home = back = session_at = None
     try:
         st, body = fc.post("/settings", data={"homing_mode": "gfcloud"})
         ctx.check(st == 200, "homing_mode=gfcloud -> %s %s", st, body)
         with ctx.grbl() as g:
+            session_at = session_mark()
             gfhome_homing(ctx, ev, g)
             home = g.status_report().get("MPos")
+            judge_whole_motions(ctx, ev, session_at)
         ev["home"] = home
         ctx.log("the camera home declared %s", home)
         ctx.check(home and home[0] is not None, "no position after the home: %s", home)
@@ -262,12 +267,18 @@ def check_envelope(ctx):
             ctx.wait_for(lambda: not dark(fc).get("running"), 30, poll=0.5)
             back = _back_home(ctx, fc, home)
         _put_back(ctx, fc, found)
-        # The check records itself when it completes; the record goes back
-        # as found under a restart, which also ends the envelope it set.
-        if read_file(record_path()) != raw:
-            with ctx.takeover():
-                write_file(record_path(), raw)
-            ctx.log("the previous setup record is back under a restart")
+        try:
+            # Before the record's restart: the counters since the home say
+            # where the head stands until a controller start zeroes them.
+            if session_at is not None:
+                camera_home_return(ctx, ev, session_at)
+        finally:
+            # The check records itself when it completes; the record goes back
+            # as found under a restart, which also ends the envelope it set.
+            if read_file(record_path()) != raw:
+                with ctx.takeover():
+                    write_file(record_path(), raw)
+                ctx.log("the previous setup record is back under a restart")
     # Judged from the reading before the restart: the restart zeroes the
     # counters where the head stands, so the baseline's position check
     # after it cannot see a head left out.

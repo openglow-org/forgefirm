@@ -28,6 +28,7 @@ import time
 import unittest
 
 import helpers
+from forgetest import baseline
 from forgetest.runner import Context, Failed, Run
 from forgetest.suite import cloud
 
@@ -566,8 +567,21 @@ class CloudSuiteTests(unittest.TestCase):
     # -- the mode switch: hunt with the lid open, then $H -----------------------
     HUNT_RUN_SAMPLE = {"phase": "run", "verdict": "ok", "armed": False,
                        "fan_gates": {"exhaust": {"state": "unjudged", "reading": 0, "floor": 500}}}
+    # A homing session's motions as gfhome logs them (the bench reference,
+    # 2026-09-25): a small correction, then into the camera home.
+    HOME_SESSION = [
+        "2026-09-25T16:43:45.374951+00:00 gfhome[12982] INFO machine:_motion start motion",
+        "2026-09-25T16:43:45.853976+00:00 gfhome[12982] INFO machine:_motion_locked end positions (-13, -13, 0)",
+        "2026-09-25T16:43:45.854819+00:00 gfhome[12982] INFO machine:_motion end motion",
+        "2026-09-25T16:43:45.856076+00:00 gfhome[12982] INFO basemachine:_finish_action motion [1588864529]: "
+        "finished with event \":completed\"",
+        "2026-09-25T16:43:51.600734+00:00 gfhome[12982] INFO machine:_motion start motion",
+        "2026-09-25T16:43:53.605402+00:00 gfhome[12982] INFO machine:_motion_locked end positions (-13095, -7399, 0)",
+        "2026-09-25T16:43:53.606171+00:00 gfhome[12982] INFO machine:_motion end motion",
+        "2026-09-25T16:43:53.606916+00:00 gfhome[12982] INFO basemachine:_finish_action motion [1588864567]: "
+        "finished with event \":completed\""]
 
-    def mode_switch_setup(self, hunt_lines=None, home_complete=True, lid_late=False):
+    def mode_switch_setup(self, hunt_lines=None, home_complete=True, lid_late=False, home_lines=None):
         """The fakes a mode-switch run needs: grbl to answer $H, the lid
         lamp attr, homing_mode = gfcloud, the service lines landing on
         the switch to cloud - the client's start at once, its session and
@@ -576,17 +590,36 @@ class CloudSuiteTests(unittest.TestCase):
         reads as a run to the cooling engine while it lasts) - the re-hunt
         on the lid close, and gfhome finishing the homing after $H. With
         lid_late the hunt is requested before the lid opens: the race the
-        test must call."""
+        test must call. The step counters are the machine's: a controller
+        start zeroes them and removes the homing anchor, the home zeroes
+        them and writes it, and a jog moves them by what it asked."""
         self.grbl = helpers.FakeGrbl().start()
         os.makedirs(self.sysfs + "pic", exist_ok=True)
         self._attr("pic/lid_led", "236")
         self.fc.state["settings"]["homing_mode"] = "gfcloud"
+        anchor = os.path.join(self.tmp, "grblhal.homed")
+        self.addCleanup(setattr, baseline, "ANCHOR_PATH", baseline.ANCHOR_PATH)
+        baseline.ANCHOR_PATH = anchor
         lines = fixture("huntlid")
         pre, post = cut(lines, "gfuiservice:__init__ INITIALIZED")
         hunt_part, close_part = cut(post, "_switch_event lid closed")
         if hunt_lines is not None:
             hunt_part = hunt_lines(hunt_part)
         fc = self.fc
+
+        def controller_start():
+            self._pos(0, 0, 3)
+            if os.path.exists(anchor):
+                os.remove(anchor)
+
+        def jog(line):
+            if line.startswith("$J=G91"):
+                words = dict((w[0], float(w[1:])) for w in line[3:].split() if w[0] in "XY")
+                with open(self.sysfs + "cnc/position", "rb") as f:
+                    x, y, z = struct.unpack("<3i", f.read(12))
+                self._pos(x + round(words.get("X", 0.0) * baseline.XY_STEPS_PER_MM),
+                          y + round(words.get("Y", 0.0) * baseline.XY_STEPS_PER_MM), z)
+        self.grbl.on_command = jog
 
         def hunt():
             self.append(hunt_part, delay=0.0)
@@ -608,7 +641,14 @@ class CloudSuiteTests(unittest.TestCase):
                     hunt()
                 threading.Thread(target=land, daemon=True).start()
             elif path == "/mode" and form.get("controller") == "grbl":
+                controller_start()
                 self.grbl.state = "Idle"
+            elif path == "/controller/stop":
+                fc.state["mode"] = dict(fc.state["mode"], controller="standby", pid=0)
+            elif path == "/controller/start":
+                controller_start()
+                fc.state["mode"] = dict(fc.state["mode"], controller="running", pid=4300, motion="verified")
+                fc.state["status"]["homed"] = False
             return None
         self.fc.on_post = on_post
 
@@ -623,7 +663,11 @@ class CloudSuiteTests(unittest.TestCase):
 
         def homing():
             self.grbl.state = "Home"
+            with open(self.homelog, "ab") as f:
+                f.write(("\n".join(home_lines or self.HOME_SESSION) + "\n").encode())
             time.sleep(0.4)
+            self._pos(0, 0, 3)
+            open(anchor, "w").close()
             self.grbl.state = "Idle"
             self.fc.state["status"]["homed"] = True
             if home_complete:
@@ -658,6 +702,39 @@ class CloudSuiteTests(unittest.TestCase):
         self.assertEqual([r["state"] for r in ev["actions"]], ["open", "close"])
         self.assertEqual(self.script.asked, [])
         self.assertTrue(any("PASS:" in l for l in run.lines), run.lines[-5:])
+        # The head goes back where the test found it, each stretch by its
+        # client's record: the re-hunt of the excerpt ends 2/7 steps from
+        # where the cloud mode began, and the homing went into the corner.
+        self.assertEqual(tuple(ev["cloud_return"]["session_travel_steps"]), (2, 7))
+        self.assertEqual(tuple(ev["return"]["session_travel_steps"]), (-13108, -7412))
+        spm = baseline.XY_STEPS_PER_MM
+        self.assertEqual([l for l in self.grbl.sent if l.startswith("$J=")],
+                         ["$J=G91 G21 X%.3f Y%.3f F2400" % (-2 / spm, -7 / spm),
+                          "$J=G91 G21 X%.3f Y%.3f F2400" % (13108 / spm, 7412 / spm)])
+        # a start after each jog, and the camera home dropped before the second
+        self.assertEqual([p for p, f in self.fc.posts if p.startswith("/controller/")],
+                         ["/controller/stop", "/controller/start"] * 3)
+        with open(self.sysfs + "cnc/position", "rb") as f:
+            self.assertEqual(struct.unpack("<3i", f.read(12))[:2], (0, 0))
+
+    def test_mode_switch_a_hand_back_that_fails_too_does_not_hide_the_failure(self):
+        # gfhome never said it homed, and its last motion has no end on
+        # record: the travel is unknown, the head is not moved, and the
+        # failure reported is the test's own
+        hooks = self.mode_switch_setup(home_complete=False, home_lines=self.HOME_SESSION[:5])
+        threading.Thread(target=self.wait_home_command, daemon=True).start()
+        self.assertFails(cloud.mode_switch, "no 'homing complete' line", hooks=hooks)
+        run = self.script.run
+        self.assertTrue(any("the head is not back" in l for l in run.lines), run.lines[-6:])
+        self.assertIn("cannot be known", run.evidence["return"]["failed"])
+        self.assertEqual(len([l for l in self.grbl.sent if l.startswith("$J=")]), 1)   # the cloud stretch's
+
+    def test_mode_switch_fails_when_the_travel_in_cloud_mode_cannot_be_known(self):
+        # the hunt's motion has no end on record (a client killed inside it)
+        hooks = self.mode_switch_setup(
+            hunt_lines=lambda part: [l for l in part if not l.endswith("machine:_motion end motion")])
+        self.assertFails(cloud.mode_switch, "the travel in cloud mode cannot be known", hooks=hooks)
+        self.assertEqual([l for l in self.grbl.sent if l.startswith("$J=")], [])
 
     def test_mode_switch_opens_the_lid_behind_the_controller_and_ahead_of_the_hunt(self):
         # No controller starts with the enclosure open: the switch is made

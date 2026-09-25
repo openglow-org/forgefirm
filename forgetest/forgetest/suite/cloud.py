@@ -254,8 +254,8 @@ def gfhome_homing(ctx, ev, g):
              "Open the lid the moment you are told, with a hand ready on it: the cloud client's "
              "first hunt begins a few seconds after its controller starts and must find the lid "
              "open. Leave it open through the connect and the hunt; close it when told. Nothing "
-             "else: the switch back and the $H homing run on their own, and the head ends parked "
-             "at the home corner."],
+             "else: the switch back and the $H homing run on their own, and the head ends where the "
+             "test found it."],
       description="One round trip with the two service-driven motions on it. POST /mode switches "
                   "to the cloud controller with the lid closed (no controller starts with the "
                   "enclosure open): gfcloud comes up under supervision, authenticates and "
@@ -268,11 +268,18 @@ def gfhome_homing(ctx, ev, g):
                   "is measured by the airflow gates but not judged (no AIRFLOW, the exhaust row "
                   "reads unjudged); the camera service survives the switch. The lid closed, the "
                   "service's re-hunt is waited out; switching back brings grblHAL up with the Grbl "
-                  "port open and Idle, and the head returns to its start. Then $H with "
+                  "port open and Idle, and the head returns to its start by the travel the "
+                  "client logged for the service's motions. Then $H with "
                   "homing_mode = gfcloud runs gfhome, the web-service homing session with the "
                   "head-accelerometer motion witness: the controller returns to Idle with "
-                  "homed:true and gfhome reports the homing complete with the motion it saw.")
+                  "homed:true, gfhome reports the homing complete with the motion it saw, and "
+                  "every service motion of the session ran whole. The camera home is then "
+                  "dropped and the head goes back to where the test found it, by the travel the "
+                  "session's motions logged.")
 def mode_switch(ctx):
+    # The hand-back helpers, imported here so that no other cloud test's
+    # fingerprint moves.
+    from .homeoff import camera_home_return, cloud_mode_return, judge_whole_motions, session_mark
     fc = ctx.forgectrl
     ev = ctx.evidence
     st, m0 = fc.get("/mode")
@@ -383,10 +390,9 @@ def mode_switch(ctx):
     st, cam2 = fc.get("/cam/status")
     ev["cam_after"] = cam2
     ctx.check(st == 200, "camera status lost after the switch back")
-    # cloud mode's connect cleared the kernel counters at the starting position
-    # and its hunt homed the head: bring it back
-    ctx.counters_rezeroed()
-    return_head(ctx)
+    # The service moved the head in cloud mode, and the controller's start
+    # zeroed the counters where it left it: the client's record brings it back.
+    cloud_mode_return(ctx, ev, log_offset)
     # cloud mode sets its own lid-lamp level (LLvl) and leaves it: hand back the level found
     lamp1 = hw.sysfs_read("pic/lid_led")
     ev["lid_lamp"] = {"before": lamp0, "after_cloud": lamp1}
@@ -400,9 +406,11 @@ def mode_switch(ctx):
         st, body = fc.post("/settings", data={"homing_mode": "gfcloud"})
         ctx.log("homing_mode=gfcloud for the homing -> %s %s", st, body if isinstance(body, str) else "")
         ctx.check(st == 200, "homing_mode=gfcloud -> %s %s", st, body)
+    session_at = session_mark()
     try:
         with ctx.grbl() as g:
             gfhome_homing(ctx, ev, g)
+            judge_whole_motions(ctx, ev, session_at)
     finally:
         if ev["homing_mode"] != "gfcloud":
             # Back to exactly what the machine had: unset is the empty
@@ -413,6 +421,7 @@ def mode_switch(ctx):
                         if not ev["homing_mode"]
                         else fc.post("/settings", data={"homing_mode": ev["homing_mode"]}))
             ctx.log("restore homing_mode=%r -> %s", ev["homing_mode"], st)
+        camera_home_return(ctx, ev, session_at)
     ctx.log("PASS: grbl -> cloud (session, hunt with the lid open, lens homed, airflow unjudged) -> "
             "grbl (port open, %s), then $H homed in %.1f s", ev["grbl_state"], ev["homing_s"])
 
