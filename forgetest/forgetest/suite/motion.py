@@ -1202,72 +1202,107 @@ def respawn_gate(ctx):
 
 
 @test("motion.soft-limits", title="After a home the bed is the X/Y envelope",
-      subsystem="motion", kind="auto", mode="grbl", est_min=3,
+      subsystem="motion", kind="auto", mode="grbl", est_min=5,
       covers=_MOTION_COVERS, requires=["motion.jog-roundtrip", "cloud.mode-switch"],
-      steps=["Bed clear, lid closed. The test homes the machine through the web service if it is "
-             "not homed (about a minute), then sends moves the controller must refuse."],
+      steps=["Bed clear, lid closed; cloud credentials configured; the machine on the network. The test "
+             "homes the machine through the web service (about a minute), sends moves the controller "
+             "must refuse, and hands the head back where it found it."],
       description="The machine has no limit switches, so the core's $20 cannot be turned on and "
                   "the X/Y soft limits are the driver's: off while the position is not trusted, on "
                   "after a home, when the envelope is the bed ($130 by $131 from the home corner). "
-                  "Homed, a program move 5 mm past X max or Y max, or past the near edge, raises "
-                  "ALARM:2 before any motion (the kernel counters do not move), a jog past the bed "
-                  "is refused with error 15, and a move inside the bed runs. The Z envelope is the "
-                  "lens window, as before.")
+                  "With homing_mode = gfcloud and the camera-home offsets unset for the run, $H runs "
+                  "the web-service homing session, every motion of it run whole. Homed, a program "
+                  "move 5 mm past X max or Y max, or past the near edge, raises ALARM:2 before any "
+                  "motion (the kernel counters do not move), a jog past the bed is refused with "
+                  "error 15, and a move inside the bed runs. The Z envelope is the lens window, as "
+                  "before. The settings are put back as found, the camera home is dropped, and the "
+                  "head is jogged back to where the test found it by the travel the session's "
+                  "motions logged.")
 def soft_limits(ctx):
+    # The camera-home helpers, imported here: homeoff imports this module.
     from .cloud import gfhome_homing
+    from .homeoff import camera_home_return, judge_whole_motions, session_mark
     fc = ctx.forgectrl
     ev = ctx.evidence
-    with ctx.grbl() as g:
-        clean_slate(ctx, g)
-        if not fc.status().get("homed"):
+    s0 = fc.settings() or {}
+    ctx.check(s0.get("cloud_enabled") == "1", "cloud mode is off: a camera home needs it on")
+    found = {k: s0.get(k) or "" for k in ("homing_mode", "gfcloud_home_x", "gfcloud_home_y")}
+    ev["found"] = found
+    session_at = None
+
+    def put(k, v):
+        # The controller refuses a setting for a moment after a Grbl client
+        # closes: each is written when it is taken. An empty value unsets it.
+        def write():
+            st_, body_ = fc.post("/settings", params={k: ""}) if v == "" else fc.post("/settings", data={k: v})
+            if st_ != 200:
+                ctx.log("%s=%r -> %s %s", k, v, st_, body_)
+            return st_ == 200 or None
+        return ctx.wait_for(write, 20, poll=0.5) is not None
+
+    try:
+        # A camera home at the origin: the envelope is the bed from the home corner.
+        for k, v in (("homing_mode", "gfcloud"), ("gfcloud_home_x", ""), ("gfcloud_home_y", "")):
+            ctx.check(put(k, v), "%s=%r was not taken", k, v)
+        with ctx.grbl() as g:
+            clean_slate(ctx, g)
+            session_at = session_mark()
             gfhome_homing(ctx, ev, g)
-        ctx.check(fc.status().get("homed"), "the machine is not homed")
-        x_travel = float(grbl_setting(g, "$130"))
-        y_travel = float(grbl_setting(g, "$131"))
-        ev["travel"] = {"x": x_travel, "y": y_travel}
-        k0 = kernel_xy_mm(ctx)
+            judge_whole_motions(ctx, ev, session_at)
+            ctx.check(fc.status().get("homed"), "the machine is not homed")
+            x_travel = float(grbl_setting(g, "$130"))
+            y_travel = float(grbl_setting(g, "$131"))
+            ev["travel"] = {"x": x_travel, "y": y_travel}
+            k0 = kernel_xy_mm(ctx)
 
-        def refused(cmd):
-            lines = g.command(cmd, timeout=2)
-            ctx.sleep(0.5)
-            text = "\n".join(lines) + g.drain()
-            k1 = kernel_xy_mm(ctx)
-            moved = max(abs(k1[0] - k0[0]), abs(k1[1] - k0[1]))
-            st = g.status_report()["state"]
-            rec = {"cmd": cmd, "reply": lines, "alarm": "ALARM:2" in text, "moved_mm": round(moved, 3), "state": st}
-            ctx.log("%s", rec)
-            ctx.check(rec["alarm"], "%s was not refused with ALARM:2: %s", cmd, lines)
-            ctx.check(moved < 0.05, "%s moved the kernel %.3f mm before the alarm", cmd, moved)
-            g.realtime(0x18)
-            ctx.sleep(1.5)
-            g.drain()
-            unlock = g.command("$X")
-            ctx.check(unlock and unlock[-1] == "ok", "$X after the soft-limit alarm: %s", unlock)
-            st = g.status_report()["state"]
-            ctx.check(st.startswith("Idle"), "controller is %s after the recovery", st)
-            return rec
+            def refused(cmd):
+                lines = g.command(cmd, timeout=2)
+                ctx.sleep(0.5)
+                text = "\n".join(lines) + g.drain()
+                k1 = kernel_xy_mm(ctx)
+                moved = max(abs(k1[0] - k0[0]), abs(k1[1] - k0[1]))
+                st = g.status_report()["state"]
+                rec = {"cmd": cmd, "reply": lines, "alarm": "ALARM:2" in text, "moved_mm": round(moved, 3),
+                       "state": st}
+                ctx.log("%s", rec)
+                ctx.check(rec["alarm"], "%s was not refused with ALARM:2: %s", cmd, lines)
+                ctx.check(moved < 0.05, "%s moved the kernel %.3f mm before the alarm", cmd, moved)
+                g.realtime(0x18)
+                ctx.sleep(1.5)
+                g.drain()
+                unlock = g.command("$X")
+                ctx.check(unlock and unlock[-1] == "ok", "$X after the soft-limit alarm: %s", unlock)
+                st = g.status_report()["state"]
+                ctx.check(st.startswith("Idle"), "controller is %s after the recovery", st)
+                return rec
 
-        ev["refused"] = [refused("G90 G1 X%.1f F600" % (x_travel + 5)),
-                         refused("G90 G1 Y%.1f F600" % (y_travel + 5)),
-                         refused("G90 G1 X-1 F600")]
-        # Homed still: the soft-limit alarm and its reset keep the reference.
-        ctx.check(fc.status().get("homed"), "the soft-limit alarm and the reset un-homed the machine")
-        jog = g.command("$J=G91X%.1fF1200" % (x_travel + 5))
-        ev["jog"] = jog
-        ctx.check(any(l.startswith("error:15") for l in jog), "a jog past the bed was not refused with error 15: %s", jog)
-        # The core answers the line after an error with that error again
-        # until an empty line clears it (the sender's acknowledgment).
-        g.command("")
-        g.command("G90 G1 X10 Y10 F600", timeout=0.5)
-        peak, states, st = wait_idle(ctx, g, 20)
-        ev["inside"] = states
-        ctx.check("TIMEOUT" not in states, "a move inside the bed did not run")
-        g.command("G90 G1 X0 Y0 F600", timeout=0.5)
-        wait_idle(ctx, g, 20)
-        k1 = kernel_start(ctx)                  # at rest: grbl's Idle leads the kernel's tail
-        ev["kernel_back_mm"] = [round(k1[0] - k0[0], 3), round(k1[1] - k0[1], 3)]
-        ctx.check(max(abs(k1[0] - k0[0]), abs(k1[1] - k0[1])) < 0.1, "the head did not come back to the corner: %s",
-                  ev["kernel_back_mm"])
+            ev["refused"] = [refused("G90 G1 X%.1f F600" % (x_travel + 5)),
+                             refused("G90 G1 Y%.1f F600" % (y_travel + 5)),
+                             refused("G90 G1 X-1 F600")]
+            # Homed still: the soft-limit alarm and its reset keep the reference.
+            ctx.check(fc.status().get("homed"), "the soft-limit alarm and the reset un-homed the machine")
+            jog = g.command("$J=G91X%.1fF1200" % (x_travel + 5))
+            ev["jog"] = jog
+            ctx.check(any(l.startswith("error:15") for l in jog), "a jog past the bed was not refused with error 15: %s",
+                      jog)
+            # The core answers the line after an error with that error again
+            # until an empty line clears it (the sender's acknowledgment).
+            g.command("")
+            g.command("G90 G1 X10 Y10 F600", timeout=0.5)
+            peak, states, st = wait_idle(ctx, g, 20)
+            ev["inside"] = states
+            ctx.check("TIMEOUT" not in states, "a move inside the bed did not run")
+            g.command("G90 G1 X0 Y0 F600", timeout=0.5)
+            wait_idle(ctx, g, 20)
+            k1 = kernel_start(ctx)                  # at rest: grbl's Idle leads the kernel's tail
+            ev["kernel_back_mm"] = [round(k1[0] - k0[0], 3), round(k1[1] - k0[1], 3)]
+            ctx.check(max(abs(k1[0] - k0[0]), abs(k1[1] - k0[1])) < 0.1, "the head did not come back to the corner: %s",
+                      ev["kernel_back_mm"])
+    finally:
+        for k, v in found.items():
+            ctx.log("restore %s=%r -> %s", k, v, "taken" if put(k, v) else "not taken")
+        if session_at is not None:
+            camera_home_return(ctx, ev, session_at)
     ctx.log("PASS: X max, Y max and X min refused with ALARM:2 and no motion, the jog refused with "
             "error 15, a move inside the bed ran")
 
