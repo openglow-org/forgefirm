@@ -589,6 +589,7 @@ class Takeover:
         self.saved = {}
         self.run = run            # the test's run, whose baseline the head is judged against
         self.cloud = False
+        self.offline = False      # the cloud client found is the offline service
         self.frame = None         # the counters' frame, read before the controller is stopped
         self.found = None         # (counters, microstep mode) once the controller is gone
 
@@ -620,8 +621,12 @@ class Takeover:
         try:
             st, mode = hw.Forgectrl().get("/mode")
             self.cloud = st == 200 and isinstance(mode, dict) and mode.get("mode") == "cloud"
+            self.offline = self.cloud and hw.listens_on(mode.get("pid"), _baseline.OFFLINE_SOCKET)
         except hw.HwError:
             pass
+        if self.offline:
+            log("takeover: the cloud client is the offline service (pid %s); forgectrl's start "
+                "brings it back offline" % mode.get("pid"))
         # The frame is read while the controller runs: its exit takes the
         # anchor with it (forgectrl unlinks it), though not the counters.
         self.frame = _baseline.counter_frame()
@@ -702,6 +707,83 @@ class Takeover:
         if now != was and not _baseline.position_quantized(was, now, _baseline.counter_steps_per_mm()):
             self._record("takeover end", now, was)
 
+    # In cloud mode forgectrl's start at the end starts a cloud client, and
+    # what that client is comes only from the one-start markers gfcloud
+    # reads and takes down as it starts. Started bare, it is the online
+    # client with the service's connect-time hunt, and the moves the
+    # service sends after the hunt are still running as the run ends and
+    # the next one begins, whatever the takeover found. The start is made
+    # under the no-hunt marker, as every client start the runner makes is,
+    # and under the offline marker as well when the takeover found the
+    # offline service; that client is then proven to be the offline
+    # service, and a miss is recorded for the baseline's post pass, which
+    # fails the run.
+    OFFLINE_BACK_S = 60       # the start to the offline service's listener
+
+    def client_markers(self):
+        """(path, name) of the markers forgectrl's start is made under."""
+        if not self.cloud:
+            return []
+        marks = [(_baseline.NOHUNT_MARKER, "no-hunt")]
+        if self.offline:
+            marks.append((_baseline.OFFLINE_MARKER, "offline"))
+        return marks
+
+    def markers_on(self):
+        for path, name in self.client_markers():
+            try:
+                with open(path, "w") as f:
+                    f.write("forgetest takeover %s\n" % self.who)
+            except OSError as e:
+                self.log("takeover: WARNING the %s marker could not be written: %s" % (name, e))
+
+    def wait_offline(self):
+        """The cloud client's pid once it listens on the offline socket, or
+        None after OFFLINE_BACK_S."""
+        deadline = time.time() + self.OFFLINE_BACK_S
+        while True:
+            try:
+                st, m = hw.Forgectrl().get("/mode")
+            except hw.HwError:
+                st, m = None, None
+            pid = m.get("pid") if st == 200 and isinstance(m, dict) else None
+            if hw.listens_on(pid, _baseline.OFFLINE_SOCKET):
+                return pid
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.5)
+
+    def client_back(self, mode):
+        """After forgectrl's start: a marker no client read is taken down
+        (no client started - the gate, standby, a fault - and a later
+        start must not come up under it), and the offline service found is
+        judged against the client that came up."""
+        if not self.cloud:
+            return
+        mode = mode if isinstance(mode, dict) else {}
+        running = mode.get("mode") == "cloud" and mode.get("controller") == "running"
+        pid = self.wait_offline() if self.offline and running else None
+        for path, name in self.client_markers():
+            if (not running or name == "offline") and os.path.exists(path):
+                try:
+                    os.remove(path)
+                    self.log("takeover: the %s marker was never read - taken down" % name)
+                except OSError:
+                    pass
+        if not self.offline:
+            return
+        if pid:
+            self.log("takeover: the cloud client is back as the offline service (pid %s)" % pid)
+            return
+        found = ("a client that is not the offline service (pid %s)" % mode.get("pid") if running
+                 else "no cloud client running (mode %s, controller %s)"
+                 % (mode.get("mode"), mode.get("controller")))
+        cap = self.run.baseline_captured if self.run is not None else None
+        if cap is not None:
+            cap.setdefault("restart_clients", []).append(
+                {"where": "takeover end", "found": found, "expected": "the offline service"})
+        self.log("takeover: the offline service did not come back: %s; recorded as a leftover" % found)
+
     def __exit__(self, exc_type, exc, tb):
         try:
             self.position_at_end()
@@ -709,6 +791,7 @@ class Takeover:
             self.log("takeover: WARNING the head's position could not be judged: %s: %s"
                      % (type(e).__name__, e))
         self.restore_attrs()
+        self.markers_on()
         rc, out = hw.initd("forgectrl", "start")
         self.log("takeover: forgectrl start -> rc %s" % rc)
         try:
@@ -717,7 +800,12 @@ class Takeover:
             pass
         # leave the machine settled for whatever runs next: the probe
         # move done, the controller back (or the ladder's verdict logged)
-        self.wait_settled()
+        mode = self.wait_settled()
+        try:
+            self.client_back(mode)
+        except Exception as e:  # noqa: BLE001 - the judge never breaks the exit path
+            self.log("takeover: WARNING the cloud client could not be judged: %s: %s"
+                     % (type(e).__name__, e))
         return False
 
 

@@ -395,6 +395,44 @@ def pgrep_f(needle):
     return out
 
 
+def listens_on(pid, path):
+    """Process pid holds a listening UNIX socket bound at path: one of its
+    own descriptors is that socket, so a socket file another process left
+    behind does not count. Reads /proc (FORGETEST_PROC_ROOT for tests)."""
+    if not pid:
+        return False
+    proc = os.environ.get("FORGETEST_PROC_ROOT") or "/proc"
+    inodes = set()
+    try:
+        with open(os.path.join(proc, "net", "unix")) as f:
+            next(f, None)                       # the header line
+            for ln in f:
+                # Num RefCount Protocol Flags Type St Inode Path
+                parts = ln.split()
+                try:
+                    if len(parts) >= 8 and parts[7] == path and int(parts[3], 16) & 0x10000:
+                        inodes.add(parts[6])    # __SO_ACCEPTCON: a listener
+                except ValueError:
+                    continue
+    except OSError:
+        return False
+    if not inodes:
+        return False
+    fd_dir = os.path.join(proc, str(pid), "fd")
+    try:
+        fds = os.listdir(fd_dir)
+    except OSError:
+        return False
+    for fd in fds:
+        try:
+            link = os.readlink(os.path.join(fd_dir, fd))
+        except OSError:
+            continue
+        if link.startswith("socket:[") and link[8:-1] in inodes:
+            return True
+    return False
+
+
 def run(cmd, timeout=60):
     """Run a command list; returns (rc, combined output)."""
     try:

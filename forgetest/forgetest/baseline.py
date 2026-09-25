@@ -117,6 +117,12 @@ UNPRESERVED_SETTINGS = ("controller_mode",)
 # service starts its own client with the hunt.
 NOHUNT_MARKER = os.environ.get("FORGETEST_NOHUNT_MARKER", "/run/gfcloud-nohunt")
 
+# The offline service: gfcloud's one-start offline marker and the socket
+# the service listens on while it runs. A takeover that finds it running
+# makes forgectrl's start at its end under the marker again (runner.Takeover).
+OFFLINE_MARKER = os.environ.get("FORGETEST_OFFLINE_MARKER", "/run/gfcloud-offline")
+OFFLINE_SOCKET = os.environ.get("FORGETEST_OFFLINE_SOCKET", "/run/gfcloud-offline.sock")
+
 # Read-only readbacks with their idle values (no direct restore: the state
 # comes right through forgectrl - see restore_forgectrl - or is fatal).
 IDLE_READBACKS = [
@@ -913,6 +919,13 @@ class Baseline:
             left.append(Leftover("position at the %s" % r["where"], r["found"], r["expected"],
                                  "unrestorable: a controller restart re-zeroed the counters there, "
                                  "so the head is not moved"))
+        # The cloud client forgectrl's start brought back at the end of a
+        # takeover, when it is not the one the takeover found (the same
+        # judge, runner.Takeover). The client that came up is left as it
+        # is: the cloud test that needs a client starts its own.
+        for r in captured.get("restart_clients") or []:
+            left.append(Leftover("cloud client at the %s" % r["where"], r["found"], r["expected"],
+                                 "not restored: a cloud test starts the client it needs"))
         was = captured.get("settings")
         if was:
             st, body = self.fc_get("/settings")
