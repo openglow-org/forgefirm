@@ -145,10 +145,9 @@ class CoverageReportTests(unittest.TestCase):
                                              t.covers))
         self.assertTrue(m.non_behavioral("forgectrl", "tools/devserver.py"))
         self.assertFalse(m.non_behavioral("grblhal-glowforge", "tools/devserver.py"))
-        # forgeext's image content is its binary and init script: the packages, the kit, the template and
-        # the host tools are not, and the host's sources are
-        for path in ("packages/alignment/ui/index.html", "sdk/js/ffx-bridge.js", "template/manifest.json",
-                     "tools/ffx"):
+        # forgeext's image content is its binary and init script: the kit, the template, the host tools
+        # and the shared package workflow are not, and the host's sources are
+        for path in ("sdk/js/ffx-bridge.js", "template/manifest.json", "tools/ffx", ".github/actions/kit/action.yml"):
             self.assertTrue(m.non_behavioral("forgeext", path), path)
         for path in ("src/api.c", "init/forgeext.init", "CMakeLists.txt"):
             self.assertFalse(m.non_behavioral("forgeext", path), path)

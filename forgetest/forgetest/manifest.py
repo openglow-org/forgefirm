@@ -94,9 +94,8 @@ NON_BEHAVIORAL = [
     ("*", ".env.example"),
     ("forgectrl", "tools/**"),        # host-side dev tools (panel dev server)
     ("forgectrl", "examples/**"),     # clients of the remote API, run on another computer
-    # forgeext's recipe installs the binary and its init script, and nothing of these: the official
-    # packages carry their own acceptance artifact, and the author's kit and host tools run off the image.
-    ("forgeext", "packages/**"),
+    # forgeext's recipe installs the binary and its init script, and nothing of these: the author's kit
+    # and the host tools run off the image (OpenGlow's own packages have repositories of their own).
     ("forgeext", "sdk/**"),
     ("forgeext", "template/**"),
     ("forgeext", "tools/**"),
