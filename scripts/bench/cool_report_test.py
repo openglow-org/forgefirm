@@ -16,8 +16,11 @@ the null-sink controller against it, and reads every report as it arrives.
   malformed  a value that is not 32 hex digits (short, a letter out of range,
              a CR LF and a header of its own behind it) is never sent, and
              nothing of it reaches the wire
-  runner     the homing runner the controller starts does not inherit the
-             secret, and the reports still carry it afterwards
+  runner     the homing runner the controller starts is handed the secret (it
+             reports in the controller's place while a gfcloud $H holds the
+             machine, and the controller is quiet then), and the reports
+             still carry it afterwards; a controller with no secret, or with
+             one that is not 32 hex digits, hands the runner none
 
 Usage: cool_report_test.py <path-to-grblHAL_glowforge>
 """
@@ -125,7 +128,7 @@ class Controller:
         shutil.rmtree(self.workdir, ignore_errors=True)
 
 
-def run(name, secret, check, runner=False):
+def run(name, secret, check, runner=False, handed=None):
     lis = Listener()
     ctl = Controller(lis, secret, runner_cmd=("env > %s" % "RUNNER_ENV") if runner else None)
     try:
@@ -142,8 +145,11 @@ def run(name, secret, check, runner=False):
             time.sleep(0.3)
             with open(env_file) as f:
                 runner_env = f.read()
-            if "GF_REPORT_SECRET" in runner_env or SECRET in runner_env:
-                fail("[%s] the homing runner inherited the report secret" % name)
+            got = [ln.split("=", 1)[1] for ln in runner_env.splitlines() if ln.startswith("GF_REPORT_SECRET=")]
+            if got != ([handed] if handed else []):
+                fail("[%s] the homing runner was handed %r, not %r" % (name, got, handed))
+            if not handed and SECRET in runner_env:
+                fail("[%s] the secret reached the homing runner another way" % name)
             if "GF_STATE_DIR" not in runner_env:
                 fail("[%s] the runner's environment was not read: %r" % (name, runner_env[:80]))
             s.close()
@@ -184,7 +190,9 @@ def main():
                              SECRET[:16] + "\r\nX-Evil: 1\r\nX-Pad: 12",
                              SECRET[:16] + "\r\nX-Evil: 1\r\nX:1"), 1):     # the last is 32 long
         run("malformed-%d" % i, bad, without)
-    run("runner", SECRET, with_secret, runner=True)
+    run("runner", SECRET, with_secret, runner=True, handed=SECRET)
+    run("runner-none", None, without, runner=True)
+    run("runner-malformed", SECRET[:16] + "\r\nX-Evil: 1\r\nX:1", without, runner=True)
     print("cool_report_test: all passed")
 
 

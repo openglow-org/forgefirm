@@ -271,7 +271,8 @@ TOOLS = [
              "forgectrl's listener: every report carries the secret the supervisor hands the controller at "
              "its spawn (GF_REPORT_SECRET), none does when there is none, a value that is not 32 hex digits "
              "(a CR LF with a header behind it included) never reaches the wire, and the homing runner the "
-             "controller starts does not inherit it. A CI harness (the grblHAL repo): needs the host-built "
+             "controller starts is handed it (it reports in the controller's place during a gfcloud $H), "
+             "and none when the controller has none. A CI harness (the grblHAL repo): needs the host-built "
              "null-sink controller, not the machine, so it is not a bench-page tool."},
     {"id": "mcode-test", "title": "Package M-code barrier harness", "script": "mcode_test.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
