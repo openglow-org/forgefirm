@@ -375,6 +375,7 @@ def _tail_has(fc, needle):
                   "board temperatures (chassis and SoC die in degrees, supply as a raw count, the "
                   "CPU unthrottled) and every run session ends with them ranged into one log line.")
 def gate_off(ctx):
+    from .motion import FORGECTRL_LOG, _log_lines, _log_offset
     fc = ctx.forgectrl
     ev = ctx.evidence
     before = fc.settings()
@@ -428,6 +429,7 @@ def gate_off(ctx):
 
             # Leg 2: the ceiling at its top. Off by value: no gate, verdict
             # back to OK at the next run start, and said out loud.
+            at_off = _log_offset(FORGECTRL_LOG)      # the off gate's line is one written after this
             _set_gates(ctx, fc, {"cool_temp_max": str(top), "cool_temp_resume": orig["cool_temp_resume"]})
             state, val = _gate_state(fc, "cool_temp_max")
             ev["off_state"] = state
@@ -439,13 +441,17 @@ def gate_off(ctx):
                       c.get("gates_off"))
             s_off = fc.status().get("gates_off")
             ctx.check(s_off == ["coolant_max"], "/status gates_off %s, expected [coolant_max]", s_off)
-            ctx.check(_tail_has(fc, "gate coolant_max OFF: cool_temp_max = %g" % top),
+            # A log line reaches the file a moment after the engine acts.
+            line = "gate coolant_max OFF: cool_temp_max = %g" % top
+            ctx.wait_for(lambda: bool(_log_lines(FORGECTRL_LOG, at_off, line)), 5, poll=0.25)
+            ctx.check(_log_lines(FORGECTRL_LOG, at_off, line),
                       "the run-start log line for the off gate is missing from the forgectrl log")
 
             # Restore, and prove the restore: the next run start reloads.
             _set_gates(ctx, fc, orig)
             restored = True
             state, val = _gate_state(fc, "cool_temp_max")
+            at_restore = _log_offset(FORGECTRL_LOG)  # the session's run-end line is one written after this
             c = _run_session(ctx, grbl, fc, lambda c: c.get("verdict") == "OK" and not c.get("gates_off"),
                              "restored")
             ev["restored"] = c
@@ -454,7 +460,10 @@ def gate_off(ctx):
             ctx.log("restored ceiling %s reports state %s", val, state)
             # Every run session ends with the board temperatures ranged
             # into one line.
-            ctx.check(_tail_has(fc, "temps this job: chassis ") and _tail_has(fc, ", soc "),
+            ctx.wait_for(lambda: bool(_log_lines(FORGECTRL_LOG, at_restore, "temps this job: chassis ")), 5, poll=0.25)
+            temps = _log_lines(FORGECTRL_LOG, at_restore, "temps this job: chassis ")
+            ev["temps_line"] = temps[-1] if temps else None
+            ctx.check(temps and ", soc " in temps[-1],
                       "the run-end board-temperature line (chassis, soc, supply) is missing from the "
                       "forgectrl log")
         finally:
@@ -519,6 +528,7 @@ def _hold_session(ctx, g, fc, until, what, wait):
                   "run-start log line, and the session reads OK. Restored, everything reads as "
                   "before.")
 def floor_and_warm_up(ctx):
+    from .motion import FORGECTRL_LOG, _log_lines, _log_offset
     fc = ctx.forgectrl
     ev = ctx.evidence
     before = fc.settings()
@@ -544,6 +554,7 @@ def floor_and_warm_up(ctx):
             # Leg 1: the warm-up hold and its release. The gate sits just
             # above the loop, so the heater reaches it in a few minutes.
             gate = round(up + WARMUP_ABOVE_C, 1)
+            at_warmup = _log_offset(FORGECTRL_LOG)   # the release line is one written after this
             _set_gates(ctx, fc, {"cool_temp_start": str(gate), "cool_temp_min": orig["cool_temp_min"]})
             c = _hold_session(ctx, grbl, fc, lambda c: c.get("verdict") == "WARMUP", "warm-up hold", VERDICT_WAIT_S)
             ev["warmup_hold"] = c
@@ -582,7 +593,11 @@ def floor_and_warm_up(ctx):
             ev["run_duty"] = duty
             ctx.check(heater == 0, "the loop heater stayed on after the release (%s=%s)", HEATER_PWM, heater)
             ctx.check(duty != IDLE_DUTY, "the run fans did not come up at the release: %s", duty)
-            ctx.check(_tail_has(fc, "warm-up complete: coolant "), "the warm-up release line is missing from the forgectrl log")
+            # A log line reaches the file a moment after the engine acts.
+            line = "warm-up complete: coolant "
+            ctx.wait_for(lambda: bool(_log_lines(FORGECTRL_LOG, at_warmup, line)), 5, poll=0.25)
+            ctx.check(_log_lines(FORGECTRL_LOG, at_warmup, line),
+                      "the warm-up release line is missing from the forgectrl log")
             grbl.command("M9")
             _session_ended(ctx, fc, "warm-up")
 
@@ -600,6 +615,7 @@ def floor_and_warm_up(ctx):
                       c.get("gates_off"))
 
             # Leg 3: both at zero: off, said so, and the session reads OK.
+            at_min_off = _log_offset(FORGECTRL_LOG)  # the floor's off line is one written after this
             _set_gates(ctx, fc, {"cool_temp_start": "0", "cool_temp_min": "0"})
             c = _run_session(ctx, grbl, fc, lambda c: c.get("verdict") == "OK" and len(c.get("gates_off") or []) == 2,
                              "both off")
@@ -607,7 +623,9 @@ def floor_and_warm_up(ctx):
             ctx.check(c.get("verdict") == "OK", "gates at 0 did not clear the hold: %s", c)
             ctx.check(sorted(c.get("gates_off") or []) == ["coolant_min", "warm_up"],
                       "gates_off %s, expected [coolant_min, warm_up]", c.get("gates_off"))
-            ctx.check(_tail_has(fc, "gate coolant_min OFF: cool_temp_min = 0"),
+            line = "gate coolant_min OFF: cool_temp_min = 0"
+            ctx.wait_for(lambda: bool(_log_lines(FORGECTRL_LOG, at_min_off, line)), 5, poll=0.25)
+            ctx.check(_log_lines(FORGECTRL_LOG, at_min_off, line),
                       "the run-start log line for the floor off is missing from the forgectrl log")
 
             # Restore, and prove the restore at the next run start.
@@ -656,6 +674,7 @@ TEC_WAIT_S = 20             # settings re-read at run start, 1 Hz ticks
                   "The cross-check keeps off under on. The line has no readback, so the last written value is "
                   "what the test reads; the drive rule is the engine's, never the cloud's.")
 def tec_drive(ctx):
+    from .motion import FORGECTRL_LOG, _log_lines, _log_offset
     fc = ctx.forgectrl
     ev = ctx.evidence
     before = fc.settings()
@@ -681,6 +700,7 @@ def tec_drive(ctx):
             _set_gates(ctx, fc, {"cool_tec_present": "1", "cool_tec_on_c": str(on_c),
                                  "cool_tec_off_c": str(off_c)})
             ctx.check(_cool(fc).get("phase") != "run", "a run session is already open")
+            off = _log_offset(FORGECTRL_LOG)     # the TEC-on line is one written after this
             grbl.command("M8")
             t0 = time.time()
             tec = 0
@@ -692,7 +712,11 @@ def tec_drive(ctx):
             ev["tec_on_after_s"] = round(time.time() - t0)
             ctx.log("fitted, in session: %s=%s after %s s", TEC_ATTR, tec, ev["tec_on_after_s"])
             ctx.check(tec == 1, "the TEC did not come on in a run session with its threshold under the loop")
-            ctx.check(_tail_has(fc, "TEC on: coolant "), "the TEC-on line is missing from the forgectrl log")
+            # The engine writes the line first and logs it after, and the log
+            # line reaches the file a moment later still.
+            ctx.wait_for(lambda: bool(_log_lines(FORGECTRL_LOG, off, "TEC on: coolant ")), 5, poll=0.25)
+            ev["tec_on_line"] = (_log_lines(FORGECTRL_LOG, off, "TEC on: coolant ") or [None])[0]
+            ctx.check(ev["tec_on_line"], "the TEC-on line is missing from the forgectrl log")
             grbl.command("M9")
             _session_ended(ctx, fc, "tec leg 1")
             t0 = time.time()
@@ -1002,6 +1026,7 @@ def crash_watch_plumbing(ctx):
                   "value (gates_off names it) and the ceiling alone pauses; restored, the next "
                   "session runs OK with nothing off.")
 def critical_tier(ctx):
+    from .motion import FORGECTRL_LOG, _log_lines, _log_offset
     fc = ctx.forgectrl
     ev = ctx.evidence
     before = fc.settings()
@@ -1078,6 +1103,7 @@ def critical_tier(ctx):
 
             # Leg 2: the critical line at its top is the gate off; the
             # ceiling alone pauses, and gates_off says so.
+            at_off = _log_offset(FORGECTRL_LOG)      # the off gate's line is one written after this
             _set_gates(ctx, fc, {"cool_temp_critical_c": str(top)})
             c = _run_session(ctx, grbl, fc,
                              lambda c: c.get("verdict") == "OVERTEMP" and "coolant_critical" in (c.get("gates_off") or []),
@@ -1087,7 +1113,10 @@ def critical_tier(ctx):
                       "with the critical line off the ceiling did not pause (verdict %s): %s", c.get("verdict"), c)
             ctx.check("coolant_critical" in (c.get("gates_off") or []),
                       "gates_off %s lacks coolant_critical", c.get("gates_off"))
-            ctx.check(_tail_has(fc, "gate coolant_critical OFF: cool_temp_critical_c = %g" % top),
+            # A log line reaches the file a moment after the engine acts.
+            line = "gate coolant_critical OFF: cool_temp_critical_c = %g" % top
+            ctx.wait_for(lambda: bool(_log_lines(FORGECTRL_LOG, at_off, line)), 5, poll=0.25)
+            ctx.check(_log_lines(FORGECTRL_LOG, at_off, line),
                       "the run-start log line for the off gate is missing from the forgectrl log")
 
             # Restore, and prove it: OK, nothing off.
@@ -1386,6 +1415,7 @@ def flow_under_load(ctx):
                   "loss and its put-back, and the session stays OK with no airflow fault (a fan put "
                   "back gets its spin-up grace). Then M9 and the idle duties.")
 def fan_duty_readback(ctx):
+    from .motion import FORGECTRL_LOG, _log_lines, _log_offset
     fc = ctx.forgectrl
     ev = ctx.evidence
     run = {"head/air_assist_pwm": 1023, "thermal/exhaust_pwm": 65535, "thermal/intake_pwm": 43278}
@@ -1399,6 +1429,7 @@ def fan_duty_readback(ctx):
             ev["run_duties"] = before
             ctx.check(all(before.get(k) == v for k, v in run.items()),
                       "not every fan reads its run duty: %s", before)
+            at_loss = _log_offset(FORGECTRL_LOG)     # the put-back lines are ones written after this
             hw.sysfs_write("head/air_assist_pwm", 204)
             hw.sysfs_write("thermal/exhaust_pwm", 0)
             lost = {k: hw.sysfs_int(k) for k in ("head/air_assist_pwm", "thermal/exhaust_pwm")}
@@ -1416,9 +1447,13 @@ def fan_duty_readback(ctx):
             ctx.check(back.get("head/air_assist_pwm") == 1023, "the air-assist duty was not put back: %s", back)
             ctx.check(back.get("thermal/exhaust_pwm") == 65535, "the exhaust duty was not put back: %s", back)
             ctx.sleep(2)
-            ctx.check(_tail_has(fc, "head/air_assist_pwm read 204 with 1023 commanded: put back"),
+            line = "head/air_assist_pwm read 204 with 1023 commanded: put back"
+            ctx.wait_for(lambda: bool(_log_lines(FORGECTRL_LOG, at_loss, line)), 5, poll=0.25)
+            ctx.check(_log_lines(FORGECTRL_LOG, at_loss, line),
                       "the air-assist loss is not named in the log")
-            ctx.check(_tail_has(fc, "thermal/exhaust_pwm read 0 with 65535 commanded: put back"),
+            line = "thermal/exhaust_pwm read 0 with 65535 commanded: put back"
+            ctx.wait_for(lambda: bool(_log_lines(FORGECTRL_LOG, at_loss, line)), 5, poll=0.25)
+            ctx.check(_log_lines(FORGECTRL_LOG, at_loss, line),
                       "the exhaust loss is not named in the log")
             for _ in range(8):
                 ctx.sleep(1)

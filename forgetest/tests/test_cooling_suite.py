@@ -26,7 +26,28 @@ import unittest
 
 import helpers
 from forgetest.runner import Context, Failed, Run
-from forgetest.suite import cooling
+from forgetest.suite import cooling, motion
+
+
+class EngineLog:
+    """The engine's log lines, as the tests read them: appended to a scratch
+    forgectrl log (a check reads the lines written after its mark) and to the
+    fake /logs/tail."""
+
+    def log_setup(self):
+        self.logdir = tempfile.mkdtemp(prefix="forgetest-cool-")
+        self.saved_log = motion.FORGECTRL_LOG
+        motion.FORGECTRL_LOG = os.path.join(self.logdir, "forgectrl.log")
+        open(motion.FORGECTRL_LOG, "w").close()
+
+    def log_teardown(self):
+        motion.FORGECTRL_LOG = self.saved_log
+        shutil.rmtree(self.logdir, ignore_errors=True)
+
+    def emit(self, text):
+        self.fc.state.setdefault("logs_tail", {"text": ""})["text"] += text
+        with open(motion.FORGECTRL_LOG, "a", encoding="utf-8") as f:
+            f.write(text)
 
 
 class FakeGrbl:
@@ -256,7 +277,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class GateOffTests(unittest.TestCase):
+class GateOffTests(EngineLog, unittest.TestCase):
     """cooling.gate-off against a scripted engine: the fake forgectrl
     re-reads the ceiling at every M8 (as the engine reloads its tunables
     at run start), trips OVERTEMP when the coolant is over it, skips the
@@ -267,6 +288,7 @@ class GateOffTests(unittest.TestCase):
 
     def setUp(self):
         self.fc = helpers.FakeForgectrl().start()
+        self.log_setup()
         self.grbl = FakeGrbl()
         self.saved = (cooling.VERDICT_WAIT_S, cooling.SESSION_END_WAIT_S)
         cooling.VERDICT_WAIT_S = 3
@@ -292,6 +314,7 @@ class GateOffTests(unittest.TestCase):
         cooling.VERDICT_WAIT_S, cooling.SESSION_END_WAIT_S = self.saved
         self.grbl.close()
         self.fc.stop()
+        self.log_teardown()
 
     # -- the scripted machine --------------------------------------------------
     def ceiling(self):
@@ -327,7 +350,7 @@ class GateOffTests(unittest.TestCase):
                 time.sleep(0.3)
                 cool["phase"] = "smoke"
                 if self.temps_line:
-                    self.fc.state["logs_tail"]["text"] += (
+                    self.emit(
                         "Aug 22 12:00:30 forgectrl: cool: temps this job: chassis 29.0..29.4 C, "
                         "soc 42.8..47.1 C, supply raw 587..592\n")
                 time.sleep(0.2)
@@ -341,7 +364,7 @@ class GateOffTests(unittest.TestCase):
         v = self.ceiling()
         off = v >= self.TOP
         if off and self.log_line:
-            self.fc.state["logs_tail"]["text"] += (
+            self.emit(
                 "Aug 21 12:00:00 forgectrl: cool: gate coolant_max OFF: cool_temp_max = 60 "
                 "(the high end of 5 to 60; recommended 25 to 38, default 33)\n")
         gates_off = ["coolant_max"] if off and self.report_off else []
@@ -418,6 +441,18 @@ class GateOffTests(unittest.TestCase):
         self.assertIn("run-start log line", str(cm.exception))
         self.assertEqual(self.fc.state["settings"]["cool_temp_max"], "")
 
+    def test_an_earlier_runs_line_is_not_this_runs(self):
+        # The off gate's line from a run before this one is in the log, and
+        # the engine writes none this time: the line judged is one written
+        # after the test's own mark, so the old one does not pass for it.
+        self.emit("Aug 21 11:00:00 forgectrl: cool: gate coolant_max OFF: cool_temp_max = 60 "
+                  "(the high end of 5 to 60; recommended 25 to 38, default 33)\n")
+        self.log_line = False
+        with self.assertRaises(Failed) as cm:
+            self.run_test()
+        self.assertIn("run-start log line", str(cm.exception))
+        self.assertEqual(self.fc.state["settings"]["cool_temp_max"], "")
+
     def test_a_missing_run_end_temperature_line_fails(self):
         self.temps_line = False
         with self.assertRaises(Failed) as cm:
@@ -433,7 +468,7 @@ class GateOffTests(unittest.TestCase):
         self.assertEqual(self.fc.state["settings"]["cool_temp_max"], "30")
 
 
-class CriticalTierTests(unittest.TestCase):
+class CriticalTierTests(EngineLog, unittest.TestCase):
     """cooling.critical-tier against a scripted engine: two tiers on the
     coolant, the fail tier winning over the pause tier in a run session
     and ending with it, the critical line off at its top, and the settings
@@ -448,6 +483,7 @@ class CriticalTierTests(unittest.TestCase):
 
     def setUp(self):
         self.fc = helpers.FakeForgectrl().start()
+        self.log_setup()
         self.grbl = FakeGrbl()
         self.saved = (cooling.VERDICT_WAIT_S, cooling.SESSION_END_WAIT_S)
         cooling.VERDICT_WAIT_S = 3
@@ -471,6 +507,7 @@ class CriticalTierTests(unittest.TestCase):
         cooling.VERDICT_WAIT_S, cooling.SESSION_END_WAIT_S = self.saved
         self.grbl.close()
         self.fc.stop()
+        self.log_teardown()
 
     def setting(self, key):
         v = self.fc.state["settings"].get(key) or ""
@@ -523,7 +560,7 @@ class CriticalTierTests(unittest.TestCase):
         crit_off = tcrit >= self.ROWS["cool_temp_critical_c"][3]
         off = ["coolant_critical"] if crit_off else []
         if crit_off:
-            self.fc.state["logs_tail"]["text"] += (
+            self.emit(
                 "Aug 22 12:00:00 forgectrl: cool: gate coolant_critical OFF: cool_temp_critical_c = 70 "
                 "(the high end of 6 to 70; recommended 36 to 45, default 38)\n")
         if self.faults and not crit_off and self.UP >= tcrit:
