@@ -434,22 +434,29 @@ class BaselineTests(unittest.TestCase):
              "forgectrl": {"/settings": {"xy_microsteps": "16"}}}))
 
     def test_stale_preconfig_reference_is_retaken_on_a_fresh_boot(self):
+        # Both sides of BOOT_MAX_AGE_S, with the uptime held: read from the host, it can cross the limit
+        # between boot_reference()'s reading and the test's (it did, on a CI runner 600 s after its boot).
         os.environ["FORGETEST_BOOT_ID"] = "test-boot-2"
+        real = baseline.uptime_s
         try:
-            path = os.path.join(self.tmp, "boot-test-boot-2.json")
-            with open(path, "w") as f:
-                json.dump({"ts": "old", "sysfs": {"cnc/motor_lock": "0", "cnc/step_freq": "10000",
-                                                     "cnc/y_mode": "1"}}, f)
-            ref = baseline.boot_reference(self.lines.append, self.tmp)
-            up = baseline.uptime_s()
-            if up is None or up > baseline.BOOT_MAX_AGE_S:
-                # too old to retake: the stale reference stands, marked
-                self.assertTrue(any("predates the controller's config" in l for l in self.lines))
-                self.assertEqual(ref["ts"], "old")
-            else:
-                self.assertTrue(any("retaking" in l for l in self.lines))
-                self.assertEqual(ref["sysfs"]["cnc/motor_lock"], "0")
+            for up, fresh in ((baseline.BOOT_MAX_AGE_S - 60, True), (baseline.BOOT_MAX_AGE_S + 60, False)):
+                self.lines.clear()
+                path = os.path.join(self.tmp, "boot-test-boot-2.json")
+                with open(path, "w") as f:
+                    json.dump({"ts": "old", "sysfs": {"cnc/motor_lock": "0", "cnc/step_freq": "10000",
+                                                         "cnc/y_mode": "1"}}, f)
+                baseline.uptime_s = lambda up=up: up
+                ref = baseline.boot_reference(self.lines.append, self.tmp)
+                if fresh:
+                    self.assertTrue(any("retaking" in l for l in self.lines), self.lines)
+                    self.assertNotEqual(ref["ts"], "old")
+                    self.assertEqual(ref["sysfs"]["cnc/motor_lock"], "0")
+                else:
+                    # too old to retake: the stale reference stands, marked
+                    self.assertTrue(any("predates the controller's config" in l for l in self.lines), self.lines)
+                    self.assertEqual(ref["ts"], "old")
         finally:
+            baseline.uptime_s = real
             os.environ.pop("FORGETEST_BOOT_ID", None)
 
 
