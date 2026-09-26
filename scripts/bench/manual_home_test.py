@@ -25,19 +25,23 @@ operator's own $ME or a manual $H energizes it:
   6. the port's panel operations (release, energize, home) do the same with
      a sender connected, and the sender's response count stays exact; home
      is refused unless homing_mode = manual
-  7. manual_home_x and manual_home_y: the coordinate the stop blocks stand
-     for, the origin by default and never negative; the envelope starts at
-     the blocks, and an out-of-range offset is clamped
+  7. manual_home_x and manual_home_y: how far in front of the stop blocks
+     the origin lies, never negative. With an offset the head at the blocks
+     is declared at minus it and jogs to the origin, dark, before $H
+     answers, through the sender and through the port; the envelope starts
+     at the origin, and an out-of-range offset is clamped; a jog cancel
+     ends the move short of the origin and $H says where it stopped
   9. a controller that starts over a released gantry (the marker in the
      state directory) comes up locked and writes no current until $ME
   8. each provider reads its own offsets and no other's: with both pairs set,
-     a manual home declares manual_home_* and a camera home declares
+     a manual home declares minus manual_home_* and a camera home declares
      gfcloud_home_*, which may be negative, with the envelope reaching back
      to it
 
 Usage: manual_home_test.py [path/to/grblHAL_glowforge]
 """
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -103,6 +107,15 @@ class Session:
             return 0
         return sum(1 for b in data if not b & 0x80 and b & 0x35)
 
+    def fire_ticks(self):
+        """FIRE ticks shipped so far."""
+        try:
+            with open(self.dump, "rb") as f:
+                data = f.read()
+        except OSError:
+            return 0
+        return sum(1 for b in data if not b & 0x80 and b & 0x10)
+
     def attr_writes(self):
         """The X and Y step-current writes the hardware would have got, in
         order, as (x, y) pairs: ("0", "0") is a release, ("33", "5") the hold
@@ -148,6 +161,18 @@ class Session:
         self.stop.set()
         self.pub.join(2)
         shutil.rmtree(self.workdir, ignore_errors=True)
+
+
+def declared(s):
+    """The position the last manual home with an offset told the sender the
+    head stood at, on the step grid, or None."""
+    with s.sender.lock:
+        lines = list(s.sender.other)
+    for line in reversed(lines):
+        m = re.search(r"Manual home: the head is at X(-?[0-9.]+) Y(-?[0-9.]+); moving it to the origin", line)
+        if m:
+            return float(m.group(1)), float(m.group(2))
+    return None
 
 
 def refused(s, line):
@@ -368,49 +393,107 @@ def test_restart_while_released(s):
 
 
 def test_stop_block_offsets(s):
-    """manual_home_x and _y are the coordinate the stop blocks stand for: the
-    origin by default, never negative, and the wall the envelope starts at."""
+    """manual_home_x and _y are how far in front of the stop blocks the origin
+    lies, never negative: the head at the blocks is declared at minus them and
+    jogs to the origin, dark, before $H answers, and the envelope starts at
+    the origin."""
     s.sender.wait_state("Idle")
     s.set_mode("manual", "manual_home_x = 12.5\nmanual_home_y = 8\n")
+    s.sender.send("M3 S100")                    # a modal beam the jog must not carry
+    ticks, fire = s.motion_ticks(), s.fire_ticks()
     if s.sender.send("$H") != "ok":
         fail("[offsets] $H under manual with offsets was refused")
-    st = s.port.state()
-    if abs(st["mpos"][0] - 12.5) > 0.01 or abs(st["mpos"][1] - 8.0) > 0.01:
-        fail("[offsets] the home declared %r, not (12.5, 8)" % st["mpos"][:2])
+    st = s.port.state()                         # $H answers once the head has stopped
+    s.sender.send("M5")
+    if st["state"] != "Idle" or st["mpos"][0] != 0 or st["mpos"][1] != 0:
+        fail("[offsets] the head was not idle at the origin when $H answered: %r" % st)
+    if st["homed"] & 3 != 3:
+        fail("[offsets] X and Y are not marked homed: %r" % st)
+    d = declared(s)
+    if d is None or abs(d[0] + 12.5) > 0.01 or abs(d[1] + 8.0) > 0.01:
+        fail("[offsets] the sender was told the head stood at %r, not (-12.5, -8)" % (d,))
+    if s.motion_ticks() == ticks:
+        fail("[offsets] the move to the origin shipped nothing")
+    if s.fire_ticks() != fire:
+        fail("[offsets] the move to the origin shipped %d FIRE ticks" % (s.fire_ticks() - fire))
     if s.sender.send("$J=G91 X5 Y5 F3000") != "ok":
-        fail("[offsets] a jog from the blocks onto the bed was refused")
+        fail("[offsets] a jog from the origin onto the bed was refused")
     s.sender.wait_state("Idle")
     if s.sender.send("$J=G91 X-5 Y-5 F3000") != "ok":
-        fail("[offsets] the jog back to the blocks was refused")
+        fail("[offsets] the jog back to the origin was refused")
     s.sender.wait_state("Idle")
     for line in ("$J=G91 X-1 F600", "$J=G91 Y-1 F600"):
         r = refused(s, line)
         if r != "error:15":
-            fail("[offsets] %s, behind the blocks, got %r, not error:15" % (line, r))
+            fail("[offsets] %s, behind the origin, got %r, not error:15" % (line, r))
     s.set_mode("manual", "manual_home_x = -10.3\nmanual_home_y = 1e9\n")
-    if s.sender.send("$H") != "ok":
+    if s.sender.send("$H", timeout=30.0) != "ok":
         fail("[offsets] $H with out-of-range offsets was refused")
     st = s.port.state()
-    if st["mpos"][0] != 0 or st["mpos"][1] > 1000:
-        fail("[offsets] a negative or oversized offset was not clamped: %r" % st["mpos"][:2])
+    if st["mpos"][0] != 0 or st["mpos"][1] != 0:
+        fail("[offsets] the head did not end at the origin: %r" % st["mpos"][:2])
+    d = declared(s)
+    if d is None or d[0] != 0 or abs(d[1] + 279.0) > 0.01:
+        fail("[offsets] a negative offset and an oversized one declared %r, not (0, -279)" % (d,))
+    # The panel's Set home here: the port answers once the head has stopped,
+    # and the sender's count stays exact.
+    s.set_mode("manual", "manual_home_x = 12.5\nmanual_home_y = 8\n")
+    s.quiet()
+    before = s.sender.count()
+    if s.port.request("home") != "ok":
+        fail("[offsets] the port's home with offsets was refused")
+    st = s.port.state()
+    if st["state"] != "Idle" or st["mpos"][0] != 0 or st["mpos"][1] != 0:
+        fail("[offsets] the head was not idle at the origin when the port's home answered: %r" % st)
+    if s.sender.count() != before:
+        fail("[offsets] the sender got %d responses for the port's home" % (s.sender.count() - before))
     s.set_mode("manual")
-    print("PASS [offsets]: a manual home declared (12.5, 8), the envelope started at the blocks, "
-          "a negative offset became the origin and an oversized one the axis travel")
+    print("PASS [offsets]: a manual home declared (-12.5, -8) and jogged to the origin before $H "
+          "answered, dark under a modal M3; the envelope started at the origin; a negative offset "
+          "became 0 and an oversized one the axis travel; the port's home answered at the origin")
+
+
+def test_origin_jog_cancel(s):
+    """A jog cancel during a manual home's move to the origin ends the move at
+    once, as it ends any jog, though the core's main loop is waiting for $H:
+    $H answers with the head short of the origin, and the sender is told
+    where it stopped."""
+    s.sender.wait_state("Idle")
+    s.set_mode("manual", "manual_home_y = 250\n")
+    n = s.sender.count()
+    s.sender.sock.sendall(("$H" + s.sender.eol).encode())
+    time.sleep(0.4)                             # into a move of about 1.6 s
+    s.sender.realtime(b"\x85")
+    end = time.time() + 5.0
+    while time.time() < end and s.sender.count() == n:
+        time.sleep(0.01)
+    with s.sender.lock:
+        r = s.sender.responses[n] if len(s.sender.responses) > n else None
+    st = s.port.state()
+    s.set_mode("manual")
+    if r != "ok":
+        fail("[origin-cancel] $H got %r" % r)
+    if st["state"] != "Idle" or st["mpos"][1] > -10.0:
+        fail("[origin-cancel] the jog cancel did not stop the move short of the origin: %r" % st)
+    if not s.sender.saw("Manual home: the move to the origin stopped at"):
+        fail("[origin-cancel] the sender was not told where the move stopped")
+    print("PASS [origin-cancel]: a jog cancel 0.4 s into the move to the origin stopped it at Y%.1f; "
+          "$H answered ok and said where it stopped" % st["mpos"][1])
 
 
 def test_offsets_belong_to_their_provider(s):
-    """Both pairs set at once: a manual home declares manual_home_* and never
-    looks at gfcloud_home_*, and a camera home (a stand-in runner that exits 0)
-    declares gfcloud_home_* and never looks at manual_home_*. A camera home may
-    lie behind the origin, and the envelope reaches back to it."""
+    """Both pairs set at once: a manual home declares minus manual_home_* and
+    never looks at gfcloud_home_*, and a camera home (a stand-in runner that
+    exits 0) declares gfcloud_home_* and never looks at manual_home_*. A camera
+    home may lie behind the origin, and the envelope reaches back to it."""
     both = "manual_home_x = 7\nmanual_home_y = 9\ngfcloud_home_x = -4.5\ngfcloud_home_y = 3.25\n"
     s.sender.wait_state("Idle")
     s.set_mode("manual", both)
     if s.sender.send("$H") != "ok":
         fail("[own-offsets] the manual home was refused")
-    st = s.port.state()
-    if abs(st["mpos"][0] - 7.0) > 0.01 or abs(st["mpos"][1] - 9.0) > 0.01:
-        fail("[own-offsets] a manual home declared %r, not its own (7, 9)" % st["mpos"][:2])
+    d = declared(s)
+    if d is None or abs(d[0] + 7.0) > 0.01 or abs(d[1] + 9.0) > 0.01:
+        fail("[own-offsets] a manual home declared %r, not its own (-7, -9)" % (d,))
     s.set_mode("gfcloud", both)
     if s.sender.send("$H", timeout=30.0) != "ok":
         fail("[own-offsets] the camera home (stand-in runner) was refused")
@@ -431,7 +514,7 @@ def test_offsets_belong_to_their_provider(s):
     if r != "error:15":
         fail("[own-offsets] a jog to Y-0.75, off the bed, got %r, not error:15" % r)
     s.set_mode("manual")
-    print("PASS [own-offsets]: with both pairs set, a manual home declared (7, 9) and a camera home "
+    print("PASS [own-offsets]: with both pairs set, a manual home declared (-7, -9) and a camera home "
           "(-4.5, 3.25); the envelope reached back to the camera home on X and stopped at the origin on Y")
 
 
@@ -448,6 +531,7 @@ def main():
         test_port_panel_ops(s)
         test_restart_while_released(s)
         test_stop_block_offsets(s)
+        test_origin_jog_cancel(s)
         test_offsets_belong_to_their_provider(s)
     finally:
         s.close()

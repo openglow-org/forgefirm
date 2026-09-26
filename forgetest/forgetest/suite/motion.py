@@ -1995,39 +1995,38 @@ def motor_release(ctx):
             "energized with no fault, and the liveness probe and the witnessed jogs say the drivers are alive")
 
 
-@test("homing.manual", title="Manual home: $H declares the stop-block position and moves nothing",
-      subsystem="motion", kind="auto", mode="grbl", est_min=4,
+@test("homing.manual", title="Manual home: $H declares the stop-block position and jogs to an offset origin",
+      subsystem="motion", kind="auto", mode="grbl", est_min=5,
       covers=_MOTION_COVERS + [("forgectrl", "src/status.*"), ("forgectrl", "src/main.c")],
       requires=["motion.jog-roundtrip"],
-      steps=["Bed clear; the head needs 30 mm of free +X travel."],
-      description="With homing_mode = manual, $H ships nothing (the kernel's position record shows no "
-                  "byte played across it), sets X and Y to manual_home_x and manual_home_y (the origin "
-                  "when they are unset) where the head stands, marks X and Y homed with their soft "
-                  "limits on (a jog past the envelope is refused with error 15), leaves Z where it "
-                  "was, tells the sender the home was set by hand, and the anchor's source reads back "
-                  "as manual through forgectrl. Whatever a check decides, the false reference is "
-                  "dropped and the head returned before the machine is handed back.")
+      steps=["Bed clear; the head needs 35 mm of free +X travel and 3 mm of free +Y travel."],
+      description="With homing_mode = manual and no manual home offset, $H ships nothing (the kernel's "
+                  "position record shows no byte played across it), sets X and Y to X0 Y0 where the head "
+                  "stands, marks X and Y homed with their soft limits on (a jog past the envelope is "
+                  "refused with error 15), leaves Z where it was, tells the sender the home was set by "
+                  "hand, and the anchor's source reads back as manual through forgectrl. With "
+                  "manual_home_x = 5 and manual_home_y = 3, $H declares the head at X-5 Y-3, says so, and "
+                  "jogs it to X0 Y0 before it answers: the kernel plays the move, Grbl and forgectrl both "
+                  "read X0 Y0, and the envelope starts at the origin. Whatever a check decides, the "
+                  "settings are restored, the false reference is dropped and the head returned before the "
+                  "machine is handed back.")
 def manual_home(ctx):
     ev = ctx.evidence
     fc = hw.Forgectrl()
     settings = fc.settings() or {}
-    ev["homing_mode"] = settings.get("homing_mode")
-    want = []
-    for key in ("manual_home_x", "manual_home_y"):
-        try:
-            want.append(float(settings.get(key) or 0.0))
-        except ValueError:
-            want.append(0.0)
-    ev["manual_home"] = want
-    moved_out = False
-    st, body = fc.post("/settings", data={"homing_mode": "manual"})
-    ctx.check(st == 200, "homing_mode=manual -> %s %s", st, body)
+    keys = ("homing_mode", "manual_home_x", "manual_home_y")
+    ev["found"] = {k: settings.get(k) for k in keys}
+    offset = (5.0, 3.0)
+    moved = None                                # how far the head is from where the run found it
+    for k, v in (("homing_mode", "manual"), ("manual_home_x", ""), ("manual_home_y", "")):
+        st, body = (fc.post("/settings", data={k: v}) if v else fc.post("/settings", params={k: ""}))
+        ctx.check(st == 200, "%s=%r -> %s %s", k, v, st, body)
     try:
         with ctx.grbl() as g:
             clean_slate(ctx, g)
             r = g.command("$J=G91X30F2400")         # away from wherever the origin was
             ctx.check(not any(x.startswith("error") for x in r), "the outbound jog was refused: %s", r)
-            moved_out = True
+            moved = [30.0, 0.0]
             wait_idle(ctx, g)
             z0 = g.status_report()["MPos"][2]
             ctx.sleep(1.5)                          # the kernel has played the jog's tail
@@ -2045,47 +2044,88 @@ def manual_home(ctx):
                     rep["state"], rep["MPos"], k0, k1, ev["homed_axes"], ev["home_source"], ev["pos"])
             ctx.check(k1[3:] == k0[3:], "$H played pulse bytes: %s -> %s", k0[3:], k1[3:])
             ctx.check(k1[0] == 0 and k1[1] == 0, "the kernel counters were not cleared: %s", k1)
-            ctx.check(abs(rep["MPos"][0] - want[0]) < 0.01 and abs(rep["MPos"][1] - want[1]) < 0.01,
-                      "X and Y are %s, not manual_home %s", rep["MPos"][:2], want)
+            ctx.check(rep["MPos"][0] == 0 and rep["MPos"][1] == 0, "X and Y are %s, not X0 Y0", rep["MPos"][:2])
             ctx.check(rep["MPos"][2] == z0, "Z changed across the home: %s -> %s", z0, rep["MPos"][2])
             ctx.check(rep["state"].startswith("Idle"), "not idle after the home: %s", rep["state"])
             ctx.check(MANUAL_NOTICE in text, "the sender was not told the home was set by hand")
             ctx.check((ev["homed_axes"] or 0) & 3 == 3, "forgectrl does not show X and Y homed")
             ctx.check(ev["home_source"] == "manual", "the anchor's source reads %r", ev["home_source"])
-            ctx.check(ev["pos"] and abs(ev["pos"]["x"] - want[0]) < 0.02 and abs(ev["pos"]["y"] - want[1]) < 0.02,
-                      "forgectrl's position is not the declared one: %s", ev["pos"])
-            # The blocks are a wall: the envelope starts where the head stands.
+            ctx.check(ev["pos"] and abs(ev["pos"]["x"]) < 0.02 and abs(ev["pos"]["y"]) < 0.02,
+                      "forgectrl's position is not X0 Y0: %s", ev["pos"])
+            # The envelope starts at the origin.
             ev["past_envelope"] = _refused(ctx, g, "$J=G91X-5F600")
             ctx.check(ev["past_envelope"] == "error:15",
                       "a jog past the envelope after the home got %s, not error:15", ev["past_envelope"])
+
+            # With an offset: the head at the blocks is minus it, and $H jogs
+            # it to the origin before it answers.
+            st, body = fc.post("/settings", data={"manual_home_x": "%g" % offset[0],
+                                                  "manual_home_y": "%g" % offset[1]})
+            ctx.check(st == 200, "manual_home_x/_y = %s -> %s %s", offset, st, body)
+            k2 = _kernel_position()
+            r = g.command("$H", timeout=15)
+            refused = any(x.startswith("error") for x in r)
+            text = "\n".join(r) + drain_text(g, 1.5)
+            rep = g.status_report()
+            if not refused:                         # declared at minus the offset, then moved
+                moved = [30.0 + rep["MPos"][0] + offset[0], rep["MPos"][1] + offset[1]]
+            ctx.check(not refused, "$H with an offset refused: %s", r)
+            k3 = _kernel_position()
+            st = fc.status()
+            ev.update(offset_kernel_position=[list(k2), list(k3)], offset_mpos=rep["MPos"],
+                      offset_state=rep["state"], offset_pos=st.get("pos"))
+            ctx.log("$H with offset %s: %s MPos %s; kernel record %s -> %s; forgectrl pos %s",
+                    offset, rep["state"], rep["MPos"], k2, k3, ev["offset_pos"])
+            said = [ln for ln in text.splitlines() if "Manual home: the head is at X" in ln]
+            ev["offset_said"] = said
+            try:
+                words = said[-1].split("the head is at ")[1].split(";")[0].split()
+                declared = [float(words[0][1:]), float(words[1][1:])]
+            except (IndexError, ValueError):
+                declared = None
+            ctx.check(declared is not None and abs(declared[0] + offset[0]) < 0.01
+                      and abs(declared[1] + offset[1]) < 0.01,
+                      "the sender was told the head stood at %s, not minus %s", declared, offset)
+            ctx.check(k3[3:] != k2[3:], "the move to the origin played no pulse byte: %s -> %s", k2[3:], k3[3:])
+            ctx.check(k3[0] != 0 and k3[1] != 0, "the kernel counters did not move on X and Y: %s", k3)
+            ctx.check(rep["MPos"][0] == 0 and rep["MPos"][1] == 0,
+                      "the head is at %s when $H answered, not X0 Y0", rep["MPos"][:2])
+            ctx.check(rep["state"].startswith("Idle"), "not idle when $H answered: %s", rep["state"])
+            ctx.check(ev["offset_pos"] and abs(ev["offset_pos"]["x"]) < 0.02 and abs(ev["offset_pos"]["y"]) < 0.02,
+                      "forgectrl's position is not X0 Y0: %s", ev["offset_pos"])
+            ev["offset_past_envelope"] = _refused(ctx, g, "$J=G91Y-1F600")
+            ctx.check(ev["offset_past_envelope"] == "error:15",
+                      "a jog behind the origin got %s, not error:15", ev["offset_past_envelope"])
     finally:
         # Whatever a check above decided, the machine is handed back as it was
-        # found: the setting restored, the false home dropped, the head returned.
-        st, body = (fc.post("/settings", params={"homing_mode": ""}) if not ev["homing_mode"]
-                    else fc.post("/settings", data={"homing_mode": ev["homing_mode"]}))
-        ctx.log("restore homing_mode=%r -> %s", ev["homing_mode"], st)
-        if moved_out:
+        # found: the settings restored, the false home dropped, the head returned.
+        for k in keys:
+            v = ev["found"][k]
+            st, body = (fc.post("/settings", data={k: v}) if v else fc.post("/settings", params={k: ""}))
+            ctx.log("restore %s=%r -> %s", k, v, st)
+        if moved:
             _drop_reference(ctx, fc)
             with ctx.grbl() as g:
                 clean_slate(ctx, g)
-                r = g.command("$J=G91X-30F2400")    # back to where the test found the head
+                r = g.command("$J=G91X%.3fY%.3fF2400" % (-moved[0], -moved[1]))
                 ctx.check(not any(x.startswith("error") for x in r), "the return jog was refused: %s", r)
                 wait_idle(ctx, g)
             machine_idle(ctx)
-            # The home cleared the kernel's counters 30 mm out, so the return
-            # leaves them at -30 mm with the head where the run found it. The
-            # hand-back compares counters, and a controller start zeroes them:
-            # left like this, the next test that restarts the controller reads
-            # as 30 mm out of place and the hand-back "returns" a head that
-            # never moved (on the bench reference it drove the head into the
-            # stop blocks). One more start, with the head back, leaves the
-            # counters at zero where the run began, which is what the rest of
-            # the catalog counts on.
+            # The home cleared the kernel's counters away from where the run
+            # began, so the return leaves them off zero with the head where
+            # the run found it. The hand-back compares counters, and a
+            # controller start zeroes them: left like this, the next test
+            # that restarts the controller reads as out of place and the
+            # hand-back "returns" a head that never moved (on the bench
+            # reference it drove the head into the stop blocks). One more
+            # start, with the head back, leaves the counters at zero where the
+            # run began, which is what the rest of the catalog counts on.
             _drop_reference(ctx, fc)
             ctx.counters_rezeroed()
     machine_idle(ctx)
-    ctx.log("PASS: a manual home shipped nothing, declared %s, turned the soft limits on, kept Z, "
-            "and reads back as manual", want)
+    ctx.log("PASS: a manual home with no offset shipped nothing and declared X0 Y0; with %s it declared "
+            "minus that and jogged to X0 Y0 before answering; the soft limits start at the origin, Z was "
+            "kept, and the home reads back as manual", offset)
 
 
 def _port_state(fc):
