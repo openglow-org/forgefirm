@@ -320,17 +320,22 @@ def frame_health(ctx):
     ctx.check(restarts == 0, "the capture stream was restarted %d time(s)", restarts)
 
 
-@test("camera.lid-privacy", title="Cameras capture only with the lid closed", subsystem="camera",
+@test("camera.lid-privacy", title="Cameras see the room only with the lid closed", subsystem="camera",
       kind="operator", est_min=3,
-      covers=_PRIVACY_COVERS, requires=["forgectrl.panel-serves"], actions=["lid"],
+      covers=_PRIVACY_COVERS + [("forgectrl", "src/auth.*")], requires=["forgectrl.panel-serves"],
+      actions=["lid"],
       steps=["Start with the lid closed; you will be told to open it, then close it again.",
              "Nothing moves and the laser is not involved."],
-      description="The privacy gate: with the lid open neither camera captures. A running stream "
-                  "stops within a frame or so of the lid opening, /cam/status reports capture as "
-                  "not allowed, and both the snapshot and the stream are refused with 409 and a "
-                  "reason naming the lid. Closing the lid restores all of it. This is what stops "
-                  "the machine - and in cloud mode the Glowforge service - from imaging the room "
-                  "through an open lid.")
+      description="The privacy gate: with the lid open the lid camera does not capture, and the head "
+                  "camera captures only for a local viewer. A running lid-camera stream stops within a "
+                  "frame or so of the lid opening, /cam/status reports capture as not allowed, and the "
+                  "lid camera's snapshot and stream are refused with 409 and a reason naming the lid, "
+                  "to the panel too. The head camera, which looks down at the bed, still answers the "
+                  "panel (its token) and the extension host (its client header from this host), while "
+                  "the same snapshot and stream asked without either - the cloud client's form - are "
+                  "refused for the lid. Closing the lid restores all of it. This is what stops the "
+                  "machine - and in cloud mode the Glowforge service - from imaging the room through "
+                  "an open lid.")
 def lid_privacy(ctx):
     import urllib.error
     import urllib.request
@@ -411,9 +416,26 @@ def lid_privacy(ctx):
     ctx.check(b"lid" in data.lower(), "the refusal should name the lid: %r", data[:120])
     ctx.check(data[:2] != b"\xff\xd8", "a JPEG was returned with the lid open")
 
+    # The head camera looks at the bed: a local viewer still has it, the cloud client's form does not.
     st, data = fc.get("/cam/snapshot", params={"cam": "head", "res": "half"}, raw=True)
-    ctx.log("lid open: head snapshot -> %s", st)
-    ctx.check(st == 409, "the head camera should be refused too, got %s", st)
+    ctx.log("lid open: the panel's head snapshot -> %s", st)
+    ctx.check(st == 200 and data[:2] == b"\xff\xd8", "the panel's head snapshot with the lid open -> %s", st)
+    st, data = fc.get("/cam/snapshot", params={"cam": "head", "res": "half"}, raw=True, auth=False,
+                      headers={"X-ForgeFIRM-Client": "extension-host"})
+    ctx.log("lid open: the extension host's head snapshot -> %s", st)
+    ctx.check(st == 200 and data[:2] == b"\xff\xd8", "the extension host's head snapshot with the lid open -> %s", st)
+    st, data = fc.get("/cam/snapshot", params={"cam": "head", "res": "half"}, raw=True, auth=False)
+    ev["head_cloud_form_lid_open"] = [st, (data or b"")[:120].decode("utf-8", "replace")]
+    ctx.log("lid open: head snapshot without a token or the header -> %s %s", st, (data or b"")[:120])
+    ctx.check(st == 409 and b"lid" in (data or b"").lower(),
+              "the head camera without a token or the header should be refused for the lid, got %s", st)
+    try:
+        hreq = urllib.request.Request(fc.base + "/cam/stream?cam=head", headers={"Host": fc.host_header()})
+        with urllib.request.urlopen(hreq, timeout=10) as r:
+            ctx.fail("the head stream opened with the lid open, for no local viewer (%s)", r.status)
+    except urllib.error.HTTPError as e:
+        ctx.log("lid open: head stream for no local viewer -> %s", e.code)
+        ctx.check(e.code == 409, "the head stream for no local viewer should be refused with 409, got %s", e.code)
 
     try:
         with urllib.request.urlopen(req, timeout=10) as r:

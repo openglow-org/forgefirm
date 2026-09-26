@@ -37,6 +37,14 @@ job after it.
      one FIRE tick. A jog block carries the modal spindle state, so the
      stream's mask on jogging is the only thing that keeps a jog dark, and
      this is what holds the port to it
+ 10. "sender out" keeps senders from the network out, and only on an idle
+     machine with a quiet sender: it is refused while a sender line runs
+     (a dwell), within 2 s of the sender's last line, and while a program
+     moves; granted, it drops the sender after a message line, turns every
+     sender from the network away the same way without touching the
+     session, still lets one from this host in, outlives the port's client,
+     and "sender in" ends it. A sender from the network is one that
+     connects to this host's own address rather than the loopback
 
 Usage: ctlport_test.py [path/to/grblHAL_glowforge]
 """
@@ -65,14 +73,15 @@ class Sender:
     """The scripted sender: every line it receives is classified, and the
     responses (ok, error:N) are counted apart from everything else."""
 
-    def __init__(self, port, eol="\n"):
+    def __init__(self, port, eol="\n", host="127.0.0.1"):
         self.eol = eol
         self.responses = []         # "ok" / "error:N", in order
         self.other = []             # messages, reports, the banner
         self.lock = threading.Lock()
+        self.closed = False         # the controller closed the socket
         for _ in range(50):
             try:
-                self.sock = socket.create_connection(("127.0.0.1", port), timeout=1)
+                self.sock = socket.create_connection((host, port), timeout=1)
                 break
             except OSError:
                 time.sleep(0.1)
@@ -92,8 +101,10 @@ class Sender:
             except socket.timeout:
                 continue
             except OSError:
+                self.closed = True
                 return
             if not data:
+                self.closed = True
                 return
             buf += data
             while b"\n" in buf:
@@ -633,6 +644,115 @@ def test_dead_man(s):
         fail("[dead-man] a new client inherited the old jog")
 
 
+def own_address():
+    """This host's own address on the network, which a connection to it
+    comes from: a sender from the network, as the controller sees it."""
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        u.connect(("192.0.2.1", 9))         # TEST-NET: routes, sends nothing
+        addr = u.getsockname()[0]
+    except OSError:
+        addr = ""
+    finally:
+        u.close()
+    if not addr or addr.startswith("127."):
+        fail("[sender-out] this host has no address but the loopback; the test needs one")
+    return addr
+
+
+def generation(s):
+    with open(os.path.join(s.workdir, "grbl.state")) as f:
+        return json.load(f)["sender"]["generation"]
+
+
+def wait_closed(sender, what, timeout=3.0):
+    end = time.time() + timeout
+    while time.time() < end and not sender.closed:
+        time.sleep(0.05)
+    if not sender.closed:
+        fail("[sender-out] %s was not closed" % what)
+
+
+def test_sender_out():
+    s = Session()
+    try:
+        own = own_address()
+        if s.port.state().get("sender_out") is not False:
+            fail("[sender-out] the state does not say the sender is let in")
+        net = Sender(PORT, host=own)        # displaces the session's own sender
+        net.wait_state("Idle")
+
+        # A line that runs: a dwell is Idle to the core, and still the sender's.
+        net.sock.sendall(b"G4 P3" + net.eol.encode())
+        time.sleep(1.0)
+        got = s.port.request("sender out")
+        if got != "busy:sender":
+            fail("[sender-out] during the sender's dwell: %r, wanted busy:sender" % got)
+        end = time.time() + 5
+        while net.count() < 1 and time.time() < end:
+            time.sleep(0.05)
+        # A sender that just finished a line is not done with the machine.
+        if net.send("G21") != "ok":
+            fail("[sender-out] G21 was not answered ok")
+        got = s.port.request("sender out")
+        if got != "busy:sender":
+            fail("[sender-out] within 2 s of the sender's last line: %r, wanted busy:sender" % got)
+        # A program that moves.
+        net.sock.sendall(b"G91 G1 X20 F300" + net.eol.encode())
+        time.sleep(0.8)
+        got = s.port.request("sender out")
+        if got != "busy:state":
+            fail("[sender-out] while a program moves: %r, wanted busy:state" % got)
+        net.wait_state("Idle")
+        print("PASS [sender-out]: refused during a dwell, within 2 s of a line, and while a program moves")
+
+        time.sleep(2.3)
+        gen = generation(s)
+        got = s.port.request("sender out")
+        if got != "ok":
+            fail("[sender-out] an idle machine and a quiet sender: %r, wanted ok" % got)
+        wait_closed(net, "the connected sender")
+        if not net.saw("[MSG:The machine is in use"):
+            fail("[sender-out] the dropped sender was not told why: %r" % net.other[-3:])
+        st = s.port.state()
+        if st.get("sender_out") is not True or st.get("sender") is not False:
+            fail("[sender-out] the state after it: %r" % st)
+        print("PASS [sender-out]: granted, it dropped the sender after a message line")
+
+        gen = generation(s)
+        late = Sender(PORT, host=own)
+        wait_closed(late, "a sender from the network")
+        if not late.saw("[MSG:The machine is in use") or late.count():
+            fail("[sender-out] the turned-away sender read %r" % late.other)
+        time.sleep(0.3)
+        if generation(s) != gen or s.port.state().get("sender") is not False:
+            fail("[sender-out] turning a sender away changed the session")
+        local = Sender(PORT)
+        if local.closed or local.send("G21") != "ok":
+            fail("[sender-out] a sender on this host was not let in")
+        local.close()
+        print("PASS [sender-out]: a sender from the network is turned away and the session is "
+              "untouched; one from this host connects")
+
+        s.port.close()
+        s.port = PortClient(s.path)
+        if s.port.state().get("sender_out") is not True:
+            fail("[sender-out] it did not outlive the port's client")
+        if s.port.request("sender out") != "ok":
+            fail("[sender-out] asked again, it was not ok")
+        if s.port.request("sender in") != "ok":
+            fail("[sender-out] sender in was not ok")
+        if s.port.state().get("sender_out") is not False:
+            fail("[sender-out] sender in did not end it")
+        again = Sender(PORT, host=own)
+        if again.closed or again.send("G21") != "ok":
+            fail("[sender-out] after sender in, a sender from the network was not let in")
+        again.close()
+        print("PASS [sender-out]: it outlives the port's client, and sender in lets the network back in")
+    finally:
+        s.close()
+
+
 def main():
     if not os.path.exists(BIN):
         fail("no controller binary at %s" % BIN)
@@ -653,6 +773,7 @@ def main():
     test_poll_lf()
     test_poll_crlf()
     test_port_dark()
+    test_sender_out()
     print("ALL PASS")
 
 
