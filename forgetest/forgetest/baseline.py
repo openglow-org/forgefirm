@@ -895,7 +895,7 @@ class Baseline:
         # wherever the head then stood. Unless the test said where that was
         # (ctx.counters_rezeroed), the two readings share no frame: on the
         # bench reference a head that had not moved was "returned" 30 mm into
-        # the stop blocks this way, twice. Nothing is moved on a guess.
+        # the gantry stops this way, twice. Nothing is moved on a guess.
         frame_lost = ("frame" in captured and captured["frame"] != counter_frame()
                       and not captured.get("rezero_declared"))
         if was is not None and now is not None and now != was and frame_lost and not self.cloud_mode():

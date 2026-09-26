@@ -25,8 +25,8 @@ operator's own $ME or a manual $H energizes it:
   6. the port's panel operations (release, energize, home) do the same with
      a sender connected, and the sender's response count stays exact; home
      is refused unless homing_mode = manual
-  7. manual_home_x and manual_home_y: how far in front of the stop blocks
-     the origin lies, never negative. With an offset the head at the blocks
+  7. manual_home_x and manual_home_y: how far in front of the gantry stops
+     the origin lies, never negative. With an offset the head at the stops
      is declared at minus it and jogs to the origin, dark, before $H
      answers, through the sender and through the port; the envelope starts
      at the origin, and an out-of-range offset is clamped; a jog cancel
@@ -393,8 +393,8 @@ def test_restart_while_released(s):
 
 
 def test_stop_block_offsets(s):
-    """manual_home_x and _y are how far in front of the stop blocks the origin
-    lies, never negative: the head at the blocks is declared at minus them and
+    """manual_home_x and _y are how far in front of the gantry stops the origin
+    lies, never negative: the head at the stops is declared at minus them and
     jogs to the origin, dark, before $H answers, and the envelope starts at
     the origin."""
     s.sender.wait_state("Idle")

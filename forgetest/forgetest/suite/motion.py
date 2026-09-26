@@ -1995,7 +1995,7 @@ def motor_release(ctx):
             "energized with no fault, and the liveness probe and the witnessed jogs say the drivers are alive")
 
 
-@test("homing.manual", title="Manual home: $H declares the stop-block position and jogs to an offset origin",
+@test("homing.manual", title="Manual home: $H declares the gantry-stop position and jogs to an offset origin",
       subsystem="motion", kind="auto", mode="grbl", est_min=5,
       covers=_MOTION_COVERS + [("forgectrl", "src/status.*"), ("forgectrl", "src/main.c")],
       requires=["motion.jog-roundtrip"],
@@ -2057,7 +2057,7 @@ def manual_home(ctx):
             ctx.check(ev["past_envelope"] == "error:15",
                       "a jog past the envelope after the home got %s, not error:15", ev["past_envelope"])
 
-            # With an offset: the head at the blocks is minus it, and $H jogs
+            # With an offset: the head at the gantry stops is minus it, and $H jogs
             # it to the origin before it answers.
             st, body = fc.post("/settings", data={"manual_home_x": "%g" % offset[0],
                                                   "manual_home_y": "%g" % offset[1]})
@@ -2117,7 +2117,7 @@ def manual_home(ctx):
             # controller start zeroes them: left like this, the next test
             # that restarts the controller reads as out of place and the
             # hand-back "returns" a head that never moved (on the bench
-            # reference it drove the head into the stop blocks). One more
+            # reference it drove the head into the gantry stops). One more
             # start, with the head back, leaves the counters at zero where the
             # run began, which is what the rest of the catalog counts on.
             _drop_reference(ctx, fc)
