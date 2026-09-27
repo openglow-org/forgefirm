@@ -33,3 +33,4 @@ from . import updlock    # noqa: F401,E402
 from . import homeoff    # noqa: F401,E402
 from . import bedsize    # noqa: F401,E402
 from . import extsender  # noqa: F401,E402
+from . import tray       # noqa: F401,E402

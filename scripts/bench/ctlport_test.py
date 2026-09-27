@@ -33,8 +33,8 @@ job after it.
   8. the port's client is the dead-man: closing it cancels its jog
   9. every port operation ships dark. Under an open armed window, with M3
      modal and S above zero, a port jog, a canceled port jog, the refused
-     jogs, and the panel operations add steps to the shipped stream and not
-     one FIRE tick. A jog block carries the modal spindle state, so the
+     jogs, and the panel operations (the tray's mode among them) add steps
+     to the shipped stream and not one FIRE tick. A jog block carries the modal spindle state, so the
      stream's mask on jogging is the only thing that keeps a jog dark, and
      this is what holds the port to it
  10. "sender out" keeps senders from the network out, and only on an idle
@@ -593,6 +593,8 @@ def test_port_dark():
         replies["release"] = s.port.request("release")      # refused: a laser job is armed
         replies["energize"] = s.port.request("energize")
         replies["home"] = s.port.request("home")            # manual: declares X0 Y0, moves nothing
+        replies["tray out"] = s.port.request("tray out")    # the Z frame moves, the head does not
+        replies["tray in"] = s.port.request("tray in")
         replies["jog-after-home"] = s.port.request("jog G91 X6 F1200")
         s.sender.wait_state("Idle")
         time.sleep(0.5)
@@ -600,6 +602,8 @@ def test_port_dark():
         steps1, fire1 = s.ticks()
         if replies["jog"] != "ok" or replies["jog-long"] != "ok" or replies["jog-after-home"] != "ok":
             fail("[dark] a port jog under the open window was refused: %r" % replies)
+        if replies["tray out"] != "ok" or replies["tray in"] != "ok":
+            fail("[dark] the tray op under the open window was refused: %r" % replies)
         if steps1 <= steps0:
             fail("[dark] the port jogs shipped no step: the case would prove nothing")
         if s.sender.saw("laser disarmed"):

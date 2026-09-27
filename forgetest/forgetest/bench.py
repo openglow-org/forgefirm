@@ -304,6 +304,17 @@ TOOLS = [
              "do the same with the sender's count exact. Imports its sender and port client from "
              "ctlport_test.py. A CI harness (the grblHAL repo): needs the host-built null-sink controller, "
              "not the machine, so it is not a bench-page tool."},
+    {"id": "tray-test", "title": "Crumb tray mode harness", "script": "tray_test.py",
+     "safety": "dry", "where": "host", "ported": False, "args": [],
+     "desc": "The crumb tray's mode on the null-sink controller: M103 P1 and P0 move Z and its envelope by "
+             "tray_offset_mm on the lens step grid, tell the sender, write and remove the marker beside the "
+             "shared config, and ship no step; a missing P, a P other than 0 or 1 and an axis word are "
+             "errors; the switch waits for the move before it; the port's tray op, and its refusals during "
+             "a program and at a package's M-code; the mode survives a soft reset and a restart, and a start "
+             "over the marker references Z in the tray-out frame; the offset's range; an unreferenced lens; "
+             "and a camera home in both modes hands the runner the same park. Imports its sender and port "
+             "client from ctlport_test.py. A CI harness (the grblHAL repo): needs the host-built null-sink "
+             "controller, not the machine, so it is not a bench-page tool."},
     {"id": "raster-dry", "title": "Dry top-speed raster per XY microstep mode", "script": "raster_dry.py",
      "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("modes", "choice", "8 16 32", "the modes to run, in order", ["8", "16", "32", "8 16 32"])],
