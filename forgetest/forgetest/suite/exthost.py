@@ -339,6 +339,9 @@ def platform(ctx):
         _write(PROBE_GROUP + "/cgroup.freeze", "1")
         ok = ctx.wait_for(lambda: _flat(PROBE_GROUP + "/cgroup.events").get("frozen") == 1, 3, poll=0.05)
         ctx.check(ok is not None, "the group did not freeze: %s", _flat(PROBE_GROUP + "/cgroup.events"))
+        # The kernel reports a task frozen before its last way into
+        # schedule() is charged, so the window opens once that has landed.
+        ctx.sleep(0.2)
         f0 = _flat(PROBE_GROUP + "/cpu.stat")["usage_usec"]
         ctx.sleep(1.5)
         f1 = _flat(PROBE_GROUP + "/cpu.stat")["usage_usec"]
