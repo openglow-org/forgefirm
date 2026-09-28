@@ -1,0 +1,42 @@
+From dc016daf1af41d0285c61d3c65332b43d0ca577a Mon Sep 17 00:00:00 2001
+From: Alexander Sosedkin <asosedkin@redhat.com>
+Date: Tue, 3 Mar 2026 19:47:25 +0100
+Subject: [PATCH] ktls: fix ChaCha20-Poly1305 IV passing for TLS 1.2
+
+Upstream-Status: Backport [https://gitlab.com/gnutls/gnutls/-/commit/dc016daf1af41d0285c61d3c65332b43d0ca577a]
+
+Signed-off-by: Alexander Sosedkin <asosedkin@redhat.com>
+---
+ lib/system/ktls.c | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/lib/system/ktls.c b/lib/system/ktls.c
+index a4c2a60df0..d531cfb85a 100644
+--- a/lib/system/ktls.c
++++ b/lib/system/ktls.c
+@@ -679,10 +679,9 @@ int _gnutls_ktls_set_keys(gnutls_session_t session,
+ 			assert(cipher_key.size ==
+ 			       TLS_CIPHER_CHACHA20_POLY1305_KEY_SIZE);
+
+-			/* for TLS 1.2 IV is generated in kernel */
+ 			if (version == GNUTLS_TLS1_2) {
+ 				crypto_info.info.version = TLS_1_2_VERSION;
+-				memcpy(crypto_info.iv, seq_number,
++				memcpy(crypto_info.iv, iv.data,
+ 				       TLS_CIPHER_CHACHA20_POLY1305_IV_SIZE);
+ 			} else {
+ 				crypto_info.info.version = TLS_1_3_VERSION;
+@@ -854,10 +853,9 @@ int _gnutls_ktls_set_keys(gnutls_session_t session,
+ 			assert(cipher_key.size ==
+ 			       TLS_CIPHER_CHACHA20_POLY1305_KEY_SIZE);
+
+-			/* for TLS 1.2 IV is generated in kernel */
+ 			if (version == GNUTLS_TLS1_2) {
+ 				crypto_info.info.version = TLS_1_2_VERSION;
+-				memcpy(crypto_info.iv, seq_number,
++				memcpy(crypto_info.iv, iv.data,
+ 				       TLS_CIPHER_CHACHA20_POLY1305_IV_SIZE);
+ 			} else {
+ 				crypto_info.info.version = TLS_1_3_VERSION;
+--
+GitLab

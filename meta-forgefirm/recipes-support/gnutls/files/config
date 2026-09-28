@@ -1,0 +1,9 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# SPDX-License-Identifier: MIT
+#
+# GnuTLS's system-wide configuration. Kernel TLS on: after the handshake
+# the kernel seals and opens the records. A connection on a cipher that
+# kernel TLS does not take stays in user space.
+[global]
+ktls = true
