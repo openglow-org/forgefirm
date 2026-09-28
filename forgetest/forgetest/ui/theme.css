@@ -816,8 +816,25 @@ footer a {
   text-align: right;
 }
 
-/* A package's interface: the label is the panel's, the frame is the
-   package's, and the frame is given a size rather than taking one. */
-#extframe { margin-top: 0.6rem; }
-.extframe-label { padding: 0.3rem 0; }
-.extframe { width: 100%; height: 360px; border: 1px solid #444; background: #fff; }
+/* A package's card on the Extensions tab: the card and its heading (the
+   label) are the panel's, the frame is the package's, and the frame is
+   given a size rather than taking one. The frame takes the panel's color
+   scheme, which the page inside reads as its prefers-color-scheme; it is
+   transparent, so a page that paints no background sits on the card. */
+.extcard h2 .mono {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: var(--og-dim);
+}
+.extframe {
+  display: block;
+  width: 100%;
+  height: 360px;
+  border: 0;
+  background: transparent;
+  color-scheme: light;
+}
+[data-bs-theme='dark'] .extframe {
+  color-scheme: dark;
+}
