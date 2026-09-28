@@ -23,6 +23,7 @@ of every test there.
 """
 
 import os
+import random
 import shutil
 import subprocess
 import tempfile
@@ -49,6 +50,14 @@ def _tls_stat():
             if len(p) == 2 and p[1].isdigit():
                 out[p[0]] = int(p[1])
     return out
+
+
+def _passive_opens():
+    """The TCP connections the machine has accepted, on every port and both
+    families (the TCP counters are shared)."""
+    with open("/proc/net/snmp") as f:
+        rows = [line.split() for line in f if line.startswith("Tcp:")]
+    return int(rows[1][rows[0].index("PassiveOpens")])
 
 
 def _engine_irqs():
@@ -80,16 +89,17 @@ def _driver(name):
 def _fetch(version, offer, work):
     """GET the page over HTTPS on loopback with the given offer. Returns
     the suite, the status line, the body, the kernel counters' change,
-    and the crypto engine's interrupts during the connection."""
+    the crypto engine's interrupts during the connection, and how many
+    other connections the machine accepted meanwhile."""
     req = os.path.join(work, "req")
     with open(req, "wb") as f:
         f.write(b"GET " + PAGE.encode() + b" HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
     opt = ["-tls1_3", "-ciphersuites", offer] if version == "1.3" else ["-tls1_2", "-cipher", offer]
-    s0, i0 = _tls_stat(), _engine_irqs()
+    s0, i0, p0 = _tls_stat(), _engine_irqs(), _passive_opens()
     with open(req, "rb") as stdin:
         r = subprocess.run([OPENSSL, "s_client", "-connect", "127.0.0.1:443", "-brief", "-ign_eof"] + opt,
                            stdin=stdin, capture_output=True, timeout=60)
-    s1, i1 = _tls_stat(), _engine_irqs()
+    s1, i1, p1 = _tls_stat(), _engine_irqs(), _passive_opens()
     info = {}
     for line in r.stderr.decode("utf-8", "replace").splitlines():
         k, _, v = line.partition(":")
@@ -97,7 +107,7 @@ def _fetch(version, offer, work):
     head, _, body = r.stdout.partition(b"\r\n\r\n")
     delta = {k: s1.get(k, 0) - s0.get(k, 0) for k in ("TlsTxSw", "TlsRxSw", "TlsDecryptError")}
     return (info.get("Ciphersuite"), head.split(b"\r\n")[0].decode("latin-1"), body, delta,
-            (i1 or 0) - (i0 or 0))
+            (i1 or 0) - (i0 or 0), p1 - p0 - 1)
 
 
 @test("forgectrl.tls-records", title="HTTPS: ChaCha20 chosen, records sealed in the kernel",
@@ -116,7 +126,9 @@ def _fetch(version, offer, work):
                   "offering a CBC suite alone still connects and stays in GnuTLS, which is the control "
                   "for the kernel's counters; the ChaCha20 runs are the control for the engine's "
                   "interrupt. Every copy of the panel page must be the plain-HTTP page byte for byte, "
-                  "and the kernel must count no decrypt error. Nothing on the machine changes.")
+                  "and the kernel must count no decrypt error. The counters and the interrupt are the "
+                  "machine's, so a connection during which another client connected (a panel "
+                  "reconnecting after a restart) is measured again. Nothing on the machine changes.")
 def tls_records(ctx):
     ev = ctx.evidence
 
@@ -152,9 +164,19 @@ def tls_records(ctx):
                        True)]
         cases.append(("cbc-1.2", "1.2", "ECDHE-ECDSA-AES128-SHA", "ECDHE-ECDSA-AES128-SHA", False))
         for label, version, offer, want, kernel in cases:
-            suite, status, body, delta, irqs = _fetch(version, offer, work)
+            # The kernel's counters and the engine's interrupt are the machine's, not the
+            # connection's: a window in which another client connected (a panel reconnecting
+            # after a restart, a page polling this suite once a second) says nothing about this
+            # one, and is measured again, after a pause that no steady poller stays in step with.
+            for attempt in range(1, 31):
+                suite, status, body, delta, irqs, others = _fetch(version, offer, work)
+                if others <= 0:
+                    break
+                ctx.log("%s: %d other connection(s) during the window; measured again", label, others)
+                ctx.sleep(random.uniform(0.1, 0.9))
+            ctx.check(others <= 0, "%s: another client connected during each of %d windows", label, attempt)
             run = {"offer": offer, "suite": suite, "status": status, "bytes": len(body),
-                   "same_as_http": body == plain, "tls_stat": delta, "engine_irqs": irqs}
+                   "same_as_http": body == plain, "tls_stat": delta, "engine_irqs": irqs, "attempts": attempt}
             runs[label] = run
             ctx.log("%s: offer %s -> %s, %s, %d bytes, same %s, tls_stat %s, %s +%d",
                     label, offer, suite, status, len(body), body == plain, delta, ENGINE_IRQ, irqs)
