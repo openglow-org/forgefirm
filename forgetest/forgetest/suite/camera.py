@@ -279,10 +279,12 @@ def h264_stream(ctx):
       covers=_CAM_COVERS, requires=["forgectrl.panel-serves"],
       description="The capture queue flags a frame errored when it is short, torn, or arrived "
                   "after the CSI-2 receiver lost sync; forgectrl drops those rather than "
-                  "demosaicing them, and restarts the stream if they persist. A healthy machine "
-                  "captures a burst with none of them. A nonzero corrupt count here is a real "
-                  "signal - a marginal camera ribbon, a mistimed D-PHY - even though the frames "
-                  "themselves never reach a client.")
+                  "demosaicing them, restarts the stream if they persist, and withholds the "
+                  "stream frames on either side of one. A healthy machine captures a burst of "
+                  "snapshots and a few seconds of stream with none of them flagged and none "
+                  "withheld, and reports the stream's per-stage timing while a viewer watches. "
+                  "A nonzero corrupt count here is a real signal - a marginal camera ribbon, a "
+                  "mistimed D-PHY - even though the frames themselves never reach a client.")
 def frame_health(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -318,6 +320,46 @@ def frame_health(ctx):
     ctx.check(captured > 0, "no frames were dequeued during three snapshots")
     ctx.check(corrupt == 0, "%d of %d captured frames came back errored", corrupt, captured)
     ctx.check(restarts == 0, "the capture stream was restarted %d time(s)", restarts)
+
+    # The stream path: five seconds of MJPEG, so the frame gate judges a
+    # few dozen frames and the timing covers two whole windows. A frame is
+    # withheld only next to one the receiver flagged, so a healthy machine
+    # withholds none, and the per-stage timing is reported while the
+    # viewer watches.
+    import time
+    import urllib.request
+    s0 = health()
+    stream = urllib.request.urlopen(
+        urllib.request.Request(fc.base + "/cam/stream", headers={"Host": fc.host_header()}),
+        timeout=10)
+    try:
+        got = 0
+        t_end = time.monotonic() + 5.0
+        while time.monotonic() < t_end:
+            got += len(stream.read(65536))
+        st, body = fc.get("/cam/status")
+        timing = body.get("timing") if isinstance(body, dict) else None
+    finally:
+        stream.close()
+    s1 = health()
+    ev["stream_bytes"] = got
+    ev["stream_timing"] = timing
+    ev["stream_health"] = [s0, s1]
+    ctx.log("stream: %d bytes in 5 s, timing %s", got, timing)
+    s_captured = (s1.get("captured") or 0) - (s0.get("captured") or 0)
+    s_corrupt = (s1.get("corrupt") or 0) - (s0.get("corrupt") or 0)
+    s_withheld = (s1.get("withheld") or 0) - (s0.get("withheld") or 0)
+    ev["stream_captured"] = s_captured
+    ev["stream_withheld"] = s_withheld
+    ctx.check(s_captured >= 30, "only %d frames were dequeued in 5 s of stream", s_captured)
+    ctx.check(s_corrupt == 0, "%d stream frames came back errored", s_corrupt)
+    ctx.check("withheld" in s1, "/cam/status health carries no withheld count: %s", s1)
+    ctx.check(s_withheld == 0, "%d stream frames were withheld with none flagged", s_withheld)
+    ctx.check(isinstance(timing, dict) and
+              all(k in timing for k in ("latency_ms", "convert_ms", "copy_ms", "encode_ms")),
+              "/cam/status carries no timing block while a viewer watches: %s", body)
+    latency = (timing or {}).get("latency_ms") or 0
+    ctx.check(0 < latency < 250, "capture to publication took %.1f ms while streaming", latency)
 
 
 @test("camera.lid-privacy", title="Cameras see the room only with the lid closed", subsystem="camera",
