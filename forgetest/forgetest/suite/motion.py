@@ -1209,12 +1209,15 @@ def respawn_gate(ctx):
              "must refuse, and hands the head back where it found it."],
       description="The machine has no limit switches, so the core's $20 cannot be turned on and "
                   "the X/Y soft limits are the driver's: off while the position is not trusted, on "
-                  "after a home, when the envelope is the bed ($130 by $131 from the home corner). "
+                  "after a home, when the envelope is the bed from the home corner: the far edges the "
+                  "bed check measured (envelope_x_mm, envelope_y_mm, held to 50 mm up to the travel "
+                  "plus 30 mm), or $130 by $131 on a machine that was never measured. "
                   "With homing_mode = gfcloud and the camera-home offsets unset for the run, $H runs "
                   "the web-service homing session, every motion of it run whole. Homed, a program "
-                  "move 5 mm past X max or Y max, or past the near edge, raises ALARM:2 before any "
-                  "motion (the kernel counters do not move), a jog past the bed is refused with "
-                  "error 15, and a move inside the bed runs. The Z envelope is the lens window, as "
+                  "move 5 mm past the far edge in X or in Y, or past the near edge, raises ALARM:2 "
+                  "before any motion (the kernel counters do not move), a jog past the far edge is "
+                  "refused with error 15, and a move inside the bed runs. A move or jog that is not "
+                  "refused is stopped before the test fails. The Z envelope is the lens window, as "
                   "before. The settings are put back as found, the camera home is dropped, and the "
                   "head is jogged back to where the test found it by the travel the session's "
                   "motions logged.")
@@ -1253,6 +1256,22 @@ def soft_limits(ctx):
             x_travel = float(grbl_setting(g, "$130"))
             y_travel = float(grbl_setting(g, "$131"))
             ev["travel"] = {"x": x_travel, "y": y_travel}
+
+            # The far edges the home armed, as the driver takes them
+            # (gfhome_clamp_envelope_mm): the measured key held to 50 mm up
+            # to the travel plus 30 mm, or the travel when it is unset.
+            def far_edge(key, travel):
+                try:
+                    mm = float(s0.get(key) or 0)
+                except ValueError:
+                    mm = 0.0
+                if not mm > 0:
+                    return travel
+                return min(max(mm, 50.0), travel + 30.0)
+
+            x_edge = far_edge("envelope_x_mm", x_travel)
+            y_edge = far_edge("envelope_y_mm", y_travel)
+            ev["envelope"] = {"x": x_edge, "y": y_edge}
             k0 = kernel_xy_mm(ctx)
 
             def refused(cmd):
@@ -1265,24 +1284,30 @@ def soft_limits(ctx):
                 rec = {"cmd": cmd, "reply": lines, "alarm": "ALARM:2" in text, "moved_mm": round(moved, 3),
                        "state": st}
                 ctx.log("%s", rec)
-                ctx.check(rec["alarm"], "%s was not refused with ALARM:2: %s", cmd, lines)
-                ctx.check(moved < 0.05, "%s moved the kernel %.3f mm before the alarm", cmd, moved)
+                # Stopped first: a move that was not refused must not run on
+                # to its target while the test fails.
                 g.realtime(0x18)
                 ctx.sleep(1.5)
                 g.drain()
+                ctx.check(rec["alarm"], "%s was not refused with ALARM:2: %s", cmd, lines)
+                ctx.check(moved < 0.05, "%s moved the kernel %.3f mm before the alarm", cmd, moved)
                 unlock = g.command("$X")
                 ctx.check(unlock and unlock[-1] == "ok", "$X after the soft-limit alarm: %s", unlock)
                 st = g.status_report()["state"]
                 ctx.check(st.startswith("Idle"), "controller is %s after the recovery", st)
                 return rec
 
-            ev["refused"] = [refused("G90 G1 X%.1f F600" % (x_travel + 5)),
-                             refused("G90 G1 Y%.1f F600" % (y_travel + 5)),
+            ev["refused"] = [refused("G90 G1 X%.1f F600" % (x_edge + 5)),
+                             refused("G90 G1 Y%.1f F600" % (y_edge + 5)),
                              refused("G90 G1 X-1 F600")]
             # Homed still: the soft-limit alarm and its reset keep the reference.
             ctx.check(fc.status().get("homed"), "the soft-limit alarm and the reset un-homed the machine")
-            jog = g.command("$J=G91X%.1fF1200" % (x_travel + 5))
+            jog = g.command("$J=G91X%.1fF1200" % (x_edge + 5))
             ev["jog"] = jog
+            if not any(l.startswith("error:15") for l in jog):
+                g.realtime(0x85)                    # the jog cancel, before the test fails
+                ctx.sleep(1.5)
+                g.drain()
             ctx.check(any(l.startswith("error:15") for l in jog), "a jog past the bed was not refused with error 15: %s",
                       jog)
             # The core answers the line after an error with that error again
