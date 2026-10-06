@@ -3,7 +3,7 @@
 > ### BETA
 >
 > **ForgeFIRM is in beta.** Every release below 0.1.0 is a beta release.
-> Expect problems, and expect frequent updates. Upgrade whenever a newer
+> It's stable, but you may still hit the occasional bug, and expect frequent updates. Upgrade whenever a newer
 > release is available, and report what you find on the
 > [community forum](https://community.openglow.org).
 
