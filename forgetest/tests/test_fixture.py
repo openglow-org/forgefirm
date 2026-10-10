@@ -314,6 +314,24 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             catalog.test("z.auto", title="t", subsystem="z", hands=("app",))(lambda ctx: None)
 
+    def test_every_action_a_test_takes_is_declared(self):
+        # The queues route a test by its kind and its actions: an auto test
+        # runs unattended with or without a fixture, and an operator test
+        # whose actions the fixture covers runs unattended only while it
+        # does. A test that acts on the lid, the interlock or the button
+        # without saying so runs unattended with no fixture and waits for a
+        # person who is not there.
+        import inspect
+        import re
+        from forgetest import catalog
+        bad = []
+        for t in catalog.all_tests(catalog.load_suite()):
+            src = inspect.getsource(t.fn)
+            taken = set(re.findall(r'ctx\.act\(\s*"(\w+)"', src))
+            if taken and (t.kind == "auto" or not taken <= set(t.actions)):
+                bad.append("%s (%s) acts on %s, declares %s" % (t.id, t.kind, sorted(taken), list(t.actions)))
+        self.assertEqual(bad, [])
+
 
 class StubFixture:
     """What the runner needs of a fixture, scripted."""

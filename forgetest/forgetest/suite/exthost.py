@@ -1542,10 +1542,12 @@ def hold_pause_tier(ctx):
 # ------------------------------------------------- the operator's door
 
 @test("exthost.events", title="The machine's events reach a package, over one subscription",
-      subsystem="exthost", kind="auto", hardware="takeover", est_min=6,
+      subsystem="exthost", kind="operator", hardware="takeover", est_min=6,
       covers=[("forgeext", "src/evfeed.*"), ("forgeext", "src/api.*"), ("forgeext", "src/run.*"),
               ("forgectrl", "src/events.*"), ("forgectrl", "src/main.c")],
-      requires=["exthost.service"],
+      requires=["exthost.service"], actions=["lid"],
+      steps=["Start with the lid closed; you will be told to open it, then close it again.",
+             "Nothing moves and the laser is not involved."],
       description="The reference package is installed with the events capability. The host holds one "
                   "subscription to forgectrl's stream for every package that wants events, and none when "
                   "no package does: with the service running the status file says the stream is connected "

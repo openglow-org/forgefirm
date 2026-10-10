@@ -49,8 +49,11 @@ def _reader(sock, seen, stop):
 
 
 @test("events.button-telemetry", title="The event stream tells a press of the button, and the telemetry",
-      subsystem="forgectrl", kind="auto", mode="grbl", est_min=2,
+      subsystem="forgectrl", kind="operator", mode="grbl", est_min=2,
       covers=[("forgectrl", "src/events.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/status.*")],
+      actions=["button"],
+      steps=["The machine idle; you will be told to press the button once.",
+             "Nothing moves and nothing fires: nothing is waiting for the press."],
       description="A stream opened at forgectrl's read-only listener gets a telemetry.tick within 12 s, "
                   "and it is what the daemon already holds: the cooling phase, the verdict, fire_ok, the "
                   "two coolant temperatures, the controller's state, and the lid, with no sensor read of "

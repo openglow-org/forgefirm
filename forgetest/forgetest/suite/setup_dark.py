@@ -121,7 +121,7 @@ def run_check(ctx, wid, on_prompt, timeout_s):
 @test("setup.check-switches", title="The switches check follows the lid and the button",
       subsystem="setup", kind="operator", est_min=3,
       covers=DARK_COVERS + [("forgectrl", "src/status.c")],
-      requires=["forgectrl.auth"], actions=["lid", "button"],
+      requires=["forgectrl.auth"], actions=["lid", "button", "interlock"],
       description="POST /wiz/switches/start; the check asks for the lid to open and close and for "
                   "a press, each as a 'wait' prompt that the switch edge itself answers; the bench "
                   "fixture works the lid and the button. On a Basic or Plus the interlock loop reads "
