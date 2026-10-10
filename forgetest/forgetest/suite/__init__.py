@@ -15,6 +15,7 @@ from . import setup_sheet  # noqa: F401,E402
 from . import logs       # noqa: F401,E402
 from . import motion     # noqa: F401,E402
 from . import cooling    # noqa: F401,E402
+from . import cooling_intake  # noqa: F401,E402
 from . import laser      # noqa: F401,E402
 from . import camera     # noqa: F401,E402
 from . import update     # noqa: F401,E402

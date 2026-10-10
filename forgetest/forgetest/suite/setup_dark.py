@@ -191,20 +191,28 @@ def check_sensors(ctx):
                             ("forgectrl", "src/gates.c"), ("forgectrl", "src/super.c")],
       requires=["forgectrl.auth", "cooling.fan-gate-trips"],
       description="POST /wiz/airflow/start: the controller stops, the fans run at the cut profile "
-                  "for 35 s, the purge is measured on and off, and five settings are written: the "
-                  "four floors at 55 percent of steady and the grace from the slowest spin-up. Each "
-                  "fan must read at least 1000 rpm. The five settings are put back as found at the "
-                  "end, the purge fan is on again and drawing over the floor the check just wrote, "
-                  "and the controller must be running again.")
+                  "for 35 s, the purge is measured on and off, and six settings are written: the "
+                  "four floors at 55 percent of steady, the grace from the slowest spin-up, and the "
+                  "intake fans fitted (2 when both intakes turn; 1 when intake 2 never reads a pulse "
+                  "and intake 1 passes, and then intake 2 is reported not fitted and the intake floor "
+                  "comes from intake 1). Each fan judged must read at least 1000 rpm. The six "
+                  "settings are put back as found at the end, the purge fan is on again and drawing "
+                  "over the floor the check just wrote, and the controller must be running again.")
 def check_airflow(ctx):
     keys = ["cool_tach_exhaust_min_rpm", "cool_tach_intake_min_rpm", "cool_tach_air_assist_min_rpm",
             "cool_purge_min_current", "cool_fan_grace_s"]
-    with Restore(ctx, keys):
+    with Restore(ctx, keys + ["cool_intake_fans"]):
         last = run_check(ctx, "airflow", lambda p: None, 240)
         r = last.get("result") or {}
         fans = r.get("fans") or {}
+        intakes = r.get("intake_fans")
+        ctx.check(intakes in (1, 2), "the result carries no intake fan count: %r", intakes)
+        ctx.log("intake fans fitted: %s", intakes)
         for name in ("exhaust", "intake 1", "intake 2", "air assist"):
             f = fans.get(name) or {}
+            if name == "intake 2" and intakes == 1:
+                ctx.check(f == {"fitted": False}, "intake 2 with one intake fan: %s", f)
+                continue
             ctx.check(f.get("ok") is True, "%s: %s", name, f)
             ctx.log("%s: %s rpm steady, 90 percent at %s s", name, f.get("steady_rpm"), f.get("spinup_s"))
         floors = r.get("floors") or {}
@@ -213,6 +221,8 @@ def check_airflow(ctx):
         s = ctx.forgectrl.settings() or {}
         for k in keys:
             ctx.check(s.get(k) == floors.get(k), "%s reads %r, the check wrote %r", k, s.get(k), floors.get(k))
+        ctx.check(s.get("cool_intake_fans") == str(intakes),
+                  "cool_intake_fans reads %r, the check found %r", s.get("cool_intake_fans"), intakes)
         ctx.log("floors: %s", json.dumps(floors))
         # The check switches purge air off to read its off current. Leaving
         # it off costs the next job an airflow hold mid-cut, judged against
