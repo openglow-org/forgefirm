@@ -19,7 +19,7 @@ from forgetest import baseline, catalog
 from forgetest.runner import Context, Failed, Run
 from forgetest.suite import setup
 
-IDS = ("setup.gate-blocks-controllers", "setup.override-until-reboot",
+IDS = ("setup.gate-blocks-controllers",
        "setup.advisories-rehash", "setup.account-login", "setup.https-only-writes",
        "setup.ssh-until-reboot", "setup.cloud-disabled-surface",
        "setup.factory-return", "setup.machine-name", "setup.first-run-flow",
@@ -42,6 +42,8 @@ class RegistrationTests(unittest.TestCase):
                 self.assertEqual(kinds[tid], "auto", tid)
         self.assertNotIn("setup.root-ssh-refused", self.reg)     # folded into ssh-until-reboot
         self.assertNotIn("setup.wizard-first-run", self.reg)     # split into the flow and the page
+        self.assertNotIn("setup.override-until-reboot", self.reg)  # the gate has nothing to lift
+        self.assertNotIn("setup.sheet", self.reg)                  # the two burns, each on its own scrap
 
     def test_the_record_swapping_tests_are_takeovers(self):
         for tid in ("setup.gate-blocks-controllers", "setup.advisories-rehash",
@@ -61,13 +63,36 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("setup.check-sensors", self.reg["setup.mirror"].requires)
 
     def test_flag_of_reads_the_status_document(self):
-        w = {"required": ["airflow", {"id": "laser.floor", "reason": "the tube was replaced"}],
-             "recommended": [{"id": "laser.focus", "reason": "the tray was replaced"}]}
-        self.assertEqual(setup.flag_of(w, "required", "laser.floor"), "the tube was replaced")
-        self.assertEqual(setup.flag_of(w, "recommended", "laser.focus"), "the tray was replaced")
-        self.assertIsNone(setup.flag_of(w, "required", "airflow"))       # a plain id is the table, not a flag
-        self.assertIsNone(setup.flag_of(w, "required", "laser.focus"))
-        self.assertIsNone(setup.flag_of({}, "recommended", "x"))
+        w = {"recommended": [{"id": "laser.floor", "reason": "the tube was replaced"},
+                             {"id": "laser.focus", "reason": "the tray was replaced"},
+                             {"id": "airflow", "reason": "not run yet"}, "stray"]}
+        self.assertEqual(setup.flag_of(w, "laser.floor"), "the tube was replaced")
+        self.assertEqual(setup.flag_of(w, "laser.focus"), "the tray was replaced")
+        self.assertEqual(setup.flag_of(w, "airflow"), "not run yet")
+        self.assertIsNone(setup.flag_of(w, "stray"))                     # only an entry with an id counts
+        self.assertIsNone(setup.flag_of(w, "cameras"))
+        self.assertIsNone(setup.flag_of({}, "x"))
+        self.assertEqual(setup.recommended(w), {"laser.floor": "the tube was replaced",
+                                                "laser.focus": "the tray was replaced",
+                                                "airflow": "not run yet"})
+
+    def test_the_gate_parts_and_the_optional_steps_are_never_recommended(self):
+        self.assertFalse(set(setup.RECOMMENDED_STEPS) & set(setup.NEVER_RECOMMENDED))
+        self.assertFalse(set(setup.RECOMMENDED_STEPS) & set(setup.REQUIRED_STEPS))
+        for wid in ("advisories", "account", "airflow.intakes", "laser.floor", "motion.envelope"):
+            self.assertIn(wid, setup.NEVER_RECOMMENDED)
+        for wid in ("lens.travel", "laser.focus", "airflow", "switches"):
+            self.assertIn(wid, setup.RECOMMENDED_STEPS)
+        self.assertEqual(setup.FORM_WIZARDS, ("advisories", "account", "preferences", "machine", "cloud"))
+        # in the order the gate's reason names them
+        self.assertEqual(setup.REQUIRED_STEPS, ("preferences", "machine", "cloud"))
+
+    def test_the_gate_test_starts_from_an_open_gate_and_the_intake_tests_from_a_count(self):
+        reg = self.reg
+        self.assertIs(reg["setup.gate-blocks-controllers"].precheck, setup.gate_is_open)
+        from forgetest.suite import setup_dark
+        for tid in ("setup.check-intakes", "setup.check-airflow"):
+            self.assertIs(reg[tid].precheck, setup_dark.intakes_counted, tid)
 
     def test_the_first_run_flow_runs_unattended_with_the_fixture_and_the_page_walk_does_not(self):
         flow = self.reg["setup.first-run-flow"]
@@ -89,14 +114,14 @@ class RegistrationTests(unittest.TestCase):
         for want in (("forgectrl", "src/ui/wizard.*"), ("forgectrl", "src/ui/md.js"), ("forgectrl", "src/tls.*")):
             self.assertIn(want, page, want)
 
-    def test_the_only_attended_tests_need_a_workstation_or_the_sheet(self):
-        # With the bench actuator up, three setup tests keep a
-        # person: the page walk, the print from the Glowforge app, and
-        # the sheet. Everything else runs from the queue.
+    def test_the_only_attended_tests_need_a_workstation_or_a_scrap(self):
+        # With the bench actuator up, four setup tests keep a person: the
+        # page walk, the print from the Glowforge app, and the two burns,
+        # each on a fresh scrap. Everything else runs from the queue.
         attended = sorted(tid for tid, t in self.reg.items() if tid.startswith("setup.")
                           and t.kind != "auto" and not t.fixture_runnable(("button", "lid", "interlock")))
         self.assertEqual(attended, ["setup.cloud-header-capture", "setup.first-run-page",
-                                    "setup.sheet"])
+                                    "setup.floor", "setup.focus"])
 
     def test_the_factory_return_never_runs_the_return(self):
         import inspect
@@ -152,13 +177,43 @@ class RecordTests(unittest.TestCase):
 
     def test_without_wizards_keeps_consent_and_account(self):
         rec = setup.complete_record(self.STATUS)
-        rec["flags"] = {"machine": {"level": "required", "reason": "x"}}
+        rec["flags"] = {"machine": {"reason": "x"}}
         out = setup.record_without_wizards(rec)
         self.assertEqual(out["wizards"], {})
         self.assertEqual(out["flags"], {})
         self.assertEqual(out["advisories"], rec["advisories"])
         self.assertEqual(out["account"], rec["account"])
-        self.assertEqual(rec["flags"], {"machine": {"level": "required", "reason": "x"}})   # a copy
+        self.assertEqual(rec["flags"], {"machine": {"reason": "x"}})   # a copy
+
+    def test_with_required_steps_keeps_them_and_nothing_else(self):
+        rec = setup.complete_record(self.STATUS)
+        rec["wizards"]["machine"]["result"] = {"model": "basic"}
+        rec["wizards"]["switches"] = {"version": 1}
+        rec["flags"] = {"machine": {"reason": "the head was replaced"}}
+        out = setup.record_with_required_steps(rec)
+        self.assertEqual(sorted(out["wizards"]), ["cloud", "machine", "preferences"])
+        self.assertEqual(out["wizards"]["machine"]["result"], {"model": "basic"})     # kept from the record
+        self.assertEqual(out["wizards"]["preferences"]["version"], 1)               # written at version 1
+        self.assertEqual(out["flags"], {})
+        self.assertEqual(out["account"], rec["account"])
+        self.assertIn("switches", rec["wizards"])                                   # a copy
+
+    def test_without_consent_keeps_the_account_and_the_wizards(self):
+        rec = setup.complete_record(self.STATUS)
+        out = setup.record_without_consent(rec)
+        self.assertEqual(out["advisories"], {})
+        self.assertNotIn("acceptance", out)
+        self.assertEqual(out["account"], rec["account"])
+        self.assertEqual(out["wizards"], rec["wizards"])
+        self.assertIn("pressed_at", rec["acceptance"])                  # a copy
+
+    def test_without_account_keeps_the_consent(self):
+        rec = setup.complete_record(self.STATUS)
+        out = setup.record_without_account(rec)
+        self.assertNotIn("account", out)
+        self.assertEqual(out["advisories"], rec["advisories"])
+        self.assertEqual(out["acceptance"], rec["acceptance"])
+        self.assertEqual(rec["account"]["name"], "bench")              # a copy
 
     def test_write_file_and_remove(self):
         tmp = tempfile.mkdtemp(prefix="forgetest-comm-")
@@ -180,7 +235,6 @@ class RecordTests(unittest.TestCase):
         try:
             self.assertEqual(setup.record_path(), "/tmp/ffdata/setup.json")
             self.assertEqual(setup.users_path(), "/tmp/ffdata/users")
-            self.assertEqual(setup.override_path(), "/tmp/ffrun/setup-override")
             self.assertEqual(setup.ssh_flag_path(), "/tmp/ffrun/ssh-enabled")
         finally:
             os.environ.pop("FORGECTRL_DATA_DIR", None)
@@ -266,7 +320,7 @@ class GatedSettleTests(unittest.TestCase):
 
     def test_gated_returns_at_once(self):
         self.fake.state["mode"] = {"mode": "grbl", "controller": "gated", "pid": 0, "motion": "unverified",
-                                   "gated": True, "why": "setup required: machine"}
+                                   "gated": True, "why": "the intake fans are not counted"}
         lines = []
         body = baseline.Baseline(lines.append).wait_settled(timeout=8)
         self.assertEqual(body["controller"], "gated")
@@ -275,14 +329,14 @@ class GatedSettleTests(unittest.TestCase):
 
 class FirstRunSeedTests(unittest.TestCase):
     """The record the first-run tests install: a first run behind the
-    checks and the sheet."""
+    checks and the burns."""
 
     STATUS = {"wizards": [{"id": "advisories", "version": 1, "class": "form"},
                           {"id": "account", "version": 1, "class": "form"},
                           {"id": "cloud", "version": 1, "class": "form"},
                           {"id": "switches", "version": 1, "class": "dark"},
                           {"id": "motion", "version": 2, "class": "dark"},
-                          {"id": "sheet.frame", "version": 1, "class": "live"}]}
+                          {"id": "laser.focus", "version": 1, "class": "live"}]}
 
     def test_no_consent_no_account_not_complete_and_every_check_done(self):
         base = {"created": "2026-09-01T00:00:00Z", "completed": "2026-09-02T00:00:00Z",
@@ -296,14 +350,14 @@ class FirstRunSeedTests(unittest.TestCase):
         self.assertEqual(rec["advisories"], {})
         self.assertEqual(rec["created"], "2026-09-01T00:00:00Z")
         self.assertEqual(rec["flags"], {"flow_thin": True})
-        self.assertEqual(sorted(rec["wizards"]), ["motion", "sheet.frame", "switches"])
+        self.assertEqual(sorted(rec["wizards"]), ["laser.focus", "motion", "switches"])
         self.assertEqual(rec["wizards"]["switches"]["result"], {"lid": True})   # kept from the base
         self.assertEqual(rec["wizards"]["motion"]["version"], 2)                 # written at the catalog version
 
     def test_without_a_base_record(self):
         rec = setup.first_run_record(self.STATUS, None)
-        self.assertEqual(sorted(rec["wizards"]), ["motion", "sheet.frame", "switches"])
-        self.assertEqual(rec["wizards"]["sheet.frame"]["version"], 1)
+        self.assertEqual(sorted(rec["wizards"]), ["laser.focus", "motion", "switches"])
+        self.assertEqual(rec["wizards"]["laser.focus"]["version"], 1)
 
 
 class SshdPolicyTests(unittest.TestCase):

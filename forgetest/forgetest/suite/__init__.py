@@ -11,7 +11,7 @@ from . import kernel     # noqa: F401,E402
 from . import forgectrl  # noqa: F401,E402
 from . import setup # noqa: F401,E402
 from . import setup_dark  # noqa: F401,E402
-from . import setup_sheet  # noqa: F401,E402
+from . import setup_burns  # noqa: F401,E402
 from . import logs       # noqa: F401,E402
 from . import motion     # noqa: F401,E402
 from . import cooling    # noqa: F401,E402

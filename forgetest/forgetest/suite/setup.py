@@ -41,12 +41,25 @@ from .forgectrl import lan_ip
 
 RECORD = "setup.json"
 USERS = "users"
-OVERRIDE = "setup-override"
 SSH_FLAG = "ssh-enabled"
 TLS_BASE = "https://127.0.0.1"          # FORGECTRL_TLS_URL overrides (host tests)
 
-# The image's required wizards, all at version 1 (setup.c).
-REQUIRED_WIZARDS = ("advisories", "account", "preferences", "machine", "cloud")
+# The first run's form wizards, all at version 1 (wiz.c).
+FORM_WIZARDS = ("advisories", "account", "preferences", "machine", "cloud")
+# The steps the gate requires after the account, all at version 1, in
+# the order the gate's reason names them (setup.c).
+REQUIRED_STEPS = ("preferences", "machine", "cloud")
+# What the image's step table recommends on a record with the required
+# steps done and nothing else (setup.c): every step after them. The
+# cloud header joins on a machine with cloud mode on. The gate's own
+# parts (the advisories, the account, the required steps, the intake fan
+# count) are never recommended as not run yet, and the laser floor and
+# the bed size are offered, never recommended.
+RECOMMENDED_STEPS = ("switches", "sensors", "airflow", "cooling.aa-offset", "cooling.flow", "motion",
+                     "cameras", "lens.travel", "laser.focus")
+NEVER_RECOMMENDED = ("advisories", "account", "airflow.intakes", "laser.floor", "motion.envelope")
+# The setting that counts the intake fans: the gate holds without it.
+INTAKE_KEY = "cool_intake_fans"
 ADVISORY_DOCS = ("safety-and-risk", "licenses", "privacy", "cloud-service")
 SAFETY_PHRASE = "I UNDERSTAND"
 LOGIN_FAILS = 5
@@ -70,10 +83,6 @@ def record_path():
 
 def users_path():
     return posixpath.join(data_dir(), USERS)
-
-
-def override_path():
-    return posixpath.join(run_dir(), OVERRIDE)
 
 
 def ssh_flag_path():
@@ -108,33 +117,6 @@ def write_file(path, data):
     finally:
         os.close(fd)
     os.replace(tmp, path)
-
-
-def override_present():
-    return os.path.exists(override_path())
-
-
-def set_override(on):
-    write_file(override_path(), b"" if on else None)
-
-
-def tmpfs_mount(path):
-    """The (mount point, fstype) that holds path, from /proc/mounts;
-    (None, None) when unreadable."""
-    best = (None, None)
-    try:
-        with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                mp = parts[1]
-                if path == mp or path.startswith(mp.rstrip("/") + "/"):
-                    if best[0] is None or len(mp) > len(best[0]):
-                        best = (mp, parts[2])
-    except OSError:
-        pass
-    return best
 
 
 # --------------------------------------------------------------- records
@@ -172,11 +154,41 @@ def now_iso():
 
 def record_without_wizards(record):
     """A copy of a record with no completed wizard and no flag: the
-    consent and the account stay, so the gate closes on the wizard part
-    alone, which is the part the override lifts."""
+    consent and the account stay, so the gate closes on the required
+    steps."""
     out = json.loads(json.dumps(record))
     out["wizards"] = {}
     out["flags"] = {}
+    return out
+
+
+def record_with_required_steps(record):
+    """A copy of a record with the required steps done (kept from the
+    record, or written at version 1) and nothing else, and no flag: on a
+    machine whose intake fans are counted the gate is open and every
+    other step is recommended as not run yet."""
+    out = record_without_wizards(record)
+    have = record.get("wizards") or {}
+    for wid in REQUIRED_STEPS:
+        out["wizards"][wid] = have.get(wid) or {"version": 1, "completed": now_iso(), "result": {},
+                                                "applied": {}}
+    return out
+
+
+def record_without_consent(record):
+    """A copy of a record with no advisory accepted and no press: the
+    gate closes on the consent, whatever else the record holds."""
+    out = json.loads(json.dumps(record))
+    out["advisories"] = {}
+    out.pop("acceptance", None)
+    return out
+
+
+def record_without_account(record):
+    """A copy of a record with the consent and no account: the gate
+    closes on the account."""
+    out = json.loads(json.dumps(record))
+    out.pop("account", None)
     return out
 
 
@@ -203,7 +215,7 @@ def complete_record(status, base=None, account_name="bench"):
     rec["account"] = acct or {"name": account_name, "uid": 1000, "created": ts}
     if isinstance(base.get("machine"), dict):
         rec["machine"] = base["machine"]
-    wizards = status.get("wizards") or [{"id": w, "version": 1} for w in REQUIRED_WIZARDS]
+    wizards = status.get("wizards") or [{"id": w, "version": 1} for w in FORM_WIZARDS]
     for w in wizards:
         rec["wizards"][w["id"]] = {"version": int(w.get("version") or 1), "completed": ts,
                                    "result": {}, "applied": {}}
@@ -330,9 +342,14 @@ def press_status(fc):
 
 
 def wiz_summary(w):
-    return {k: w.get(k) for k in ("first_run", "gate", "override", "why", "required",
+    return {k: w.get(k) for k in ("first_run", "gate", "why", "recommended",
                                   "advisories_complete", "acceptance_done", "account",
-                                  "completed", "versions")}
+                                  "fans_counted", "completed", "versions")}
+
+
+def recommended(w):
+    """The steps a GET /wiz body recommends: {id: reason}."""
+    return {x.get("id"): x.get("reason") or "" for x in w.get("recommended") or [] if isinstance(x, dict)}
 
 
 def wait_settled(ctx):
@@ -354,143 +371,138 @@ def gate_is_open():
     return None
 
 
-
 # -------------------------------------------------------------- the gate
 
 _GATE_COVERS = [("forgectrl", "src/setup.*"), ("forgectrl", "src/super.c"),
                 ("forgectrl", "src/main.c"), ("forgectrl", "src/paths.h")]
 
 
-@test("setup.gate-blocks-controllers", title="The setup gate spawns no controller",
-      subsystem="setup", kind="auto", hardware="takeover", mode="grbl", est_min=5,
+@test("setup.gate-blocks-controllers",
+      title="The setup gate holds the controller until the advisories, the account, the required "
+            "steps, and the intake fans",
+      subsystem="setup", kind="auto", hardware="takeover", mode="grbl", est_min=8,
       covers=_GATE_COVERS, requires=["forgectrl.auth"], precheck=gate_is_open,
-      description="With the override removed and a record that lacks every required wizard "
-                  "(installed under a forgectrl restart, the consent and the account kept), "
-                  "GET /mode reports the controller gated with the reason naming the wizards, "
-                  "GET /wiz lists them as required, no controller process runs and the Grbl port "
-                  "is closed. The override file then opens the gate live: the supervisor spawns "
-                  "the controller and it comes back running. The real record and the override "
-                  "state are restored under another restart and the machine reads as before.")
+      description="Four records in turn, each installed under a forgectrl restart. Without the "
+                  "consent (no advisory accepted, no press), GET /mode reports the controller "
+                  "gated with the reason naming the advisories, GET /wiz agrees, no controller "
+                  "process runs and the Grbl port is closed; with the consent and without the "
+                  "account, the same with the reason naming the account; with the consent and "
+                  "the account and no step done, the same with the reason 'setup required: "
+                  "preferences, machine, cloud'. With those three done as well and no flag, the "
+                  "gate is open with no reason: the supervisor spawns the controller, the Grbl "
+                  "port accepts, and GET /wiz recommends every other step as not run yet (never "
+                  "the advisories, the account, the three required steps, or the intake fan "
+                  "count; not the optional laser floor or bed size). On that record the intake "
+                  "fan count is cleared: the gate closes live with the reason naming the intake "
+                  "fans, GET /wiz reports them not counted, and the supervisor stops the "
+                  "controller; the count written back as found opens the gate again and the "
+                  "controller comes back. The real record is restored under another restart and "
+                  "the machine reads as before.")
 def gate_blocks_controllers(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
     before = wiz(fc)
     ev["before"] = wiz_summary(before)
-    ctx.log("before: gate %s, override %s, required %s", before.get("gate"), before.get("override"),
-            before.get("required"))
+    ctx.log("before: gate %s, %d steps recommended", before.get("gate"), len(recommended(before)))
     raw = read_file(record_path())
     ctx.check(raw, "no setup record at %s", record_path())
     try:
         record = json.loads(raw.decode("utf-8"))
     except ValueError as e:
         ctx.fail("the setup record is not JSON: %s", e)
-    lacking = json.dumps(record_without_wizards(record), indent=1, sort_keys=True).encode() + b"\n"
-    had_override = override_present()
-    ev["override_before"] = had_override
 
-    with installed(ctx, {record_path(): lacking, override_path(): None}):
-        # the daemon is up again with the record that lacks the wizards
+    def encoded(rec):
+        return json.dumps(rec, indent=1, sort_keys=True).encode() + b"\n"
+
+    def gated(part, words):
+        """The gate closed on `part`: the supervisor and GET /wiz say so
+        in `words`, and no controller runs."""
         took = ctx.wait_for(lambda: mode(fc).get("controller") == "gated", 60)
         m = mode(fc)
-        ev["gated_mode"] = m
-        ctx.log("/mode after the restart: %s (after %s s)", m, took)
+        ev["gated_mode " + part] = m
+        ctx.log("/mode without the %s: %s (after %s s)", part, m, took)
         ctx.check(m.get("controller") == "gated" and m.get("gated") is True,
-                  "the supervisor did not report the gate: %s", m)
-        ctx.check("setup required" in (m.get("why") or ""),
-                  "the reason does not name the missing wizards: %r", m.get("why"))
+                  "without the %s the supervisor did not report the gate: %s", part, m)
+        ctx.check(words in (m.get("why") or ""), "the reason does not name the %s: %r", part, m.get("why"))
         w = wiz(fc)
-        ev["gated_wiz"] = wiz_summary(w)
-        ctx.check(w.get("gate") == "closed" and w.get("override") is False,
+        ev["gated_wiz " + part] = wiz_summary(w)
+        ctx.check(w.get("gate") == "closed" and words in (w.get("why") or ""),
                   "GET /wiz does not agree with the closed gate: %s", wiz_summary(w))
-        ctx.check(set(w.get("required") or []) >= set(REQUIRED_WIZARDS),
-                  "GET /wiz does not list every required wizard: %s", w.get("required"))
         ctx.check(not hw.grbl_port_open(timeout=2), "the Grbl port answers while the gate is closed")
         pids = hw.pidof("grblHAL_glowfor") + hw.pgrep_f("gfcloud.py")
-        ev["controller_pids_gated"] = pids
+        ev["controller_pids " + part] = pids
         ctx.check(not pids, "a controller process runs while the gate is closed: %s", pids)
-        ctx.log("gated: no controller process, the Grbl port is closed")
+        ctx.log("gated on the %s: no controller process, the Grbl port is closed", part)
 
-        # the override lifts the wizard part live: no restart
-        set_override(True)
-        ctx.wait_for(lambda: wiz(fc).get("gate") == "open", 15)
-        w = wiz(fc)
-        ev["override_wiz"] = wiz_summary(w)
-        ctx.check(w.get("gate") == "open" and w.get("override") is True,
-                  "the override did not open the gate: %s", wiz_summary(w))
-        ctx.check((w.get("why") or "").startswith("override active"),
-                  "the reason does not say the override stands: %r", w.get("why"))
+    def running(what):
+        """The gate open: the supervisor spawns the controller and its
+        port accepts."""
         # The supervisor spawns on its next pass; a gated machine counts
         # as settled, so wait for the spawn before the settle wait.
         took = ctx.wait_for(lambda: mode(fc).get("controller") == "running", 60)
-        ctx.log("the controller spawned under the override (%s s)", took)
         m = wait_settled(ctx)
-        ev["override_mode"] = m
+        ev["open_mode " + what] = m
         ctx.check(took is not None and isinstance(m, dict) and m.get("controller") == "running",
-                  "the controller did not come back under the override: %s", m)
+                  "the controller did not come back %s: %s", what, m)
         # /mode reads running from the fork; the controller binds its port
         # a few tens of milliseconds later
         opened = ctx.wait_for(lambda: hw.grbl_port_open(timeout=1), 10, poll=0.05)
-        ev["port_open_after_s"] = opened
+        ev["port_open_after_s " + what] = opened
         ctx.check(opened is not None, "the Grbl port is closed with the controller running")
-        ctx.log("override: the controller is back (%s), the Grbl port accepts after %.3f s", m, opened)
+        ctx.log("%s: the controller is running, the Grbl port accepts after %.3f s", what, opened)
 
-    # the real record is back under a restart; the override reads as found
+    with installed(ctx, {record_path(): encoded(record_without_consent(record))}):
+        gated("consent", "the advisories are not accepted")
+        with ctx.takeover():
+            write_file(record_path(), encoded(record_without_account(record)))
+        gated("account", "no account exists")
+        with ctx.takeover():
+            write_file(record_path(), encoded(record_without_wizards(record)))
+        gated("required steps", "setup required: " + ", ".join(REQUIRED_STEPS))
+        with ctx.takeover():
+            write_file(record_path(), encoded(record_with_required_steps(record)))
+
+        # the consent, the account, the required steps, the intake fans
+        # counted: nothing else closes the gate
+        w = wiz(fc)
+        ev["open_wiz"] = wiz_summary(w)
+        ctx.check(w.get("gate") == "open" and not w.get("why") and w.get("fans_counted") is True,
+                  "the consent, the account, and the required steps do not open the gate: %s", wiz_summary(w))
+        running("with the required steps done")
+        recm = recommended(w)
+        missing = [s for s in RECOMMENDED_STEPS if s not in recm]
+        ctx.check(not missing, "GET /wiz does not recommend %s: %s", missing, recm)
+        stray = [s for s in recm if s in NEVER_RECOMMENDED + REQUIRED_STEPS]
+        ctx.check(not stray, "GET /wiz recommends %s", stray)
+        other = {k: v for k, v in recm.items() if v != "not run yet"}
+        ctx.check(not other, "with nothing else done, steps are recommended for another reason: %s", other)
+        ctx.log("recommended, each not run yet: %s", sorted(recm))
+
+        # the intake fan count holds the gate as the account does
+        with Restore(ctx, [INTAKE_KEY]) as count:
+            ctx.check(count.before.get(INTAKE_KEY), "%s is unset with the gate open", INTAKE_KEY)
+            st, body = fc.post("/settings", params={INTAKE_KEY: ""})
+            ctx.check(st == 200, "clearing %s -> %s %s", INTAKE_KEY, st, body)
+            ctx.wait_for(lambda: wiz(fc).get("fans_counted") is False, 15)
+            ctx.check(wiz(fc).get("fans_counted") is False,
+                      "GET /wiz reports the intake fans counted with %s unset", INTAKE_KEY)
+            gated("intake fan count", "the intake fans are not counted")
+        running("with the intake fans counted again")
+        ctx.check((fc.settings() or {}).get(INTAKE_KEY) == count.before.get(INTAKE_KEY),
+                  "%s reads %r, was %r", INTAKE_KEY, (fc.settings() or {}).get(INTAKE_KEY),
+                  count.before.get(INTAKE_KEY))
+
+    # the real record is back under a restart
     after = wiz(fc)
     ev["after"] = wiz_summary(after)
     ctx.check(after.get("gate") == before.get("gate"),
               "the gate reads %s after the restore, was %s", after.get("gate"), before.get("gate"))
-    ctx.check(sorted(after.get("required") or []) == sorted(before.get("required") or []),
-              "the required list changed: %s -> %s", before.get("required"), after.get("required"))
-    ctx.check(override_present() == had_override, "the override file does not read as found")
+    ctx.check(recommended(after) == recommended(before),
+              "the recommended list changed: %s -> %s", recommended(before), recommended(after))
     m = mode(fc)
     ev["after_mode"] = m
     ctx.check(m.get("controller") == "running", "the controller is %s after the restore", m.get("controller"))
     ctx.log("restored: gate %s, controller %s", after.get("gate"), m.get("controller"))
-
-
-@test("setup.override-until-reboot", title="The override stands until the next reboot",
-      subsystem="setup", kind="auto", est_min=1,
-      covers=_GATE_COVERS, requires=["forgectrl.auth"],
-      description="The bench seed: the dev image's forgetest init script writes "
-                  "/run/forgefirm/setup-override at boot. With it present, GET /wiz "
-                  "reports the override and an open gate, the reason names the wizards it lifts "
-                  "when any is required, and GET /mode reports the controller running and not "
-                  "gated. The file lives on tmpfs (/proc/mounts), so a reboot removes it by "
-                  "construction and the gate is then evaluated from the record alone. The "
-                  "override never lifts the advisories or the account.")
-def override_until_reboot(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    path = override_path()
-    ctx.check(os.path.exists(path),
-              "no override at %s: the dev image's forgetest init script creates it at boot", path)
-    mp, fstype = tmpfs_mount(os.path.dirname(path))
-    ev["mount"] = {"point": mp, "fstype": fstype}
-    ctx.log("%s is on %s (%s)", path, mp, fstype)
-    ctx.check(fstype == "tmpfs", "%s is not on tmpfs (%s on %s): a reboot would keep the override",
-              path, fstype, mp)
-
-    w = wiz(fc)
-    ev["wiz"] = wiz_summary(w)
-    ctx.log("GET /wiz: %s", ev["wiz"])
-    ctx.check(w.get("override") is True, "GET /wiz does not see the override")
-    ctx.check(w.get("gate") == "open", "the gate is closed under the override: %s", w.get("why"))
-    ctx.check(w.get("advisories_complete") is True and w.get("acceptance_done") is True
-              and w.get("account") is True,
-              "the consent or the account is missing (%s): nothing lifts those", wiz_summary(w))
-    required = [r if isinstance(r, str) else (r or {}).get("id") for r in w.get("required") or []]
-    why = w.get("why") or ""
-    if required:
-        ctx.check(why.startswith("override active") and all(str(r) in why for r in required),
-                  "the reason does not name the lifted wizards %s: %r", required, why)
-        ctx.log("the override lifts: %s", required)
-    else:
-        ctx.check(why == "", "every wizard is complete but the reason reads %r", why)
-        ctx.log("every required wizard is complete; the override lifts nothing today")
-    m = mode(fc)
-    ev["mode"] = m
-    ctx.check(m.get("gated") is False and m.get("controller") == "running",
-              "the supervisor is gated or the controller is down: %s", m)
 
 
 # ------------------------------------------------------------ advisories
@@ -508,9 +520,8 @@ def override_until_reboot(ctx):
                   "document is refused (400); an accept with a stale hash is refused (409); the "
                   "typed document without its phrase is refused (400); the accept at the current "
                   "hash with the phrase is recorded (200), and any new acceptance clears the "
-                  "press (acceptance_done false, the gate closed on the consent, which the "
-                  "override never lifts). The previous record is put back under a forgectrl "
-                  "restart and the machine reads as before.")
+                  "press (acceptance_done false, the gate closed on the consent). The previous "
+                  "record is put back under a forgectrl restart and the machine reads as before.")
 def advisories_rehash(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -1379,13 +1390,13 @@ FIRST_RUN_SETTINGS = ["cloud_enabled", "homing_mode", "controller_mode", "gfclou
 
 
 def first_run_record(status, base):
-    """A record that reads as a first run with the checks and the sheet
+    """A record that reads as a first run with the checks and the burns
     behind it: no consent, no press, no account, no form wizard, not
-    complete; every check and live wizard of the catalog kept from
-    `base` (the real record) or written at its catalog version. It is
-    the machine after the button-hold reset of the consent and the
-    account, and it lets the first run reach Finish without the hour of
-    checks and burns that a fresh machine owes."""
+    complete; every check and burn of the catalog kept from `base` (the
+    real record) or written at its catalog version. It is the machine
+    after the button-hold reset of the consent and the account, so the
+    run walks the form steps and not the hour of checks and burns a
+    fresh machine is offered."""
     base = base or {}
     ts = now_iso()
     rec = {"schema": 1, "created": base.get("created") or ts, "advisories": {}, "wizards": {},
@@ -1403,10 +1414,10 @@ def first_run_record(status, base):
 def first_run(ctx):
     """The machine as a first run for the block: the record seeded by
     first_run_record and the account record removed, under a forgectrl
-    restart, with the override kept; the settings the form steps write
-    put back as found; the real records restored under another restart,
-    the system accounts replayed from them, and the temporary home
-    directory removed. Yields a dict the block fills with `temp_account`."""
+    restart; the settings the form steps write put back as found; the
+    real records restored under another restart, the system accounts
+    replayed from them, and the temporary home directory removed. Yields
+    a dict the block fills with `temp_account`."""
     fc = ctx.forgectrl
     ev = ctx.evidence
     before = wiz(fc)
@@ -1425,7 +1436,7 @@ def first_run(ctx):
     state = {"temp_account": None}
     try:
         with Restore(ctx, FIRST_RUN_SETTINGS):
-            with installed(ctx, {record_path(): seed, users_path(): None, override_path(): b""}):
+            with installed(ctx, {record_path(): seed, users_path(): None}):
                 w = wiz(fc)
                 ev["fresh"] = wiz_summary(w)
                 ctx.check(w.get("first_run") is True and not (w.get("users") or {}).get("exists")
@@ -1458,12 +1469,12 @@ def first_run(ctx):
 
 def finished_first_run(ctx):
     """The end of a first run: the record complete, the gate open, the
-    controller back."""
+    controller running."""
     fc = ctx.forgectrl
     ev = ctx.evidence
     w = wiz(fc)
     ev["completed"] = wiz_summary(w)
-    ctx.check(w.get("completed") is True and w.get("gate") == "open" and not w.get("required"),
+    ctx.check(w.get("completed") is True and w.get("gate") == "open",
               "the run did not complete with the gate open: %s", wiz_summary(w))
     m = wait_settled(ctx)
     ev["mode_after_setup"] = m
@@ -1487,13 +1498,19 @@ _FIRST_RUN_REQUIRES = ["setup.gate-blocks-controllers", "setup.advisories-rehash
                   "advisories_complete; POST /wiz/advisories/press, the button state waiting and "
                   "the button LEDs breathing teal, the press (the bench actuator's), "
                   "acceptance_done; POST /wiz/account with a temporary name and password, the "
-                  "account exists and the response sets the session cookie; POST /wiz/preferences "
-                  "with the units as found; POST /wiz/machine with the model as found (basic when "
-                  "unknown) and no TEC; POST /wiz/cloud as found (enabled with the phrase and the "
-                  "homing as found, or off); POST /wiz/complete, the record complete, the gate "
-                  "open, the controller back. The settings the steps write, the real record and "
-                  "the account are restored, the system accounts replayed, the temporary home "
-                  "removed. Nothing moves and the laser is not involved.")
+                  "account exists and the response sets the session cookie, and the gate holds "
+                  "with the reason 'setup required: preferences, machine, cloud' and no "
+                  "controller. Then the required steps, the gate's reason naming what is left "
+                  "after each: POST /wiz/preferences with the units as found; POST /wiz/machine "
+                  "with the model as found (basic when unknown) and no TEC; POST /wiz/cloud as "
+                  "found (enabled with the phrase and the homing as found, or off). With the "
+                  "intake fans counted (the machine's setting, which the seed leaves alone) the "
+                  "gate opens and the supervisor starts the controller. POST /wiz/complete, which "
+                  "Start using the machine and Finish later both call: the record complete, the "
+                  "gate open, the controller running. The settings "
+                  "the steps write, the real record and the account are restored, the system "
+                  "accounts replayed, the temporary home removed. Nothing moves and the laser is "
+                  "not involved.")
 def first_run_flow(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -1541,12 +1558,29 @@ def first_run_flow(ctx):
                   "the account does not read created: %s", w.get("users"))
         ctx.log("account %r created, the session cookie set", name)
 
+        # After the account the gate waits for the required steps: no
+        # controller yet, and the reason names what is left.
+        def still_gated(left):
+            w = wiz(fc)
+            m = mode(fc)
+            why = "setup required: " + ", ".join(left)
+            ev["gated " + why] = {"wiz": wiz_summary(w), "mode": m}
+            ctx.check(w.get("gate") == "closed" and w.get("why") == why,
+                      "GET /wiz does not hold the gate on %s: %s", ", ".join(left), wiz_summary(w))
+            ctx.check(m.get("controller") == "gated", "the controller is %s with %s left", m.get("controller"),
+                      ", ".join(left))
+
+        still_gated(REQUIRED_STEPS)
+        ctx.log("the gate holds after the account: %s", wiz(fc).get("why"))
+
         st, body = fc.post("/wiz/preferences", data={"ui_units": settings.get("ui_units") or "metric"})
         ctx.check(st == 200, "POST /wiz/preferences -> %s %s", st, body if isinstance(body, dict) else "")
+        still_gated(REQUIRED_STEPS[1:])
         machine = (w.get("machine") or {})
         model = machine.get("model") if machine.get("model") in ("basic", "plus", "pro") else "basic"
         st, body = fc.post("/wiz/machine", data={"model": model, "tec": "0"})
         ctx.check(st == 200, "POST /wiz/machine -> %s %s", st, body if isinstance(body, dict) else "")
+        still_gated(REQUIRED_STEPS[2:])
         if settings.get("cloud_enabled") == "1":
             data = {"enabled": "1", "phrase": SAFETY_PHRASE,
                     "homing_mode": settings.get("homing_mode") or "gfcloud"}
@@ -1557,18 +1591,32 @@ def first_run_flow(ctx):
         ctx.check(st == 200, "POST /wiz/cloud %s -> %s %s", data, st, body if isinstance(body, dict) else "")
         w = wiz(fc)
         done = w.get("versions") or {}
-        for wid in REQUIRED_WIZARDS:
+        for wid in FORM_WIZARDS:
             ctx.check(done.get(wid) == 1, "the record does not carry %s at version 1: %s", wid, done)
         ctx.log("preferences, machine (%s), cloud (%s) written", model, data.get("enabled"))
+
+        # The required steps done and the intake fans counted (the
+        # machine's setting, which the seed leaves alone, so the page shows
+        # the Intake fans step as done): the gate opens and the controller
+        # runs, whatever the setup does next.
+        ev["after_required"] = wiz_summary(w)
+        ctx.check(w.get("gate") == "open" and not w.get("why") and w.get("fans_counted") is True,
+                  "the gate does not open with the required steps: %s", wiz_summary(w))
+        took = ctx.wait_for(lambda: mode(fc).get("controller") == "running", 60)
+        m = wait_settled(ctx)
+        ev["mode_after_required"] = m
+        ctx.check(took is not None and isinstance(m, dict) and m.get("controller") == "running",
+                  "the controller did not start with the required steps: %s", m)
+        ctx.log("the gate is open; the controller runs (%.1f s)", took)
 
         st, body = fc.post("/wiz/complete")
         ctx.check(st == 200, "POST /wiz/complete -> %s %s", st, body if isinstance(body, dict) else "")
         finished_first_run(ctx)
-        ctx.log("the run completed: gate open, the controller back")
+        ctx.log("the run completed: gate open, the controller running")
 
 
 @test("setup.first-run-page", title="The first-run page, walked once", subsystem="setup",
-      kind="operator", hardware="takeover", est_min=6,
+      kind="operator", hardware="takeover", est_min=5,
       covers=[("forgectrl", "src/ui/wizard.*"), ("forgectrl", "src/ui/forms.js"), ("forgectrl", "src/ui/md.js"),
               ("forgectrl", "src/ui/login.*"), ("forgectrl", "src/ui/embed_docs.cmake"), ("forgectrl", "src/tls.*")],
       requires=_FIRST_RUN_REQUIRES + ["setup.first-run-flow"],
@@ -1577,16 +1625,19 @@ def first_run_flow(ctx):
              "Click through the setup: scroll each document to its end and accept it (type I "
              "UNDERSTAND for the safety document); press the machine's button when it breathes "
              "teal; create a temporary account (any name and password: it is removed at the end); "
-             "take the preferences, the machine, and the cloud step as offered; click Finish. The "
-             "checks and the sheet are behind you already.",
+             "take the preferences, the machine, and the cloud step as offered. The intake fans "
+             "show as counted already. The page then offers to continue the setup or to start "
+             "using the machine: click Start using the machine.",
              "Confirm that the control panel opened."],
       description="The page against the real daemon over HTTPS, the one place a browser is the "
                   "client: the record seeded as a first run behind the checks and no account, "
-                  "'/' serves the wizard, and the test follows the record while the operator "
-                  "clicks through (the documents accepted, the press step with the LEDs "
-                  "breathing teal, the account created, the run complete, the gate open, the "
-                  "controller back). The operator confirms the panel opened. Everything the run "
-                  "wrote is restored as setup.first-run-flow restores it.")
+                  "'/' serves the wizard with its choice after the cloud step and the intake fans, "
+                  "and the test follows the record while the operator clicks through (the "
+                  "documents accepted, the press step with the LEDs breathing teal, the account "
+                  "created, preferences, machine, and cloud done and the gate open with the "
+                  "intake fans counted, then Start using the machine: the run complete, the gate "
+                  "open, the controller running). The operator confirms the panel opened. "
+                  "Everything the run wrote is restored as setup.first-run-flow restores it.")
 def first_run_page(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -1596,6 +1647,8 @@ def first_run_page(ctx):
         st, page, hdrs = request("https://%s" % ip, "GET", "/")
         ev["root_page"] = st
         ctx.check(st == 200 and b'id="exitlink"' in page, "'/' over HTTPS does not serve the wizard (%s)", st)
+        ctx.check(b'id="st-choice"' in page and b"Start using the machine" in page,
+                  "the wizard carries no choice after the required steps")
         ctx.notice("Open https://%s/ from the workstation, accept the certificate, and click through "
                    "the setup as the steps describe. The test follows the record." % ip)
         took = ctx.wait_for(lambda: wiz(fc).get("advisories_complete") is True, 900)
@@ -1609,17 +1662,26 @@ def first_run_page(ctx):
         ctx.check(took is not None, "the button LEDs do not breathe teal at the press step: %s", pattern)
         ctx.act("button", "press", until=lambda: wiz(fc).get("acceptance_done") is True, timeout=600,
                 text="It breathes teal: this press is the acceptance. The page must be at the press step.")
-        ctx.notice("Continue on the page: the account, the preferences, the machine, the cloud step, Finish.")
+        ctx.notice("Continue on the page: the account, the preferences, the machine, the cloud step, "
+                   "then Start using the machine.")
         took = ctx.wait_for(lambda: (wiz(fc).get("users") or {}).get("exists") is True, 600)
         ctx.check(took is not None, "no account was created within 10 min")
         state["temp_account"] = (wiz(fc).get("users") or {}).get("name")
         ev["temp_account"] = state["temp_account"]
         ctx.log("account %r created (%.0f s)", state["temp_account"], took)
+        took = ctx.wait_for(lambda: wiz(fc).get("gate") == "open", 900)
+        w = wiz(fc)
+        ev["after_required"] = wiz_summary(w)
+        ctx.check(took is not None, "the gate did not open within 15 min of the account: %s", w.get("why"))
+        done = w.get("versions") or {}
+        ctx.check(all(done.get(wid) == 1 for wid in REQUIRED_STEPS) and w.get("fans_counted") is True,
+                  "the gate opened without the required steps or the intake fans: %s", wiz_summary(w))
+        ctx.log("preferences, machine, and cloud done; the gate is open (%.0f s)", took)
         took = ctx.wait_for(lambda: wiz(fc).get("completed") is True, 900)
         ctx.check(took is not None, "the setup did not complete within 15 min")
         finished_first_run(ctx)
         ctx.clear_notice()
-        ctx.confirm("Did the control panel open after Finish?")
+        ctx.confirm("Did the control panel open after Start using the machine?")
 
 
 @test("setup.cert-page", title="The certificate is checkable before the warning",
@@ -1672,43 +1734,46 @@ def preserved(ctx, *paths):
         ctx.log("restored under a restart: %s", ", ".join(os.path.basename(p) for p in saved))
 
 
-def flag_of(w, level, wid):
-    """The reason a GET /wiz body gives for wid at level ("required" or
-    "recommended"), or None when the flag is not raised."""
-    for x in w.get(level) or []:
-        if isinstance(x, dict) and x.get("id") == wid:
-            return x.get("reason") or ""
-    return None
+def flag_of(w, wid):
+    """The reason a GET /wiz body gives for recommending wid, or None when
+    it does not recommend it."""
+    return recommended(w).get(wid)
 
 
-@test("setup.what-changed", title="A replaced part asks for its checks again",
+@test("setup.what-changed", title="A replaced part recommends its steps again",
       subsystem="setup", kind="auto", est_min=2, hardware="takeover",
       covers=[("forgectrl", "src/setup.*"), ("forgectrl", "src/wiz.*"), ("forgectrl", "src/main.c"),
               ("forgectrl", "src/ui/panel.js"), ("forgectrl", "src/ui/index.html"),
               ("forgectrl", "src/ui/help.js")],
       requires=["forgectrl.auth"],
-      description="GET /wiz carries the what-changed menu (every change with the wizards it maps "
-                  "to, all of them in the catalog). POST /wiz/changed what=tray flags the focus "
-                  "card as recommended with the tray as the reason and leaves the gate as it was; "
-                  "what=fan flags the airflow check as required, and the gate closes unless the "
-                  "override stands; an unknown change is refused (400). The record is put back "
-                  "as found under a forgectrl restart.")
+      description="GET /wiz carries the what-changed menu: every change with the steps it "
+                  "recommends, all of them in the catalog (the tube the laser floor; the pump and "
+                  "the coolant the coolant flow; a fan the airflow check; the head the machine, "
+                  "the lens travel, the focus, motion, and the cameras; the tray the focus; a "
+                  "service the switches and motion). POST /wiz/changed what=tray recommends the "
+                  "focus burn with the tray as the reason, and what=fan the airflow check with the "
+                  "fan as the reason; neither moves the gate, which only the advisories, the "
+                  "account, the required steps, and the intake fan count close. An unknown change "
+                  "is refused (400). "
+                  "The record is put back as found under a forgectrl restart.")
 def what_changed(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
+    want = {"tube": ["laser.floor"], "pump": ["cooling.flow"], "coolant": ["cooling.flow"],
+            "fan": ["airflow"], "head": ["machine", "lens.travel", "laser.focus", "motion", "cameras"],
+            "tray": ["laser.focus"], "service": ["switches", "motion"]}
     before = wiz(fc)
     ev["before"] = wiz_summary(before)
     menu = before.get("changes") or []
     catalog_ids = {z["id"] for z in before.get("wizards") or []}
-    ev["menu"] = [c.get("id") for c in menu]
-    ctx.check(len(menu) >= 7, "the menu lists %d changes, expected at least 7", len(menu))
+    ev["menu"] = {c.get("id"): [x.get("id") for x in c.get("wizards") or []] for c in menu}
+    ctx.check(ev["menu"] == want, "the menu reads %s, expected %s", ev["menu"], want)
     unknown = [x["id"] for c in menu for x in c.get("wizards") or [] if x.get("id") not in catalog_ids]
     ctx.check(not unknown, "the menu names wizards outside the catalog: %s", unknown)
     ctx.check(all(c.get("title") for c in menu), "a change has no title")
+    gate_before = before.get("gate")
     gated_before = bool(mode(fc).get("gated"))
-    override = bool(before.get("override"))
     ev["gated_before"] = gated_before
-    ev["override"] = override
 
     with preserved(ctx, record_path()):
         st, body = fc.post("/wiz/changed", data={"what": "nothing-like-this"})
@@ -1719,35 +1784,32 @@ def what_changed(ctx):
         ctx.log("POST /wiz/changed what=tray -> %s", st)
         ctx.check(st == 200 and isinstance(body, dict), "what=tray -> %s", st)
         w = body if isinstance(body, dict) else wiz(fc)
-        reason = flag_of(w, "recommended", "laser.focus")
+        reason = flag_of(w, "laser.focus")
         ev["tray_reason"] = reason
         ctx.check(reason is not None and "tray" in reason,
-                  "the tray does not recommend the focus card: %s", w.get("recommended"))
-        ctx.check(flag_of(w, "required", "laser.focus") is None, "the tray made the focus card required")
-        ctx.check(bool(mode(fc).get("gated")) == gated_before, "a recommendation moved the gate")
+                  "the tray does not recommend the focus burn: %s", w.get("recommended"))
+        ctx.check(w.get("gate") == gate_before and bool(mode(fc).get("gated")) == gated_before,
+                  "a recommendation moved the gate: %s", wiz_summary(w))
 
         st, body = fc.post("/wiz/changed", data={"what": "fan"})
         ctx.log("POST /wiz/changed what=fan -> %s", st)
         ctx.check(st == 200, "what=fan -> %s", st)
         w = wiz(fc)
-        reason = flag_of(w, "required", "airflow")
+        reason = flag_of(w, "airflow")
         ev["fan_reason"] = reason
         ctx.check(reason is not None and "fan" in reason,
-                  "a fan does not require the airflow check: %s", w.get("required"))
+                  "a fan does not recommend the airflow check: %s", w.get("recommended"))
         m = mode(fc)
         ev["gated_after_fan"] = m.get("gated")
-        ctx.check("airflow" in (w.get("why") or ""), "the gate's reason does not name airflow: %r", w.get("why"))
-        if override:
-            ctx.check(m.get("gated") is False, "the override stands but the gate closed: %s", m)
-        else:
-            ctx.check(m.get("gated") is True, "a required check left the gate open: %s", m)
-        ctx.log("tray -> focus recommended; fan -> airflow required; gate %s (override %s)",
-                "closed" if m.get("gated") else "open", override)
+        ctx.check(w.get("gate") == gate_before and bool(m.get("gated")) == gated_before,
+                  "a recommendation moved the gate: %s, %s", wiz_summary(w), m)
+        ctx.log("tray -> focus recommended (%s); fan -> airflow recommended (%s); gate %s as found",
+                ev["tray_reason"], reason, gate_before)
 
     after = wiz(fc)
     ev["after"] = wiz_summary(after)
-    ctx.check(flag_of(after, "required", "airflow") is None and flag_of(after, "recommended", "laser.focus") is None,
-              "the flags survive the restore: %s / %s", after.get("required"), after.get("recommended"))
+    ctx.check(recommended(after) == recommended(before),
+              "the recommendations do not read as found: %s, was %s", recommended(after), recommended(before))
     ctx.check(bool(mode(fc).get("gated")) == gated_before, "the gate does not read as before")
 
 

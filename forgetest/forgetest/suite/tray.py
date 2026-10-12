@@ -25,7 +25,7 @@ from .motion import (_kernel_position, _port_state, _words, clean_slate, drain_t
 
 TRAY_MARKER = "/data/forgefirm/tray.out"
 LENS_SPM = 2.922            # $102: the lens screw's half-steps per mm
-SETUP_CARD = "sheet.place"  # the first setup card: it asks before it moves anything
+SETUP_CARD = "laser.focus"  # a setup burn: it asks before it moves anything
 
 
 def _grid_mm(offset_mm):
@@ -70,8 +70,8 @@ def _tray_route(fc, mode):
 def _card_refused(ctx, fc, ev):
     """A setup card is refused while the tray is out. The machine is idle a
     moment after the suite's Grbl client closes; until then the refusal is
-    the idle rule's. A card that started anyway is ended at once: the first
-    one asks before it moves anything."""
+    the idle rule's. A card that started anyway is ended at once: it asks
+    before it moves anything."""
     path = "/wiz/%s/start" % SETUP_CARD
     deadline = time.time() + 20
     while True:
