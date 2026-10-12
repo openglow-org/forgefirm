@@ -25,7 +25,8 @@ _UPDATE_COVERS = [("forgectrl", "src/update.c"), ("forgectrl", "src/update.h"),
                   "answers; `fwup` refuses a garbage archive. A tiny archive signed with a "
                   "throwaway key made on the spot verifies with its own key and fails against the "
                   "shipped release key, and an apply of it without confirm_unsigned is refused by "
-                  "the update job before anything is written. Nothing is written to any slot.")
+                  "the update job before anything is written, and the forgectrl log records the "
+                  "job's start and its refusal. Nothing is written to any slot.")
 def slots_and_signature(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -96,6 +97,11 @@ def slots_and_signature(ctx):
                 target = name
         ctx.check(target is not None, "no inactive firmware slot in /slots: %s", slots)
         shutil.copyfile(signed, staged)
+        log_path = "/data/log/forgefirm/forgectrl/forgectrl.log"
+        try:
+            log_from = os.path.getsize(log_path)
+        except OSError:
+            log_from = 0
         st, body = fc.post("/update/apply", params={"slot": target, "file": "upload"})
         ev["apply"] = {"status": st, "body": body}
         ctx.log("POST /update/apply slot=%s file=upload (no confirm_unsigned) -> %s %s", target, st, body)
@@ -118,6 +124,24 @@ def slots_and_signature(ctx):
             ctx.check(isinstance(result, dict) and result.get("ok") is False
                       and "not signed" in str(result.get("error", "")),
                       "the apply of a foreign-signed archive was not refused for its signature: %s", result)
+
+            # The forgectrl log records the job: what it set out to write
+            # and why it stopped.
+            want = ["update: writing the uploaded archive into slot %s" % target,
+                    "update: the apply failed: archive is not signed"]
+
+            def log_text():
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(log_from)
+                        return f.read()
+                except OSError:
+                    return ""
+            ctx.wait_for(lambda: all(w in log_text() for w in want), 10, poll=0.5)
+            text = log_text()
+            ev["apply_log"] = [ln for ln in text.splitlines() if "update: " in ln][-4:]
+            for w in want:
+                ctx.check(w in text, "the forgectrl log lacks %r: %s", w, ev["apply_log"])
     finally:
         try:
             os.unlink(staged)
