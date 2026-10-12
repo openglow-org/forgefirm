@@ -47,15 +47,18 @@ TLS_BASE = "https://127.0.0.1"          # FORGECTRL_TLS_URL overrides (host test
 # The first run's form wizards, all at version 1 (wiz.c).
 FORM_WIZARDS = ("advisories", "account", "preferences", "machine", "cloud")
 # The steps the gate requires after the account, all at version 1, in
-# the order the gate's reason names them (setup.c).
-REQUIRED_STEPS = ("preferences", "machine", "cloud")
+# the order the gate's reason names them (setup.c): the form steps, then
+# the coolant flow calibration. The first-run tests seed the checks done,
+# the calibration among them, so the form steps are what they walk.
+REQUIRED_FORM_STEPS = ("preferences", "machine", "cloud")
+REQUIRED_STEPS = REQUIRED_FORM_STEPS + ("cooling.flow",)
 # What the image's step table recommends on a record with the required
 # steps done and nothing else (setup.c): every step after them. The
 # cloud header joins on a machine with cloud mode on. The gate's own
 # parts (the advisories, the account, the required steps, the intake fan
 # count) are never recommended as not run yet, and the laser floor and
 # the bed size are offered, never recommended.
-RECOMMENDED_STEPS = ("switches", "sensors", "airflow", "cooling.aa-offset", "cooling.flow", "motion",
+RECOMMENDED_STEPS = ("switches", "sensors", "airflow", "cooling.aa-offset", "motion",
                      "cameras", "lens.travel", "laser.focus")
 NEVER_RECOMMENDED = ("advisories", "account", "airflow.intakes", "laser.floor", "motion.envelope")
 # The setting that counts the intake fans: the gate holds without it.
@@ -388,10 +391,11 @@ _GATE_COVERS = [("forgectrl", "src/setup.*"), ("forgectrl", "src/super.c"),
                   "process runs and the Grbl port is closed; with the consent and without the "
                   "account, the same with the reason naming the account; with the consent and "
                   "the account and no step done, the same with the reason 'setup required: "
-                  "preferences, machine, cloud'. With those three done as well and no flag, the "
+                  "preferences, machine, cloud, cooling.flow'. With those four done as well and "
+                  "no flag, the "
                   "gate is open with no reason: the supervisor spawns the controller, the Grbl "
                   "port accepts, and GET /wiz recommends every other step as not run yet (never "
-                  "the advisories, the account, the three required steps, or the intake fan "
+                  "the advisories, the account, the four required steps, or the intake fan "
                   "count; not the optional laser floor or bed size). On that record the intake "
                   "fan count is cleared: the gate closes live with the reason naming the intake "
                   "fans, GET /wiz reports them not counted, and the supervisor stops the "
@@ -459,6 +463,11 @@ def gate_blocks_controllers(ctx):
         with ctx.takeover():
             write_file(record_path(), encoded(record_without_wizards(record)))
         gated("required steps", "setup required: " + ", ".join(REQUIRED_STEPS))
+        # The page opens the steps the gate waits for from this list.
+        w = wiz(fc)
+        ev["missing_none_done"] = w.get("missing")
+        ctx.check(w.get("missing") == list(REQUIRED_STEPS),
+                  "GET /wiz does not name the required steps as missing: %s", w.get("missing"))
         with ctx.takeover():
             write_file(record_path(), encoded(record_with_required_steps(record)))
 
@@ -468,6 +477,8 @@ def gate_blocks_controllers(ctx):
         ev["open_wiz"] = wiz_summary(w)
         ctx.check(w.get("gate") == "open" and not w.get("why") and w.get("fans_counted") is True,
                   "the consent, the account, and the required steps do not open the gate: %s", wiz_summary(w))
+        ctx.check(w.get("missing") == [], "GET /wiz names steps as missing with the required ones done: %s",
+                  w.get("missing"))
         running("with the required steps done")
         recm = recommended(w)
         missing = [s for s in RECOMMENDED_STEPS if s not in recm]
@@ -1500,7 +1511,8 @@ _FIRST_RUN_REQUIRES = ["setup.gate-blocks-controllers", "setup.advisories-rehash
                   "acceptance_done; POST /wiz/account with a temporary name and password, the "
                   "account exists and the response sets the session cookie, and the gate holds "
                   "with the reason 'setup required: preferences, machine, cloud' and no "
-                  "controller. Then the required steps, the gate's reason naming what is left "
+                  "controller (the seed keeps the coolant flow calibration done). Then the "
+                  "required form steps, the gate's reason naming what is left "
                   "after each: POST /wiz/preferences with the units as found; POST /wiz/machine "
                   "with the model as found (basic when unknown) and no TEC; POST /wiz/cloud as "
                   "found (enabled with the phrase and the homing as found, or off). With the "
@@ -1570,12 +1582,12 @@ def first_run_flow(ctx):
             ctx.check(m.get("controller") == "gated", "the controller is %s with %s left", m.get("controller"),
                       ", ".join(left))
 
-        still_gated(REQUIRED_STEPS)
+        still_gated(REQUIRED_FORM_STEPS)
         ctx.log("the gate holds after the account: %s", wiz(fc).get("why"))
 
         st, body = fc.post("/wiz/preferences", data={"ui_units": settings.get("ui_units") or "metric"})
         ctx.check(st == 200, "POST /wiz/preferences -> %s %s", st, body if isinstance(body, dict) else "")
-        still_gated(REQUIRED_STEPS[1:])
+        still_gated(REQUIRED_FORM_STEPS[1:])
         machine = (w.get("machine") or {})
         model = machine.get("model") if machine.get("model") in ("basic", "plus", "pro") else "basic"
         st, body = fc.post("/wiz/machine", data={"model": model, "tec": "0"})
@@ -1586,7 +1598,7 @@ def first_run_flow(ctx):
         ev["head"] = head
         ctx.check(head.get("present") is True and bool(head.get("hw_id")),
                   "the machine facts do not see the head: %s", head)
-        still_gated(REQUIRED_STEPS[2:])
+        still_gated(REQUIRED_FORM_STEPS[2:])
         if settings.get("cloud_enabled") == "1":
             data = {"enabled": "1", "phrase": SAFETY_PHRASE,
                     "homing_mode": settings.get("homing_mode") or "gfcloud"}
