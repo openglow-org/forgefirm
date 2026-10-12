@@ -81,13 +81,16 @@ def preview_ok(ctx, wid):
 
 
 def emission_ok(ctx, last):
-    """The three witnesses of the burn, from the wizard's result."""
+    """The two witnesses of the burn, from the wizard's result. The head's
+    beam sensor is recorded, never required: the result reports its rise
+    and whether it read as the beam seen."""
     e = (last.get("result") or {}).get("emission") or {}
     ctx.evidence["emission"] = e
     ctx.check(e.get("hv_max", 0) > 30, "the tube current never rose (%s)", e.get("hv_max"))
     ctx.check(e.get("laser_on_samples", 0) > 0, "the kernel never sampled LASER_ON")
-    ctx.check(e.get("thermopile_delta", 0) >= 100, "the thermopile did not see the beam (%s)",
-              e.get("thermopile_delta"))
+    ctx.check(isinstance(e.get("thermopile_delta"), int) and isinstance(e.get("beam_sensor_seen"), bool),
+              "the result does not record the beam sensor: %s", e)
+    ctx.log("the beam sensor rose %s (seen: %s)", e.get("thermopile_delta"), e.get("beam_sensor_seen"))
 
 
 def thickness_answer(ctx):
@@ -219,8 +222,9 @@ def focus_window_ok(ctx, r, before):
                   "head and its tail returns there. With its preview and program served by GET "
                   "/wiz/sheet.svg and /wiz/sheet.gcode and every Z the program commands inside the "
                   "reach /status reports, it burns twelve lines after the press, from the top of "
-                  "the window to the bottom, seen by the three witnesses (the tube current, the "
-                  "kernel's LASER_ON samples, the thermopile rise). The pick is line 11. The "
+                  "the window to the bottom, seen by the two witnesses (the tube current and the "
+                  "kernel's LASER_ON samples), with the beam sensor's rise recorded and not "
+                  "required. The pick is line 11. The "
                   "result carries its keys; the ladder ran in the window the machine held, which "
                   "the burn leaves as found (it writes the edge alone, the one its result "
                   "reports); every ladder height lies in the reach; the program served afterward "
@@ -273,7 +277,7 @@ def focus(ctx):
                   "its preview and program served and every Z the program commands inside the "
                   "reach /status reports, it burns twelve rungs from 2 to 24 percent density at "
                   "the focal point on the scrap's surface, the floor and the curve off for the "
-                  "job, after the press, seen by the three witnesses. The pick is 8, so the floor "
+                  "job, after the press, seen by the two witnesses. The pick is 8, so the floor "
                   "written is 10 (two above it) and the setting reads it; the result carries its "
                   "keys; the record carries laser.floor at version 1. laser_floor_density is "
                   "restored at the end.")

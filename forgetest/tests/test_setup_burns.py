@@ -22,7 +22,8 @@ from forgetest.runner import Context, Failed, Run  # noqa: E402
 from forgetest.suite import setup_burns, setup_dark  # noqa: E402
 
 LIVE = ["laser.focus", "laser.floor"]
-EMISSION = {"hv_max": 610, "laser_on_samples": 900, "thermopile_delta": 600, "lit_s": 30.0}
+EMISSION = {"hv_max": 610, "laser_on_samples": 900, "thermopile_delta": 600, "beam_sensor_seen": True,
+            "lit_s": 30.0}
 SPM = 2.922                     # the lens screw, half-steps per mm ($102)
 EDGE_DEFAULT = 3.35             # the edge's height while the setting is unset (lens.h)
 
@@ -366,6 +367,21 @@ class BurnRunTests(unittest.TestCase):
         with self.assertRaises(Failed) as cm:
             self.run_test("setup.floor")
         self.assertIn("the tube current never rose", str(cm.exception))
+        self.assert_found()
+
+    def test_a_burn_with_a_silent_beam_sensor_passes(self):
+        # A head whose beam sensor gives no output: the tube current and
+        # LASER_ON saw the beam, so the burn counts.
+        self.daemon.patch["laser.floor"] = {"emission": dict(EMISSION, thermopile_delta=0,
+                                                             beam_sensor_seen=False)}
+        self.run_test("setup.floor")
+        self.assert_found()
+
+    def test_a_burn_that_does_not_record_the_beam_sensor_fails(self):
+        self.daemon.patch["laser.floor"] = {"emission": {"hv_max": 610, "laser_on_samples": 900}}
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.floor")
+        self.assertIn("the result does not record the beam sensor", str(cm.exception))
         self.assert_found()
 
     def test_a_focus_burn_that_writes_the_window_fails(self):
