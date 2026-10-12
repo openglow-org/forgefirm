@@ -1580,6 +1580,12 @@ def first_run_flow(ctx):
         model = machine.get("model") if machine.get("model") in ("basic", "plus", "pro") else "basic"
         st, body = fc.post("/wiz/machine", data={"model": model, "tec": "0"})
         ctx.check(st == 200, "POST /wiz/machine -> %s %s", st, body if isinstance(body, dict) else "")
+        # The machine facts the step records see the head: its hardware id
+        # is the module's head/info "id" line.
+        head = (wiz(fc).get("machine") or {}).get("head") or {}
+        ev["head"] = head
+        ctx.check(head.get("present") is True and bool(head.get("hw_id")),
+                  "the machine facts do not see the head: %s", head)
         still_gated(REQUIRED_STEPS[2:])
         if settings.get("cloud_enabled") == "1":
             data = {"enabled": "1", "phrase": SAFETY_PHRASE,
