@@ -46,8 +46,9 @@ def intakes_counted():
     except hw.HwError as e:
         return "forgectrl unreachable: %s" % e
     if not s.get(INTAKE_KEY):
-        return ("%s is unset, so the setup gate holds every controller: count the intake fans "
-                "first (the Intake fans step of the setup page)" % INTAKE_KEY)
+        return ("the intake fans are not counted, so the setup gate holds every controller; this "
+                "test puts the count back as it finds it, and an uncounted machine handed back "
+                "would hold the controllers of every test after it")
     return None
 
 
@@ -211,27 +212,41 @@ def check_sensors(ctx):
                             ("forgectrl", "src/gates.c"), ("forgectrl", "src/super.c")],
       requires=["forgectrl.auth", "cooling.fan-gate-trips"], precheck=intakes_counted,
       description="POST /wiz/airflow/start: the controller stops, the fans run at the cut profile "
-                  "for 35 s, the purge is measured on and off, and six settings are written: the "
-                  "four floors at 55 percent of steady, the grace from the slowest spin-up, and the "
-                  "intake fans fitted (2 when both intakes turn; 1 when intake 2 never reads a pulse "
-                  "and intake 1 passes, and then intake 2 is reported not fitted and the intake floor "
-                  "comes from intake 1). Each fan judged must read at least 1000 rpm. The six "
-                  "settings are put back as found at the end, the purge fan is on again and drawing "
-                  "over the floor the check just wrote, and the controller must be running again.")
+                  "for 35 s, the purge is measured on and off, and the five floors are written: the "
+                  "four at 55 percent of steady and the grace from the slowest spin-up. The intake "
+                  "fan count is the machine's: intake 2 turning proves two fans, both intakes are "
+                  "judged, and the count is written as 2; intake 2 silent on a machine counted with "
+                  "one is reported not fitted and not turning, intake 1 alone sets the intake "
+                  "floor, and the count is not written; intake 2 silent on a machine counted with "
+                  "two fails the check. Both intakes turn on the bench reference, so the bench "
+                  "path writes 2. Each fan judged must read at least 1000 rpm. The settings are put "
+                  "back as found at the end, the purge fan is on again and drawing over the floor "
+                  "the check just wrote, and the controller must be running again.")
 def check_airflow(ctx):
     keys = ["cool_tach_exhaust_min_rpm", "cool_tach_intake_min_rpm", "cool_tach_air_assist_min_rpm",
             "cool_purge_min_current", "cool_fan_grace_s"]
-    with Restore(ctx, keys + ["cool_intake_fans"]):
+    with Restore(ctx, keys + ["cool_intake_fans"]) as held:
+        counted = held.before.get("cool_intake_fans")
         last = run_check(ctx, "airflow", lambda p: None, 240)
         r = last.get("result") or {}
         fans = r.get("fans") or {}
         intakes = r.get("intake_fans")
+        silent2 = (fans.get("intake 2") or {}).get("turning") is False
+        ctx.evidence["intakes"] = {"counted": counted, "found": intakes, "intake_2_silent": silent2}
         ctx.check(intakes in (1, 2), "the result carries no intake fan count: %r", intakes)
-        ctx.log("intake fans fitted: %s", intakes)
+        if silent2:
+            # one intake fan, as the machine is counted (on a machine
+            # counted with two the check itself fails, and run_check says so)
+            ctx.check(counted == "1" and intakes == 1,
+                      "intake 2 gave no reading on a machine counted with %r intake fans, and the check "
+                      "found %r", counted, intakes)
+        else:
+            ctx.check(intakes == 2, "intake 2 turned, and the check found %r intake fans", intakes)
+        ctx.log("intake fans: %s (the machine counted %s)", intakes, counted)
         for name in ("exhaust", "intake 1", "intake 2", "air assist"):
             f = fans.get(name) or {}
-            if name == "intake 2" and intakes == 1:
-                ctx.check(f == {"fitted": False}, "intake 2 with one intake fan: %s", f)
+            if name == "intake 2" and silent2:
+                ctx.check(f == {"fitted": False, "turning": False}, "intake 2 with one intake fan: %s", f)
                 continue
             ctx.check(f.get("ok") is True, "%s: %s", name, f)
             ctx.log("%s: %s rpm steady, 90 percent at %s s", name, f.get("steady_rpm"), f.get("spinup_s"))
@@ -241,8 +256,12 @@ def check_airflow(ctx):
         s = ctx.forgectrl.settings() or {}
         for k in keys:
             ctx.check(s.get(k) == floors.get(k), "%s reads %r, the check wrote %r", k, s.get(k), floors.get(k))
-        ctx.check(s.get("cool_intake_fans") == str(intakes),
-                  "cool_intake_fans reads %r, the check found %r", s.get("cool_intake_fans"), intakes)
+        # The count: 2 written when intake 2 turned; left as counted when it
+        # was silent.
+        want = counted if silent2 else "2"
+        ctx.check(s.get("cool_intake_fans") == want,
+                  "cool_intake_fans reads %r, expected %r (intake 2 %s, the machine counted %r)",
+                  s.get("cool_intake_fans"), want, "silent" if silent2 else "turning", counted)
         ctx.log("floors: %s", json.dumps(floors))
         # The check switches purge air off to read its off current. Leaving
         # it off costs the next job an airflow hold mid-cut, judged against
@@ -281,22 +300,24 @@ def check_airflow(ctx):
       description="POST /wiz/airflow.intakes/start with the intake fan count set (the precheck "
                   "refuses the start without it: the gate would hold every test after this one). "
                   "The controller stops, the fans run at the run profile for 20 s, and the tachs "
-                  "count the intakes: intake 1 turning and intake 2 never reading a pulse is one, "
-                  "anything else two. No question is asked; the one the step asks when intake 1 "
-                  "does not come up (the operator's count) fails the test. The result carries "
-                  "both intakes' speeds, whether intake 2 was silent, and the count by the tachs, "
-                  "which must be the count the machine held: intake 1 at 1000 rpm or more, intake "
-                  "2 silent exactly when the count is one. The setting reads the count, the record "
-                  "carries airflow.intakes at version 1, the count is put back as found, and the "
-                  "controller must be running again.")
+                  "count the intakes: both turning is two. The step asks the operator to count "
+                  "when the tachs cannot (intake 1 not up to speed, or intake 2 giving no "
+                  "reading, which reads the same as a machine built with one intake fan); both "
+                  "intakes turn on the bench reference, so that question is a fan fault, and it "
+                  "fails the test unanswered. The result carries both intakes' speeds, whether "
+                  "intake 2 was silent, and the count by the tachs, which must be the count the "
+                  "machine held. The setting reads the count, the record carries airflow.intakes "
+                  "at version 1, the count is put back as found, and the controller must be "
+                  "running again.")
 def check_intakes(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
 
     def on_prompt(p):
         if p.get("id") == "intake-count":
-            ctx.fail("intake 1 did not come up to speed, so the tachs could not count the fans: %s",
-                     p.get("text"))
+            # The tachs could not count, and the step's text says why.
+            ctx.fail("the intake fans step asked for the count, which the tachs could not make; both "
+                     "intakes turn on the bench reference, so a fan needs attention: %s", p.get("text"))
         ctx.fail("the intake fans step asked a question: %s", p)
     with Restore(ctx, [INTAKE_KEY]) as held:
         found = held.before.get(INTAKE_KEY)
@@ -309,13 +330,10 @@ def check_intakes(ctx):
                        "intake_2_silent": r.get("intake_2_silent")}
         ctx.check(r.get("counted_by") == "tachs", "the fans were not counted by the tachs: %s", r)
         ctx.check(str(n) == found, "the tachs count %r intake fans, the machine held %s", n, found)
-        ctx.check((r.get("intake_1_rpm") or 0) >= 1000, "intake 1 turned at %s rpm", r.get("intake_1_rpm"))
-        ctx.check(r.get("intake_2_silent") is (n == 1),
-                  "intake 2 %s with a count of %s", "silent" if r.get("intake_2_silent") else "turning", n)
         s = fc.settings() or {}
         ctx.check(s.get(INTAKE_KEY) == str(n), "%s reads %r, the step counted %r", INTAKE_KEY, s.get(INTAKE_KEY), n)
-        ctx.log("intake fans: %s by the tachs (intake 1 %s rpm, intake 2 %s rpm%s)", n, r.get("intake_1_rpm"),
-                r.get("intake_2_rpm"), ", silent" if r.get("intake_2_silent") else "")
+        ctx.log("intake fans: %s by the tachs (intake 1 %s rpm, intake 2 %s rpm)", n, r.get("intake_1_rpm"),
+                r.get("intake_2_rpm"))
     ok = ctx.wait_for(lambda: (fc.get("/mode")[1] or {}).get("controller") == "running", 60)
     ctx.check(ok is not None, "the controller did not come back after the step")
 
@@ -410,38 +428,88 @@ def check_motion(ctx):
                   "the contact counts, or why not), and the window: the stops found, or the "
                   "fallback (10 half-steps below, 12 above) when they were not. The settings and "
                   "the lens block of /status hold that window, the record carries lens.travel at "
-                  "version 1, the two settings are put back as found, and the controller must be "
-                  "running again.")
+                  "version 1, and the two settings are put back as found. grblHAL reads the "
+                  "window only at its start, and the check started it before the put-back, so in "
+                  "GRBL mode the controller is stopped and started again on the window as found "
+                  "(on every exit path), and it must be running with motion verified under a new "
+                  "process.")
 def check_lens(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
+    restart = {}
 
     def on_prompt(p):
         ctx.fail("the lens travel check asked a question: %s", p)
-    with Restore(ctx, LENS_WINDOW_KEYS):
-        last = run_check(ctx, "lens.travel", on_prompt, 300)
-        r = last.get("result") or {}
-        ctx.check(len(r.get("z_passes") or []) >= 1, "the lens was not referenced: %s", r.get("z_passes"))
-        stops, w = r.get("stops") or {}, r.get("window") or {}
-        ctx.check(isinstance(stops.get("found"), bool), "the result files no stops: %s", r)
-        window = (w.get("below"), w.get("above"))
-        if stops.get("found"):
-            ctx.check(window == (stops.get("below"), stops.get("above")) and w.get("found") is True,
-                      "the window %s is not the stops found %s", w, stops)
-        else:
-            ctx.check(window == FALLBACK_WINDOW and w.get("found") is False,
-                      "the stops were not found (%s), but the window is %s", stops.get("why"), w)
-        s = fc.settings() or {}
-        held = tuple(str(s.get(k)) for k in LENS_WINDOW_KEYS)
-        lens = (fc.status() or {}).get("lens") or {}
-        ev["window"] = {"stops": stops, "window": w, "settings": held, "status": lens}
-        ctx.check(held == tuple(str(v) for v in window), "the settings hold %s, the check wrote %s", held, window)
-        ctx.check((lens.get("below"), lens.get("above")) == window,
-                  "/status reads the window %s/%s, the check wrote %s", lens.get("below"), lens.get("above"), window)
-        ctx.log("lens travel: %s half-steps below the edge, %s above (%s); contact %s/%s",
-                window[0], window[1], "the stops found" if stops.get("found") else "the fallback: %s" % stops.get("why"),
-                stops.get("contact_below"), stops.get("contact_above"))
-    ok = ctx.wait_for(lambda: (fc.get("/mode")[1] or {}).get("controller") == "running", 60)
+
+    def restart_on_found():
+        """A fresh controller start on the settings as found, once the
+        check has ended. Plain waits, not the run's, so an abort gets it
+        too; a check still ending starts its own controller after the
+        put-back, which reads them already."""
+        try:
+            t_end = time.time() + 120
+            while time.time() < t_end and dark(fc).get("running"):
+                time.sleep(1)
+            if dark(fc).get("running"):
+                restart["skipped"] = "the check is still ending"
+                ctx.log("the check is still ending: its own controller start reads the settings as found")
+                return
+            st, m = fc.get("/mode")
+            m = m if isinstance(m, dict) else {}
+            restart.update(mode=m.get("mode"), pid=m.get("pid"))
+            if m.get("mode") != "grbl":
+                return                      # the cloud client reads no lens window
+            restart["stop"], body = fc.post("/controller/stop")
+            ctx.log("restarting the controller on the window as found: POST /controller/stop -> %s %s",
+                    restart["stop"], body)
+            for _ in range(10):
+                restart["start"], body = fc.post("/controller/start")
+                if restart["start"] != 409:
+                    break
+                time.sleep(1)               # the check's lease goes just after its end
+            ctx.log("POST /controller/start -> %s %s", restart["start"], body)
+        except hw.HwError as e:
+            restart["error"] = str(e)
+            ctx.log("the controller could not be restarted on the window as found: %s", e)
+    try:
+        with Restore(ctx, LENS_WINDOW_KEYS):
+            last = run_check(ctx, "lens.travel", on_prompt, 300)
+            r = last.get("result") or {}
+            ctx.check(len(r.get("z_passes") or []) >= 1, "the lens was not referenced: %s", r.get("z_passes"))
+            stops, w = r.get("stops") or {}, r.get("window") or {}
+            ctx.check(isinstance(stops.get("found"), bool), "the result files no stops: %s", r)
+            window = (w.get("below"), w.get("above"))
+            if stops.get("found"):
+                ctx.check(window == (stops.get("below"), stops.get("above")) and w.get("found") is True,
+                          "the window %s is not the stops found %s", w, stops)
+            else:
+                ctx.check(window == FALLBACK_WINDOW and w.get("found") is False,
+                          "the stops were not found (%s), but the window is %s", stops.get("why"), w)
+            s = fc.settings() or {}
+            held = tuple(str(s.get(k)) for k in LENS_WINDOW_KEYS)
+            lens = (fc.status() or {}).get("lens") or {}
+            ev["window"] = {"stops": stops, "window": w, "settings": held, "status": lens}
+            ctx.check(held == tuple(str(v) for v in window), "the settings hold %s, the check wrote %s",
+                      held, window)
+            ctx.check((lens.get("below"), lens.get("above")) == window,
+                      "/status reads the window %s/%s, the check wrote %s", lens.get("below"), lens.get("above"),
+                      window)
+            ctx.log("lens travel: %s half-steps below the edge, %s above (%s); contact %s/%s", window[0],
+                    window[1], "the stops found" if stops.get("found") else "the fallback: %s" % stops.get("why"),
+                    stops.get("contact_below"), stops.get("contact_above"))
+    finally:
+        restart_on_found()
+        ev["restart"] = dict(restart)
+    if restart.get("mode") == "grbl":
+        ctx.check(restart.get("stop") == 200 and restart.get("start") == 200,
+                  "the controller was not restarted on the window as found: %s", restart)
+
+    def back():
+        st, m = fc.get("/mode")
+        m = m if isinstance(m, dict) else {}
+        return (m.get("controller") == "running" and m.get("motion") == "verified"
+                and (restart.get("start") != 200 or m.get("pid") != restart.get("pid")))
+    ok = ctx.wait_for(back, 150)
     ctx.check(ok is not None, "the controller did not come back after the check")
 
 

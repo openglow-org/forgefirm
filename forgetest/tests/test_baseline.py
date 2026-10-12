@@ -686,10 +686,64 @@ class BaselineModeTests(BaselineTests):
         import helpers
         self.fc = helpers.FakeForgectrl().start()
         baseline.Baseline._unreachable_until = 0.0
+        # the lamp's settle, short: five polls, so a lamp that never holds
+        # costs the suite no real seconds
+        self._lamp_timing = (baseline.LID_LAMP_SETTLE_S, baseline.LID_LAMP_POLL_S)
+        baseline.LID_LAMP_SETTLE_S, baseline.LID_LAMP_POLL_S = 0.05, 0.01
 
     def tearDown(self):
+        baseline.LID_LAMP_SETTLE_S, baseline.LID_LAMP_POLL_S = self._lamp_timing
         self.fc.stop()
         super().tearDown()
+
+    def lamp_reads(self, *reads):
+        """The lid lamp reads `reads` in turn, then what its file holds:
+        the smooth trigger's fade as the baseline polls it, one read per
+        poll, so the script does not depend on the clock."""
+        seq = list(reads)
+        real = baseline.hw.sysfs_read
+
+        def read(attr, default=None):
+            if attr == baseline.LID_LAMP_ATTR and seq:
+                return seq.pop(0)
+            return real(attr, default)
+        baseline.hw.sysfs_read = read
+        self.addCleanup(setattr, baseline.hw, "sysfs_read", real)
+
+    def lamp_polls(self):
+        return max(2, int(round(baseline.LID_LAMP_SETTLE_S / baseline.LID_LAMP_POLL_S)))
+
+    def test_a_lamp_still_fading_to_its_idle_level_is_not_a_leftover(self):
+        # The supervisor re-applied 236 a moment before the check: the lamp
+        # reads 232 on its way there and then holds 236. Nothing to restore,
+        # nothing to record.
+        self._attr("pic/lid_led", "236")
+        self.lamp_reads("232", "234", "236", "236")
+        writes = []
+        real_write = baseline.hw.sysfs_write
+        baseline.hw.sysfs_write = lambda attr, value: (writes.append(attr), real_write(attr, value))
+        self.addCleanup(setattr, baseline.hw, "sysfs_write", real_write)
+        left = self.bl().enforce("post", captured=None)
+        self.assertEqual(left, [])
+        self.assertNotIn(baseline.LID_LAMP_ATTR, writes)
+        self.assertTrue(any("the fade toward a level just written" in ln for ln in self.lines), self.lines)
+
+    def test_a_fade_that_only_passes_the_idle_level_is_a_leftover(self):
+        # A lamp left fading to 77 passes 236 on its way down: one read at
+        # the level is not the level held. It is restored and recorded at
+        # the level it settled on.
+        self.lamp_reads("240", "236", *(["77"] * (self.lamp_polls() - 1)))
+        left = self.bl().enforce("post", captured=None)
+        self.assertEqual([(x.item, x.found, x.expected, x.action) for x in left],
+                         [("pic/lid_led", "77", "236", "restored")])
+        self.assertEqual(self._read("pic/lid_led"), "236")
+
+    def test_a_lamp_that_never_reaches_the_level_after_the_restore_says_so(self):
+        # the write does not take: the restore is recorded as failed, with
+        # the level the lamp holds
+        self.lamp_reads(*(["77"] * (2 * self.lamp_polls() + 1)))
+        left = self.bl().enforce("post", captured=None)
+        self.assertEqual([(x.item, x.action) for x in left], [("pic/lid_led", "failed: reads 77")])
 
     def run(self, result=None):
         # only this class's own tests, not the base class's

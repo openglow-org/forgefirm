@@ -8,8 +8,8 @@ takeover ones marked so, every covers map naming the check runner, and
 the two that put the intake fan count back as found refused unless it is
 set; and the check driver itself against the fake daemon: a start, the
 run polled to its end with no question asked, the result taken, the
-record read at version 1, and the settings read as before or put back
-as found."""
+record read at version 1, the settings read as before or put back as
+found, and the controller started again on a lens window put back."""
 import os
 import sys
 import unittest
@@ -48,13 +48,17 @@ class RegistrationTests(unittest.TestCase):
                 self.assertIsNone(getattr(self.reg[tid], "precheck", None), tid)
 
     def test_the_intake_count_must_be_set_before_a_check_puts_it_back(self):
+        # The refusal says why the test cannot start; it never names a
+        # setting for the operator to change.
         fake = helpers.FakeForgectrl().start()
         try:
             for tid in COUNTED:
                 fake.state["settings"].pop("cool_intake_fans", None)
                 why = self.reg[tid].cannot_start()
-                self.assertIn("cool_intake_fans is unset", why, tid)
-                self.assertIn("Intake fans step", why, tid)
+                self.assertIn("the intake fans are not counted", why, tid)
+                self.assertIn("the setup gate holds every controller", why, tid)
+                self.assertNotIn("cool_intake_fans", why, tid)
+                self.assertNotIn("Intake fans step", why, tid)
                 fake.state["settings"]["cool_intake_fans"] = "2"
                 self.assertIsNone(self.reg[tid].cannot_start(), tid)
         finally:
@@ -168,22 +172,25 @@ class SensorsCheckTests(unittest.TestCase):
 
 class AirflowCheckTests(unittest.TestCase):
     """setup.check-airflow's judge against a scripted daemon: the check
-    writes its floors and the intake fans fitted, and the test reads the
-    fans the count says are there. A machine built with one intake fan
-    reports intake 2 not fitted; the bench reference has two."""
+    writes its floors, and the intake fan count is the machine's. Intake
+    2 turning proves two fans and the check writes the count as 2; intake
+    2 silent on a machine counted with one is reported not fitted and not
+    turning, and the count is not written; intake 2 silent on a machine
+    counted with two fails the check. The bench reference has two, both
+    turning."""
 
     FLOORS = {"cool_tach_exhaust_min_rpm": "6400", "cool_tach_intake_min_rpm": "2290",
               "cool_tach_air_assist_min_rpm": "6050", "cool_purge_min_current": "345",
               "cool_fan_grace_s": "12"}
     FAN = {"steady_rpm": 4150, "spinup_s": 6.8, "ok": True}
 
-    def result(self, intakes):
+    def result(self, silent2):
         fans = {"exhaust": dict(self.FAN), "intake 1": dict(self.FAN), "intake 2": dict(self.FAN),
                 "air assist": dict(self.FAN)}
-        if intakes == 1:
-            fans["intake 2"] = {"fitted": False}
-        return {"fans": fans, "intake_fans": intakes, "purge_current_on": 628, "purge_current_off": 74,
-                "floors": dict(self.FLOORS)}
+        if silent2:
+            fans["intake 2"] = {"fitted": False, "turning": False}
+        return {"fans": fans, "intake_fans": 1 if silent2 else 2, "purge_current_on": 628,
+                "purge_current_off": 74, "floors": dict(self.FLOORS)}
 
     def setUp(self):
         import tempfile
@@ -194,25 +201,36 @@ class AirflowCheckTests(unittest.TestCase):
         self.saved_root = os.environ.get("GF_SYSFS_ROOT")
         os.environ["GF_SYSFS_ROOT"] = self.sysfs + "/"
         self.fake = helpers.FakeForgectrl().start()
-        self.fake.state["settings"].update({"cool_tach_intake_min_rpm": "2300"})
+        # the bench reference: two intake fans, counted
+        self.fake.state["settings"].update({"cool_tach_intake_min_rpm": "2300", "cool_intake_fans": "2"})
         self.fake.state["cool"] = {"phase": "idle", "fan_gates": {"purge": {"reading": 628, "floor": 345}}}
         self.dark = {"id": "", "running": False, "phase": "", "progress": 0, "elapsed_s": 0,
                      "log": [], "prompt": None, "result": None, "error": "",
                      "shots": {"lid": False, "head": False}}
         self.versions = {}
         self.polls = 0
-        self.wizard_result = self.result(2)
-        self.wizard_writes = None       # what the check writes; None = what its result says
+        self.silent2 = False            # intake 2 gives no tach pulse
+        self.wizard_result = None       # the result the check ends with; None = the daemon's own
+        self.wizard_writes = None       # the count the check writes; None = the daemon's own rule
 
         def on_get(path, q):
             if path == "/wiz/dark":
                 if self.dark["running"]:
                     self.polls += 1
                     if self.polls >= 2:
-                        r = self.wizard_result
                         s = self.fake.state["settings"]
+                        if self.silent2 and s.get("cool_intake_fans") == "2":
+                            # a silent intake 2 on a machine counted with two
+                            self.dark.update({"running": False, "progress": 100, "result": None,
+                                              "error": "a fan did not come up to speed at the run "
+                                                       "profile: see the log"})
+                            return 200, dict(self.dark)
+                        r = self.wizard_result or self.result(self.silent2)
                         s.update(r["floors"])
-                        s["cool_intake_fans"] = self.wizard_writes or str(r["intake_fans"])
+                        if self.wizard_writes:
+                            s["cool_intake_fans"] = self.wizard_writes
+                        elif not self.silent2:
+                            s["cool_intake_fans"] = "2"     # intake 2 turned: two fans
                         self.dark.update({"running": False, "progress": 100, "result": r})
                         self.versions["airflow"] = 1
                 return 200, dict(self.dark)
@@ -251,34 +269,77 @@ class AirflowCheckTests(unittest.TestCase):
         t.fn(Context(run, None, t))
         return run
 
-    def assert_put_back(self):
+    def count(self, n):
+        self.fake.state["settings"]["cool_intake_fans"] = n
+
+    def assert_put_back(self, count="2"):
         s = self.fake.state["settings"]
         self.assertEqual(s.get("cool_tach_intake_min_rpm"), "2300")
-        self.assertNotIn("cool_intake_fans", s)
+        self.assertEqual(s.get("cool_intake_fans"), count)
         self.assertNotIn("cool_tach_exhaust_min_rpm", s)
 
     def test_two_intake_fans_pass_and_are_put_back(self):
-        self.run_check()
+        # the bench path: both intakes turn, the count is written as 2
+        run = self.run_check()
+        self.assertEqual(run.evidence["intakes"], {"counted": "2", "found": 2, "intake_2_silent": False})
         self.assert_put_back()
 
-    def test_one_intake_fan_passes_with_intake_2_not_fitted(self):
-        self.wizard_result = self.result(1)
+    def test_a_machine_counted_with_one_whose_intake_2_turns_is_counted_two_and_put_back(self):
+        # intake 2 turning proves two fans: the check writes 2, and the
+        # count goes back as found
+        self.count("1")
         self.run_check()
+        self.assert_put_back("1")
+        self.assertIn(("/settings", {"cool_intake_fans": "1"}), self.fake.posts)
+
+    def test_one_intake_fan_counted_one_passes_and_the_count_is_not_written(self):
+        self.count("1")
+        self.silent2 = True
+        run = self.run_check()
+        self.assertEqual(run.evidence["intakes"], {"counted": "1", "found": 1, "intake_2_silent": True})
+        self.assert_put_back("1")
+
+    def test_a_silent_intake_2_on_a_machine_counted_with_two_fails_the_check(self):
+        self.silent2 = True
+        with self.assertRaises(Exception) as cm:
+            self.run_check()
+        self.assertIn("a fan did not come up to speed at the run profile", str(cm.exception))
         self.assert_put_back()
 
-    def test_one_intake_fan_with_the_setting_left_at_two_fails(self):
-        self.wizard_result = self.result(1)
+    def test_a_silent_intake_2_whose_count_was_written_fails(self):
+        # a silent intake 2 never writes the count
+        self.count("1")
+        self.silent2 = True
         self.wizard_writes = "2"
         with self.assertRaises(Exception) as cm:
             self.run_check()
-        self.assertIn("cool_intake_fans reads '2', the check found 1", str(cm.exception))
+        self.assertIn("cool_intake_fans reads '2', expected '1' (intake 2 silent", str(cm.exception))
+        self.assert_put_back("1")
+
+    def test_a_turning_intake_2_counted_one_fails(self):
+        r = self.result(False)
+        r["intake_fans"] = 1
+        self.wizard_result = r
+        with self.assertRaises(Exception) as cm:
+            self.run_check()
+        self.assertIn("intake 2 turned, and the check found 1 intake fans", str(cm.exception))
         self.assert_put_back()
 
+    def test_a_silent_intake_2_reported_fitted_fails(self):
+        self.count("1")
+        self.silent2 = True
+        r = self.result(True)
+        r["fans"]["intake 2"] = {"fitted": True, "turning": False}
+        self.wizard_result = r
+        with self.assertRaises(Exception) as cm:
+            self.run_check()
+        self.assertIn("intake 2 with one intake fan", str(cm.exception))
+        self.assert_put_back("1")
+
     def test_a_result_without_the_count_fails(self):
-        r = self.result(2)
+        r = self.result(False)
         del r["intake_fans"]
         self.wizard_result = r
-        self.wizard_writes = "2"
         with self.assertRaises(Exception) as cm:
             self.run_check()
         self.assertIn("no intake fan count", str(cm.exception))
@@ -289,10 +350,13 @@ class AirflowCheckTests(unittest.TestCase):
 class ScriptedCheck(unittest.TestCase):
     """A dark check against the fake daemon: the start, one poll that sees
     the run, the next that sees its end (`finish` writes the settings and
-    returns the result), the record at version 1, and /status's lens block
-    read from the settings as the daemon reads them."""
+    returns the result), the record at version 1, /status's lens block
+    read from the settings as the daemon reads them, and the supervisor's
+    stop and start levers (a start records the settings the new controller
+    reads)."""
 
     WID = ""
+    LENS_KEYS = ("lens_stop_below_steps", "lens_stop_above_steps", "lens_hall_edge_z_mm")
 
     def setUp(self):
         self.fake = helpers.FakeForgectrl().start()
@@ -303,6 +367,7 @@ class ScriptedCheck(unittest.TestCase):
         self.polls = 0
         self.prompt = None              # a prompt the run opens on its first poll, when set
         self.answers = []
+        self.starts = []                # the lens settings each controller start read
 
         def on_get(path, q):
             s = self.fake.state["settings"]
@@ -344,12 +409,23 @@ class ScriptedCheck(unittest.TestCase):
                     else:
                         s[k] = v
                 return 200, dict(s)
+            if path == "/controller/stop":
+                self.fake.state["mode"] = dict(self.fake.state["mode"], controller="standby")
+                return 200, {"stopped": True}
+            if path == "/controller/start":
+                m = self.fake.state["mode"]
+                self.fake.state["mode"] = dict(m, controller="running", motion="verified", pid=m["pid"] + 1)
+                self.starts.append({k: s.get(k) for k in self.LENS_KEYS})
+                return 200, {"started": True}
             return None
         self.fake.on_get = on_get
         self.fake.on_post = on_post
 
     def tearDown(self):
         self.fake.stop()
+
+    def lever_posts(self):
+        return [p for p, _ in self.fake.posts if p.startswith("/controller/")]
 
     def run_check(self, tid):
         t = catalog.load_suite()[tid]
@@ -381,15 +457,24 @@ class LensCheckTests(ScriptedCheck):
                 "window": {"below": below, "above": above, "found": st["found"]}, "summary": "x"}
 
     def assert_put_back(self):
+        """The window as found, in the settings and in the controller:
+        grblHAL reads it only at its start, so the hand-back is one stop
+        and one start after the put-back, the start reading the window
+        as found."""
         s = self.fake.state["settings"]
         for k, v in self.FOUND.items():
             self.assertEqual(s.get(k), v, k)
+        self.assertEqual(self.lever_posts(), ["/controller/stop", "/controller/start"])
+        self.assertEqual([{k: st[k] for k in self.FOUND} for st in self.starts], [self.FOUND])
+        self.assertEqual(self.fake.state["mode"]["controller"], "running")
+        self.assertEqual(self.fake.state["mode"]["pid"], 101)
 
     def test_the_stops_found_are_the_window(self):
         run = self.run_check("setup.check-lens")
         self.assertEqual(run.evidence["window"]["settings"], ("14", "20"))
         self.assertEqual(run.evidence["window"]["status"]["below"], 14)
         self.assertEqual(run.evidence["result"]["stops"]["contact_above"], 22)
+        self.assertEqual(run.evidence["restart"], {"mode": "grbl", "pid": 100, "stop": 200, "start": 200})
         self.assert_put_back()
 
     def test_stops_not_found_write_the_fallback(self):
@@ -415,53 +500,112 @@ class LensCheckTests(ScriptedCheck):
         self.assertIn(("/wiz/lens.travel/abort", {}), self.fake.posts)
         self.assert_put_back()
 
+    def test_a_controller_that_does_not_restart_fails_the_hand_back(self):
+        # The start refused: the controller stays stopped on the stale
+        # window's heels, and the run says so rather than pass.
+        real = self.fake.on_post
+
+        def on_post(path, form):
+            if path == "/controller/start":
+                return 500, {"error": "no"}
+            return real(path, form)
+        self.fake.on_post = on_post
+        with self.assertRaises(Exception) as cm:
+            self.run_check("setup.check-lens")
+        self.assertIn("the controller was not restarted on the window as found", str(cm.exception))
+
+    def test_cloud_mode_restarts_nothing(self):
+        # The cloud client reads no lens window: nothing to restart.
+        self.fake.state["mode"] = dict(self.fake.state["mode"], mode="cloud")
+        run = self.run_check("setup.check-lens")
+        self.assertEqual(self.lever_posts(), [])
+        self.assertEqual(run.evidence["restart"], {"mode": "cloud", "pid": 100})
+
 
 class IntakesCheckTests(ScriptedCheck):
     """setup.check-intakes's judge: the tachs count the intake fans the
-    machine held, the step writes the count, and it goes back as found."""
+    machine held, the step writes the count, and it goes back as found.
+    The tachs count only two turning fans: intake 2 giving no reading
+    reads the same as a machine built with one, so the step asks the
+    operator, and so it does when intake 1 does not come up. Both intakes
+    turn on the bench reference, so either question fails the test
+    unanswered."""
 
     WID = "airflow.intakes"
+    # The step's two questions, as the daemon asks them.
+    SILENT_2 = ("Intake 1 turns; intake 2 gives no reading. Look at the back of the machine: how many "
+                "intake fans does it have? If it has two, the second one needs attention before the "
+                "machine cuts.")
+    SLOW_1 = ("The intake fans could not be counted: intake 1 did not come up to speed. Look at the back "
+              "of the machine: how many intake fans does it have? A fan that does not turn needs "
+              "attention before the machine cuts.")
 
     def setUp(self):
         super().setUp()
         self.fake.state["settings"]["cool_intake_fans"] = "2"
-        self.count = 2
 
     def finish(self, s):
-        s["cool_intake_fans"] = str(self.count)
-        return {"intake_fans": self.count, "intake_1_rpm": 4150.0,
-                "intake_2_rpm": 0.0 if self.count == 1 else 4100.0, "intake_2_silent": self.count == 1,
+        # both intakes turned: two, by the tachs
+        s["cool_intake_fans"] = "2"
+        return {"intake_fans": 2, "intake_1_rpm": 4150.0, "intake_2_rpm": 4100.0, "intake_2_silent": False,
                 "counted_by": "tachs", "summary": "x"}
+
+    def ask(self, text):
+        self.prompt = {"id": "intake-count", "kind": "choice", "text": text, "options": ["One", "Two"]}
 
     def test_two_intake_fans_counted_and_put_back(self):
         run = self.run_check("setup.check-intakes")
         self.assertEqual(run.evidence["count"]["counted"], 2)
+        self.assertEqual(run.evidence["count"]["by"], "tachs")
         self.assertEqual(self.fake.state["settings"]["cool_intake_fans"], "2")
         self.assertIn(("/settings", {"cool_intake_fans": "2"}), self.fake.posts)    # the put-back
 
-    def test_one_intake_fan_on_a_machine_built_with_one(self):
+    def test_a_count_other_than_the_machine_held_fails_and_puts_it_back(self):
+        # a machine that held one intake fan, whose tachs saw two turn
         self.fake.state["settings"]["cool_intake_fans"] = "1"
-        self.count = 1
-        run = self.run_check("setup.check-intakes")
-        self.assertEqual(run.evidence["count"]["counted"], 1)
+        with self.assertRaises(Exception) as cm:
+            self.run_check("setup.check-intakes")
+        self.assertIn("the tachs count 2 intake fans, the machine held 1", str(cm.exception))
         self.assertEqual(self.fake.state["settings"]["cool_intake_fans"], "1")
 
-    def test_a_count_other_than_the_machine_held_fails_and_puts_it_back(self):
-        self.count = 1
+    def test_a_silent_intake_2_is_a_fault_the_test_does_not_answer(self):
+        # intake 1 turns, intake 2 gives no reading: the step asks the
+        # operator, and on the bench reference that is a fan needing attention
+        self.ask(self.SILENT_2)
         with self.assertRaises(Exception) as cm:
             self.run_check("setup.check-intakes")
-        self.assertIn("the tachs count 1 intake fans, the machine held 2", str(cm.exception))
+        self.assertIn("asked for the count, which the tachs could not make", str(cm.exception))
+        self.assertIn("intake 2 gives no reading", str(cm.exception))
+        self.assertEqual(self.answers, [])
+        self.assertIn(("/wiz/airflow.intakes/abort", {}), self.fake.posts)
         self.assertEqual(self.fake.state["settings"]["cool_intake_fans"], "2")
 
-    def test_the_operator_question_fails_the_check(self):
-        # intake 1 never came up: the step asks a person to count, which
-        # is not a count by the tachs
-        self.prompt = {"id": "intake-count", "kind": "choice", "text": "how many?", "options": ["One", "Two"]}
+    def test_a_silent_intake_2_on_a_machine_that_held_one_still_fails(self):
+        # the test never answers the operator's question, whatever was held
+        self.fake.state["settings"]["cool_intake_fans"] = "1"
+        self.ask(self.SILENT_2)
         with self.assertRaises(Exception) as cm:
             self.run_check("setup.check-intakes")
+        self.assertIn("asked for the count", str(cm.exception))
+        self.assertEqual(self.answers, [])
+        self.assertEqual(self.fake.state["settings"]["cool_intake_fans"], "1")
+
+    def test_intake_1_not_up_to_speed_fails_the_check(self):
+        self.ask(self.SLOW_1)
+        with self.assertRaises(Exception) as cm:
+            self.run_check("setup.check-intakes")
+        self.assertIn("asked for the count", str(cm.exception))
         self.assertIn("intake 1 did not come up to speed", str(cm.exception))
         self.assertEqual(self.answers, [])
         self.assertEqual(self.fake.state["settings"]["cool_intake_fans"], "2")
+
+    def test_the_tachs_count_is_judged_by_the_count_alone(self):
+        # counted by the tachs, the count is the whole judgment: the speeds
+        # are recorded, not judged again
+        real = self.finish
+        self.finish = lambda s: dict(real(s), intake_1_rpm=None)
+        run = self.run_check("setup.check-intakes")
+        self.assertIsNone(run.evidence["count"]["intake_1_rpm"])
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@ result judged, and the setting the burn wrote put back as found. Each
 burn stands alone on its own scrap of wood in the back-left corner,
 drawn from the head's home against the gantry stops, and re-runs on the
 real record, so a completed burn completes again at the same version.
+The floor burns at the focus the focus burn measured, so it needs Focus
+on the record.
 
 The operator's part is the scrap and one press on the machine at the
 start (the presence check of the ready gate; with the bench actuator up
@@ -20,12 +22,15 @@ witnesses, not the operator's eye, and the setting it writes is
 restored. The page is where the real numbers go in.
 """
 import re
+import time
 
+from .. import hw
 from ..catalog import test
-from .setup_dark import run_check, Restore, FALLBACK_WINDOW, LENS_WINDOW_KEYS
+from .setup_dark import run_check, Restore, FALLBACK_WINDOW, LENS_WINDOW_KEYS, dark
 
 BURN_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/wizrun.h"),
                ("forgectrl", "src/lens.*"), ("forgectrl", "src/sheet.*"),
+               ("forgectrl", "src/lenshome.*"),
                ("forgectrl", "src/font_hershey.*"), ("forgectrl", "src/jobstream.*"),
                ("forgectrl", "src/jobrun.*"), ("forgectrl", "src/lease.*"),
                ("forgectrl", "src/curverec.*"), ("forgectrl", "src/wizdark.*"),
@@ -78,6 +83,17 @@ def preview_ok(ctx, wid):
         out = [z for z in zs if z < lo - 0.01 or z > hi + 0.01]
         ctx.check(not out, "%s commands Z outside the lens window %.2f..%.2f: %s",
                   wid, lo, hi, out)
+    # The tail the wizard streams after the body: the lens back on the
+    # reference the program's head declared, the head back to X0 Y0, the
+    # G92 origin cleared (the controller keeps a G92 offset and restores it
+    # at its next start, where it would shift a sender's own work offsets),
+    # and the program end.
+    lines = [ln.strip() for ln in (body or b"").decode("utf-8", "replace").splitlines()]
+    tail = [ln for ln in lines if ln and not ln.startswith(";")][-4:]
+    edge = lens.get("edge_z")
+    want = ["G0 Z%.2f" % edge, "G0 X0 Y0", "G92.1", "M2"] if isinstance(edge, (int, float)) else None
+    ctx.evidence.setdefault("program_tail", {})[wid] = tail
+    ctx.check(tail == want, "the %s program ends %s, not the tail %s", wid, tail, want)
 
 
 def emission_ok(ctx, last):
@@ -219,45 +235,97 @@ def focus_window_ok(ctx, r, before):
                   "references the lens, takes the controller in loopback posture, is answered that "
                   "the head is home and that the scrap is in the corner, and takes the thickness "
                   "in the machine's units (3.2 mm or 0.125 in); its program declares X0 Y0 at the "
-                  "head and its tail returns there. With its preview and program served by GET "
-                  "/wiz/sheet.svg and /wiz/sheet.gcode and every Z the program commands inside the "
-                  "reach /status reports, it burns twelve lines after the press, from the top of "
+                  "head, and its tail puts the lens back on the reference, returns the head there, "
+                  "clears the G92 origin (G92.1), and ends (M2). With its preview and program "
+                  "served by GET /wiz/sheet.svg and /wiz/sheet.gcode, every Z the program commands "
+                  "inside the reach /status reports, and the program ending in that tail at the "
+                  "edge /status reports, it burns twelve lines after the press, from the top of "
                   "the window to the bottom, seen by the two witnesses (the tube current and the "
                   "kernel's LASER_ON samples), with the beam sensor's rise recorded and not "
                   "required. The pick is line 11. The "
                   "result carries its keys; the ladder ran in the window the machine held, which "
                   "the burn leaves as found (it writes the edge alone, the one its result "
                   "reports); every ladder height lies in the reach; the program served afterward "
-                  "agrees with /status; the record carries laser.focus at version 1. The edge is "
-                  "restored at the end.")
+                  "agrees with /status; the record carries laser.focus at version 1. The edge and "
+                  "the window are restored at the end. grblHAL reads them only at its start, and "
+                  "the burn started it before the restore, so the controller is stopped and "
+                  "started again on the settings as found (on every exit path), and it must be "
+                  "running with motion verified under a new process.")
 def focus(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
+    restart = {}
+
+    def restart_on_found():
+        """A fresh controller start on the settings as found, once the
+        burn has ended. Plain waits, not the run's, so an abort gets it
+        too; a burn still ending starts its own controller after the
+        restore, which reads them already."""
+        try:
+            t_end = time.time() + 120
+            while time.time() < t_end and dark(fc).get("running"):
+                time.sleep(1)
+            if dark(fc).get("running"):
+                restart["skipped"] = "the burn is still ending"
+                ctx.log("the burn is still ending: its own controller start reads the settings as found")
+                return
+            st, m = fc.get("/mode")
+            m = m if isinstance(m, dict) else {}
+            restart.update(mode=m.get("mode"), pid=m.get("pid"))
+            if m.get("mode") != "grbl":
+                return                      # the cloud client reads neither the edge nor the window
+            restart["stop"], body = fc.post("/controller/stop")
+            ctx.log("restarting the controller on the edge and the window as found: POST "
+                    "/controller/stop -> %s %s", restart["stop"], body)
+            for _ in range(10):
+                restart["start"], body = fc.post("/controller/start")
+                if restart["start"] != 409:
+                    break
+                time.sleep(1)               # the burn's lease goes just after its end
+            ctx.log("POST /controller/start -> %s %s", restart["start"], body)
+        except hw.HwError as e:
+            restart["error"] = str(e)
+            ctx.log("the controller could not be restarted on the settings as found: %s", e)
     ctx.ready("The focus burn: twelve lines on the scrap after a press. The bench presses when the "
               "button lights.")
-    with Restore(ctx, [EDGE_KEY] + LENS_WINDOW_KEYS):
-        # A fresh head's focus: the edge unknown, so the burn runs from the
-        # bench reference's number and writes the head's own. The window
-        # stays: it is the Lens travel check's.
-        st, _ = fc.post("/settings", params={EDGE_KEY: ""})
-        ctx.check(st == 200, "clearing %s -> %s", EDGE_KEY, st)
-        before = window_held(ctx)
-        ev["lens_fresh"] = (fc.status() or {}).get("lens") or {}
-        r = burn(ctx, "laser.focus", "focus-arm", {"focus-pick": "11"}, FOCUS_KEYS)
-        ctx.check(r.get("pick") == 11 and r.get("picked_lines") == [11, 11],
-                  "the pick reads %s (lines %s), answered 11", r.get("pick"), r.get("picked_lines"))
-        ctx.check("stops" not in r, "the focus burn searched for the stops: %s", r.get("stops"))
-        focus_window_ok(ctx, r, before)
-        ctx.log("focus: line %s, the edge at %s mm, the window %s/%s", r.get("pick"), r.get("edge_z_mm"),
-                (r.get("window") or {}).get("below"), (r.get("window") or {}).get("above"))
+    try:
+        with Restore(ctx, [EDGE_KEY] + LENS_WINDOW_KEYS):
+            # A fresh head's focus: the edge unknown, so the burn runs from the
+            # bench reference's number and writes the head's own. The window
+            # stays: it is the Lens travel check's.
+            st, _ = fc.post("/settings", params={EDGE_KEY: ""})
+            ctx.check(st == 200, "clearing %s -> %s", EDGE_KEY, st)
+            before = window_held(ctx)
+            ev["lens_fresh"] = (fc.status() or {}).get("lens") or {}
+            r = burn(ctx, "laser.focus", "focus-arm", {"focus-pick": "11"}, FOCUS_KEYS)
+            ctx.check(r.get("pick") == 11 and r.get("picked_lines") == [11, 11],
+                      "the pick reads %s (lines %s), answered 11", r.get("pick"), r.get("picked_lines"))
+            ctx.check("stops" not in r, "the focus burn searched for the stops: %s", r.get("stops"))
+            focus_window_ok(ctx, r, before)
+            ctx.log("focus: line %s, the edge at %s mm, the window %s/%s", r.get("pick"), r.get("edge_z_mm"),
+                    (r.get("window") or {}).get("below"), (r.get("window") or {}).get("above"))
+    finally:
+        restart_on_found()
+        ev["restart"] = dict(restart)
+    if restart.get("mode") == "grbl":
+        ctx.check(restart.get("stop") == 200 and restart.get("start") == 200,
+                  "the controller was not restarted on the settings as found: %s", restart)
+
+    def back():
+        st, m = fc.get("/mode")
+        m = m if isinstance(m, dict) else {}
+        return (m.get("controller") == "running" and m.get("motion") == "verified"
+                and (restart.get("start") != 200 or m.get("pid") != restart.get("pid")))
+    ok = ctx.wait_for(back, 150)
+    ctx.check(ok is not None, "the controller did not come back on the settings as found")
     ctx.log("PASS: the focus burn ran in the window the machine holds and wrote the edge alone; "
-            "settings restored")
+            "settings restored and the controller restarted on them")
 
 
 @test("setup.floor", title="The laser floor burn: the rungs and the floor it writes",
       subsystem="setup", kind="live", hardware="takeover", mode="grbl", est_min=10,
       covers=BURN_COVERS,
-      requires=["forgectrl.auth", "setup.check-motion", "laser.emission-witness"],
+      requires=["forgectrl.auth", "setup.check-motion", "laser.emission-witness", "setup.focus"],
       actions=["button"], hands=["scrap"],
       steps=["The gantry stops installed and the head at its home against them. A fresh flat scrap "
              "of wood about 3 mm (1/8 in) thick and at least 86 x 68 mm (3.4 x 2.7 in), pushed into "
@@ -269,20 +337,46 @@ def focus(ctx):
              "the button again at the arm, as the page asks.",
              "Nothing else: the test answers every prompt itself and puts back the setting the "
              "burn writes."],
-      description="POST /wiz/laser.floor/start on a fresh scrap, set up as the focus burn is: "
+      description="The floor burns at the focus the focus burn measured, and the wizard refuses "
+                  "to start without Focus on the record, so the record must carry laser.focus "
+                  "(setup.focus, ahead of this test, leaves it there), and the lens reach /status "
+                  "reports must include the scrap's thickness (the wizard refuses a surface the "
+                  "lens cannot focus on); both are read before the scrap is asked for. Then POST "
+                  "/wiz/laser.floor/start on a fresh scrap, set up as the focus burn is: "
                   "answered that the gantry stops are installed, the lens referenced, the "
                   "controller in loopback posture, answered that the head is home and that the "
                   "scrap is in the corner, the thickness in the machine's units (3.2 mm or 0.125 "
-                  "in); its program declares X0 Y0 at the head and its tail returns there. With "
-                  "its preview and program served and every Z the program commands inside the "
-                  "reach /status reports, it burns twelve rungs from 2 to 24 percent density at "
+                  "in); its program declares X0 Y0 at the head, and its tail puts the lens back "
+                  "on the reference, returns the head there, clears the G92 origin (G92.1), and "
+                  "ends (M2). With its preview and program served, every Z the program commands "
+                  "inside the reach /status reports, and the program ending in that tail, it "
+                  "burns twelve rungs from 2 to 24 percent density at "
                   "the focal point on the scrap's surface, the floor and the curve off for the "
                   "job, after the press, seen by the two witnesses. The pick is 8, so the floor "
                   "written is 10 (two above it) and the setting reads it; the result carries its "
                   "keys; the record carries laser.floor at version 1. laser_floor_density is "
-                  "restored at the end.")
+                  "restored at the end (the controller loads it at every arm).")
 def floor(ctx):
     fc = ctx.forgectrl
+    ev = ctx.evidence
+    # The record and the reach, before the scrap is asked for: the wizard
+    # refuses the burn without Focus on the record, and it refuses a scrap
+    # the lens cannot focus on, so the operator's setup would be for
+    # nothing.
+    st, w = fc.get("/wiz")
+    focus_v = ((w if isinstance(w, dict) else {}).get("versions") or {}).get("laser.focus")
+    ev["focus_on_record"] = focus_v
+    ctx.check(st == 200 and isinstance(focus_v, int) and focus_v >= 1,
+              "the record carries no Focus (laser.focus, %s): the floor burns at the focus it measures, "
+              "and the wizard refuses to start without it", focus_v)
+    _answer, want_mm = thickness_answer(ctx)
+    lens = (fc.status() or {}).get("lens") or {}
+    lo, hi = lens.get("reach_min"), lens.get("reach_max")
+    ev["floor_reach"] = [lo, hi]
+    ctx.check(isinstance(lo, (int, float)) and isinstance(hi, (int, float))
+              and lo - 0.01 <= want_mm <= hi + 0.01,
+              "the lens focuses %s to %s mm above the tray, which leaves out the %s mm scrap: the floor "
+              "refuses a surface the lens cannot focus on", lo, hi, want_mm)
     ctx.ready("The laser floor burn: twelve rungs on the scrap after a press. The bench presses when "
               "the button lights.")
     with Restore(ctx, [FLOOR_KEY]):

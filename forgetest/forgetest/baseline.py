@@ -19,7 +19,9 @@ restores it after (on every exit path), so a test cannot hand the next one
              restored where the interface allows.
 
 The lid lamp is fixed too, at forgectrl's `lid_lamp_idle` setting (unset =
-236): the daemon asserts it at start and at every controller spawn.
+236): the daemon asserts it at start and at every controller spawn. The
+lamp fades toward a level written to it, so a level written a moment
+before the check is read again until it holds before it is judged.
 
 The controller mode in force decides what the baseline owns. In GRBL mode
 everything above applies. In cloud mode the cloud client owns what it
@@ -140,6 +142,15 @@ PRESERVED_SYSFS = []                # sysfs attrs captured before, restored afte
 
 LID_LAMP_ATTR = "pic/lid_led"
 LID_LAMP_DEFAULT = "236"            # forgectrl's lid_lamp_idle default
+# The lid LED runs on the kernel's "smooth" trigger: a level written to it
+# is reached by a fade over a fraction of a second, so a read right after
+# a write (the supervisor re-applies the idle level at every controller
+# spawn) finds the lamp part-way there: on the bench reference, 232 read
+# 0.05 s after the supervisor re-applies 236. The lamp is read again every
+# LID_LAMP_POLL_S until it holds the level, for at most LID_LAMP_SETTLE_S,
+# before it is called a leftover.
+LID_LAMP_SETTLE_S = 3.0
+LID_LAMP_POLL_S = 0.1
 
 BOOT_MAX_AGE_S = 600                # a boot reference is taken only this soon after boot
 SETTLE_S = 150                      # the supervisor's probe + rail-off ladder
@@ -743,13 +754,34 @@ class Baseline:
         got = hw.sysfs_read(LID_LAMP_ATTR)
         if got is None or got == want:
             return
+        held, now = self._lamp_holds(want)
+        if held:
+            self.log("lid lamp: read %s, then held %s; the fade toward a level just written, "
+                     "not a leftover" % (got, want))
+            return
+        found = now if now is not None else got
         try:
             hw.sysfs_write(LID_LAMP_ATTR, want)
-            back = hw.sysfs_read(LID_LAMP_ATTR)
-            act = "restored" if back == want else "failed: reads %s" % back
+            held, back = self._lamp_holds(want)
+            act = "restored" if held else "failed: reads %s" % back
         except OSError as e:
             act = "failed: %s" % e
-        left.append(Leftover(LID_LAMP_ATTR, got, want, act))
+        left.append(Leftover(LID_LAMP_ATTR, found, want, act))
+
+    def _lamp_holds(self, want):
+        """Read the lid lamp every LID_LAMP_POLL_S, for at most
+        LID_LAMP_SETTLE_S, until it holds `want`: two reads in a row at
+        it, so a fade that only passes through the level does not count.
+        Returns (held, the last read)."""
+        last = prev = None
+        for _ in range(max(2, int(round(LID_LAMP_SETTLE_S / LID_LAMP_POLL_S)))):
+            if self.abort():
+                break
+            time.sleep(LID_LAMP_POLL_S)
+            prev, last = last, hw.sysfs_read(LID_LAMP_ATTR)
+            if last == want and prev == want:
+                return True, last
+        return False, last
 
     def _kernel_side(self, left):
         if hw.sysfs_read("cnc/state") is None:

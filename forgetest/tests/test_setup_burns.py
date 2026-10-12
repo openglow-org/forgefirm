@@ -10,7 +10,9 @@ scripted daemon: the preview and the program read, the start, the
 prompts answered in order (the gantry stops, the head at home, the scrap,
 its thickness in the machine's units, the arm, the machine's own press
 prompt, the pick), the witnesses judged, the record read at version 1,
-and the setting the burn wrote put back as found."""
+the setting the burn wrote put back as found, and for the focus burn the
+controller started again on the edge and the window put back. The floor
+starts only with Focus on the record and a scrap the lens reaches."""
 import os
 import sys
 import unittest
@@ -18,7 +20,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 import helpers  # noqa: E402
 from forgetest import catalog  # noqa: E402
-from forgetest.runner import Context, Failed, Run  # noqa: E402
+from forgetest.runner import Aborted, Context, Failed, Run  # noqa: E402
 from forgetest.suite import setup_burns, setup_dark  # noqa: E402
 
 LIVE = ["laser.focus", "laser.floor"]
@@ -78,6 +80,8 @@ WRITES = {"laser.focus": {"lens_hall_edge_z_mm": "6.96"}, "laser.floor": {"laser
 # travel check wrote, its floor.
 FOUND = {"lens_hall_edge_z_mm": "4.10", "lens_stop_below_steps": "14", "lens_stop_above_steps": "20",
          "laser_floor_density": "12", "ui_units": "metric"}
+# What grblHAL reads at its start: the edge and the window.
+LENS_KEYS = ("lens_hall_edge_z_mm", "lens_stop_below_steps", "lens_stop_above_steps")
 HOME = "The head is home"
 
 
@@ -97,8 +101,9 @@ class RegistrationTests(unittest.TestCase):
             self.assertIsNone(getattr(t, "precheck", None), tid)
         self.assertEqual(list(self.reg["setup.focus"].requires),
                          ["forgectrl.auth", "setup.check-motion", "laser.emission-witness", "setup.check-lens"])
+        # the floor burns at the focus Focus measured, and refuses without it
         self.assertEqual(list(self.reg["setup.floor"].requires),
-                         ["forgectrl.auth", "setup.check-motion", "laser.emission-witness"])
+                         ["forgectrl.auth", "setup.check-motion", "laser.emission-witness", "setup.focus"])
 
     def test_the_sheet_is_gone(self):
         self.assertFalse([i for i in self.reg if i.startswith("setup.sheet")])
@@ -109,6 +114,7 @@ class RegistrationTests(unittest.TestCase):
             for want in (("forgectrl", "src/wizlive.*"), ("forgectrl", "src/sheet.*"),
                          ("forgectrl", "src/jobstream.*"), ("forgectrl", "src/curverec.*"),
                          ("forgectrl", "src/font_hershey.*"), ("forgectrl", "src/lens.*"),
+                         ("forgectrl", "src/lenshome.*"),       # the lens back on its reference at the end
                          ("forgectrl", "src/ui/wizard.*"), ("forgectrl", "src/wizrun.h"),
                          ("grblhal-glowforge", "src/glowforge_laser.c")):
                 self.assertIn(want, covers, "%s lacks %s" % (tid, want))
@@ -124,11 +130,18 @@ class RegistrationTests(unittest.TestCase):
 
 class ScriptedDaemon:
     """The wizard runner as the suite sees it: /wiz/<id>/start opens the
-    first prompt, each answer opens the next (a thickness out of range in
-    the machine's units opens it again), the press prompt closes on the
-    poll after the one that served it, the last answer ends the burn with
-    its result and its writes, /wiz/dark reports it, GET /wiz carries the
-    versions, and the preview and the program are served per burn."""
+    first prompt (the floor ends at once, with the wizard's error, when the
+    record carries no Focus), each answer opens the next (a thickness that
+    is not a plain number, out of range in the machine's units, or, for
+    the floor, outside the lens reach opens it again), the press prompt
+    closes on the poll after the one that served it, the last answer ends
+    the burn with its result and its writes, /wiz/dark reports it, GET /wiz
+    carries the versions (the record carries Focus already, as the bench's
+    does), the preview and the program are served per burn, the program
+    ending in the wizard's tail, and the supervisor's stop and start levers
+    work (a start records the settings the new controller reads)."""
+
+    TAIL = ["G0 X0 Y0", "G92.1", "M2"]      # after the lens's return to the edge
 
     def __init__(self, fake):
         self.fake = fake
@@ -136,7 +149,9 @@ class ScriptedDaemon:
         self.dark = {"id": "", "running": False, "phase": "", "progress": 0, "elapsed_s": 0,
                      "log": [], "prompt": None, "result": None, "error": "",
                      "shots": {"lid": False, "head": False}}
-        self.versions = {}
+        self.versions = {"laser.focus": 1}
+        self.starts = []            # the lens settings each controller start read
+        self.tail = list(self.TAIL)
         self.answers = {}           # wid -> [values]
         self.order = []             # the burns as started
         self.aborted = []
@@ -207,7 +222,7 @@ class ScriptedDaemon:
                 lines += ["G0 Z%.2f" % z for z in ladder_z(lens["edge_z"], lens["below"], lens["above"])]
             if self.stray_z is not None:
                 lines.append("G0 Z%.2f" % self.stray_z)
-            lines += ["M5", "G0 Z%.2f" % lens["edge_z"], "G0 X0 Y0", "M2"]
+            lines += ["M5", "G0 Z%.2f" % lens["edge_z"]] + self.tail
             return 200, ("\n".join(lines) + "\n").encode(), "text/plain"
         return None
 
@@ -219,6 +234,11 @@ class ScriptedDaemon:
                 return 404, {"error": "no such wizard"}
             self.order.append(wid)
             self.settings_at_start[wid] = dict(s)
+            if wid == "laser.floor" and not self.versions.get("laser.focus"):
+                # the floor burns at the focus Focus measured: no prompt, no motion
+                self.dark.update({"id": wid, "running": False, "phase": "", "prompt": None, "result": None,
+                                  "error": "run Focus first: the floor burns at the focus it measures"})
+                return 200, {"started": True, "id": wid}
             s.update(self.start_writes.get(wid, {}))
             self.lens_at_start = lens_block(s)
             self.queue = list(SCRIPT[wid][0])
@@ -235,8 +255,13 @@ class ScriptedDaemon:
             self.answers.setdefault(wid, []).append(value)
             if p["id"] == "thickness":
                 imperial = (self.units or s.get("ui_units")) == "imperial"
-                mm = float(value) * (25.4 if imperial else 1.0)
-                if not 0 < mm <= 30:
+                try:
+                    mm = float(value.strip()) * (25.4 if imperial else 1.0)
+                except ValueError:
+                    mm = -1                     # "1/8" or "3 mm": not a plain number
+                lens = self.lens_at_start
+                if not 0 < mm <= 30 or (wid == "laser.floor"
+                                        and not lens["reach_min"] <= mm <= lens["reach_max"]):
                     self.open_next()            # the same prompt again, a new sequence number
                     return 200, {"ok": True}
                 self.thickness = mm
@@ -255,7 +280,18 @@ class ScriptedDaemon:
                 else:
                     s[k] = v
             return 200, dict(s)
+        if path == "/controller/stop":
+            self.fake.state["mode"] = dict(self.fake.state["mode"], controller="standby")
+            return 200, {"stopped": True}
+        if path == "/controller/start":
+            m = self.fake.state["mode"]
+            self.fake.state["mode"] = dict(m, controller="running", motion="verified", pid=m["pid"] + 1)
+            self.starts.append({k: s.get(k) for k in LENS_KEYS})
+            return 200, {"started": True}
         return None
+
+    def lever_posts(self):
+        return [p for p, _ in self.fake.posts if p.startswith("/controller/")]
 
 
 class BurnRunTests(unittest.TestCase):
@@ -300,10 +336,23 @@ class BurnRunTests(unittest.TestCase):
         self.assertEqual(fw["program_z_before"]["reach"], [-1.44, 10.19])     # the default edge
         self.assertEqual(fw["program_z_after"]["reach"], [2.17, 13.8])        # the edge the burn wrote
         self.assertEqual(len(fw["program_z_after"]["z"]), 14)                 # head, twelve lines, tail
+        # the program served after the burn ends in the tail at the edge the burn wrote
+        self.assertEqual(run.evidence["program_tail"]["laser.focus"], ["G0 Z6.96", "G0 X0 Y0", "G92.1", "M2"])
         self.assertEqual(run.evidence["settings_before"],
                          {k: FOUND[k] for k in ("lens_hall_edge_z_mm", "lens_stop_below_steps",
                                                 "lens_stop_above_steps")})
         self.assert_found()                                                   # restored
+        self.assert_restarted_on_found()
+
+    def assert_restarted_on_found(self, found=None):
+        """grblHAL reads the edge and the window only at its start: the
+        hand-back is one stop and one start after the restore, the start
+        reading what was found."""
+        d = self.daemon
+        self.assertEqual(d.lever_posts(), ["/controller/stop", "/controller/start"])
+        self.assertEqual(d.starts, [found or {k: FOUND[k] for k in LENS_KEYS}])
+        self.assertEqual(self.fake.state["mode"]["controller"], "running")
+        self.assertEqual(self.fake.state["mode"]["pid"], 101)
 
     def test_the_focus_burn_in_the_fallback_window(self):
         # A head the Lens travel check has not measured: the settings hold
@@ -318,6 +367,8 @@ class BurnRunTests(unittest.TestCase):
         self.assertNotIn("lens_stop_below_steps", s)
         self.assertNotIn("lens_stop_above_steps", s)
         self.assertEqual(s["lens_hall_edge_z_mm"], "4.10")
+        self.assert_restarted_on_found({"lens_hall_edge_z_mm": "4.10", "lens_stop_below_steps": None,
+                                        "lens_stop_above_steps": None})
 
     def test_the_floor_burn(self):
         run = self.run_test("setup.floor")
@@ -327,6 +378,61 @@ class BurnRunTests(unittest.TestCase):
         self.assertEqual(d.previews, ["laser.floor"])
         self.assertEqual(run.evidence["result"]["floor_density"], 10.0)
         self.assertEqual(run.evidence["settings_before"], {"laser_floor_density": "12"})
+        self.assertEqual(run.evidence["focus_on_record"], 1)
+        self.assertEqual(run.evidence["program_tail"]["laser.floor"], ["G0 Z4.10", "G0 X0 Y0", "G92.1", "M2"])
+        self.assert_found()
+        # the controller loads the floor at every arm: nothing to restart
+        self.assertEqual(d.lever_posts(), [])
+
+    def test_the_floor_needs_focus_on_the_record(self):
+        # The floor burns at the focus Focus measured, and the wizard
+        # refuses without it: the test says so before the scrap is asked
+        # for, and nothing starts.
+        self.daemon.versions = {}
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.floor")
+        self.assertIn("the record carries no Focus", str(cm.exception))
+        self.assertEqual(self.daemon.order, [])
+        self.assertEqual(self.daemon.previews, [])
+        self.assert_found()
+
+    def test_the_floors_own_refusal_without_focus_ends_the_run(self):
+        # Past the test's own reading (a record that lost Focus in
+        # between): the wizard's refusal ends the run with its word, before
+        # any prompt.
+        real = self.daemon.on_get
+
+        def on_get(path, q):
+            if path == "/wiz" and not self.daemon.order:
+                return 200, {"versions": {"laser.focus": 1}, "recommended": [], "completed": True}
+            return real(path, q)
+        self.fake.on_get = on_get
+        self.daemon.versions = {}
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.floor")
+        self.assertIn("run Focus first", str(cm.exception))
+        self.assertEqual(self.daemon.order, ["laser.floor"])
+        self.assertEqual(self.daemon.answers, {})
+        self.assert_found()
+
+    def test_a_scrap_the_lens_does_not_reach_fails_before_the_floor(self):
+        # An edge high enough that the lens cannot focus 3.2 mm above the
+        # tray: the floor would refuse the thickness, so nothing starts.
+        self.fake.state["settings"]["lens_hall_edge_z_mm"] = "9.50"
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.floor")
+        self.assertIn("leaves out the 3.2 mm scrap", str(cm.exception))
+        self.assertEqual(self.daemon.order, [])
+
+    def test_a_program_that_keeps_its_g92_origin_fails_before_the_burn(self):
+        # The tail clears the G92 origin, which the controller would
+        # otherwise carry to its next start under a sender's own offsets.
+        self.daemon.tail = ["G0 X0 Y0", "M2"]
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.floor")
+        self.assertIn("not the tail", str(cm.exception))
+        self.assertIn("G92.1", str(cm.exception))
+        self.assertEqual(self.daemon.order, [])
         self.assert_found()
 
     def test_imperial_units_answer_the_thickness_in_inches(self):
@@ -392,6 +498,27 @@ class BurnRunTests(unittest.TestCase):
             self.run_test("setup.focus")
         self.assertIn("the focus burn wrote the lens window", str(cm.exception))
         self.assert_found()
+        self.assert_restarted_on_found()            # a failed run hands back the controller too
+
+    def test_an_aborted_focus_burn_still_restarts_the_controller_on_the_settings_as_found(self):
+        # The run aborted at the arm press: the burn is ended, the settings
+        # go back, and the controller starts again on them.
+        t = catalog.load_suite()["setup.focus"]
+        run = Run("test", t.id, t.title)
+        run.unattended = True
+        real = self.daemon.on_get
+
+        def on_get(path, q):
+            p = self.daemon.dark.get("prompt")
+            if path == "/wiz/dark" and p and p["id"] == "press":
+                run.aborted.set()
+            return real(path, q)
+        self.fake.on_get = on_get
+        with self.assertRaises(Aborted):
+            t.fn(Context(run, None, t))
+        self.assertEqual(self.daemon.aborted, ["laser.focus"])
+        self.assert_found()
+        self.assert_restarted_on_found()
 
     def test_a_focus_ladder_outside_the_window_held_fails(self):
         self.daemon.patch["laser.focus"] = {"window": {"below": 10, "above": 12, "reach_min": -0.07,

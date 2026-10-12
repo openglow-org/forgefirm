@@ -4,7 +4,8 @@
 # SPDX-License-Identifier:    MIT
 
 """cooling.intake-one-fan - a machine built with one intake fan
-(cool_intake_fans 1, which the setup's airflow check writes): the second
+(cool_intake_fans 1, which the setup's Intake fans step writes when the
+operator counts one): the second
 intake tach is published as not fitted and never judged, and intake 1
 still holds the intake floor. On a machine with two intake fans the
 setting alone proves both halves: intake 2 turns and is not judged, and
