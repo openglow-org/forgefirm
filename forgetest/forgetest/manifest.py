@@ -19,6 +19,7 @@ import functools
 import hashlib
 import json
 import os
+import posixpath
 import re
 
 DEFAULT_PATH = "/etc/forgefirm-manifest.json"
@@ -108,6 +109,33 @@ NON_BEHAVIORAL = [
 BEHAVIORAL = [
     ("forgectrl", "docs/advisories/**"),
 ]
+
+
+# Paths a host test in CI proves, which no catalog test covers. The catalog
+# is for what needs the machine or an operator; software whose inputs can be
+# emulated is proven on a host. A row is (component, glob, host test, CI
+# workflow), the last two named as "<repository>:<path>": a component of
+# the manifest (its tests/ and .github/ files are listed there), or
+# "forgefirm" for this repository (the null-sink harnesses under
+# scripts/bench/, which grblhal-glowforge's workflow runs). The workflow
+# must run the host test: name it, or discover it (a glob, unittest
+# discover, pytest on its directory). A host-tested path counts as covered
+# in the coverage lint, and like every path no test covers it is in no
+# fingerprint: a change there makes no acceptance run necessary. A path a
+# catalog test exercises on the hardware belongs in that test's covers, not
+# here.
+HOST_TESTED = [
+]
+
+# This repository's root, when the package runs from a checkout of it; a
+# "forgefirm:" file is looked for there. Installed on an image, the package
+# is not in a checkout, and such a reference is not checked.
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = _ROOT if os.path.isdir(os.path.join(_ROOT, "meta-forgefirm")) else None
+# The pinned sources scripts/manifest-from-tree.py fetches (one bare repo
+# per source URL); a component's workflow is read from there. Without them
+# (on an image) whether a workflow runs a host test is not checked.
+SOURCES = os.path.join(REPO_ROOT, ".manifest-cache") if REPO_ROOT else None
 
 
 def non_behavioral(comp, path, allow=NON_BEHAVIORAL):
@@ -216,18 +244,303 @@ def empty_covers(manifest, tests):
     return out
 
 
-def coverage_report(manifest, tests, allow=NON_BEHAVIORAL):
-    """Which manifest paths no test covers.
+def _ref_problem(manifest, ref, what, root):
+    """Why a "<repository>:<path>" reference names no file, or None. A
+    component's file must be in the manifest; a "forgefirm:" one must exist
+    under `root`, and is not checked without one."""
+    repo, sep, path = ref.partition(":")
+    if not sep or not path:
+        return "names no repository:path for its %s" % what
+    if repo == "forgefirm":
+        if root is not None and not os.path.isfile(os.path.join(root, path)):
+            return "no such %s" % what
+        return None
+    if repo in DEV_ONLY_COMPONENTS or manifest.files(repo) is None:
+        return "no repository %r for its %s" % (repo, what)
+    if path not in {p for p, _b in manifest.files(repo)}:
+        return "no such %s" % what
+    return None
+
+
+def read_source(manifest, ref, root=REPO_ROOT, sources=SOURCES):
+    """(text, why) for a "<repository>:<path>" file: a "forgefirm:" file
+    from `root`, a component's from its pinned blob in the bare repo
+    `sources` holds for its source URL. (None, None) when it cannot be read
+    here (no root, no sources); (None, why) when it should have been and
+    was not, which is a defect, never a pass."""
+    import subprocess
+    repo, _sep, path = ref.partition(":")
+    if repo == "forgefirm":
+        if root is None:
+            return None, None
+        try:
+            with open(os.path.join(root, path), encoding="utf-8") as f:
+                return f.read(), None
+        except (OSError, UnicodeDecodeError) as e:
+            return None, "cannot be read: %s" % e
+    if not sources:
+        return None, None
+    comp = manifest.components.get(repo) or {}
+    blob = dict(manifest.files(repo) or []).get(path)
+    url = comp.get("source")
+    if not (blob and url):
+        return None, "cannot be read: no blob or source URL in the manifest"
+    cache = os.path.join(sources, hashlib.sha1(url.encode()).hexdigest()[:16])
+    try:
+        return subprocess.run(["git", "cat-file", "-p", blob], cwd=cache, capture_output=True,
+                              check=True).stdout.decode("utf-8", "replace"), None
+    except (OSError, subprocess.CalledProcessError) as e:
+        return None, "cannot be read from %s: %s" % (cache, e)
+
+
+def repo_name(manifest, repo):
+    """A repository's GitHub name: its source URL's last part, or this
+    repository's."""
+    if repo == "forgefirm":
+        return "forgefirm"
+    url = ((manifest.components.get(repo) or {}).get("source") or "").rstrip("/")
+    name = url.rsplit("/", 1)[-1]
+    return name[:-4] if name.endswith(".git") else name
+
+
+_STEP_KEYS = ("name", "uses", "run", "id", "if", "with", "env", "working-directory", "shell",
+              "continue-on-error", "timeout-minutes")
+_STEP_RX = re.compile(r"^(\s*)-\s+(%s)\s*:" % "|".join(re.escape(k) for k in _STEP_KEYS))
+_KEY_RX = re.compile(r"^(\s*)([\w-]+)\s*:\s*(.*)$")
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def workflow_steps(text):
+    """A workflow's steps, each a dict of its keys: "uses", "run" (the
+    command text, a block's lines joined), "working-directory", and "with"
+    (a dict). YAML read by its indentation, as far as these workflows use
+    it; comments, whole lines and from ' #' to the end of a line, are not
+    read. Anything outside a step (a trigger's paths, a job's name) is not
+    a step."""
+    lines = []
+    for ln in text.splitlines():
+        if ln.lstrip().startswith("#"):
+            continue
+        lines.append(re.sub(r"\s+#.*$", "", ln).rstrip())
+    steps, i = [], 0
+    while i < len(lines):
+        m = _STEP_RX.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        dash = len(m.group(1))
+        body = [" " * (dash + 2) + lines[i][dash + 1:].lstrip()]
+        i += 1
+        while i < len(lines) and (not lines[i].strip() or _indent(lines[i]) > dash):
+            body.append(lines[i])
+            i += 1
+        step, k = {}, 0
+        key_col = _indent(body[0])
+        while k < len(body):
+            km = _KEY_RX.match(body[k])
+            if not km or _indent(body[k]) != key_col:
+                k += 1
+                continue
+            key, val = km.group(2), km.group(3).strip()
+            if len(val) > 1 and val[0] == val[-1] and val[0] in "'\"":
+                val = val[1:-1]             # a quoted scalar, not a quote inside a command
+            k += 1
+            child = []
+            while k < len(body) and (not body[k].strip() or _indent(body[k]) > key_col):
+                child.append(body[k])
+                k += 1
+            if key == "with":
+                step["with"] = {c.group(2): c.group(3).strip().strip("'\"")
+                                for c in (_KEY_RX.match(x) for x in child) if c}
+            elif key == "run":
+                step["run"] = "\n".join(x.strip() for x in child) if val[:1] in ("|", ">") else val
+            else:
+                step[key] = val
+        steps.append(step)
+    return steps
+
+
+def checkout_path(steps, name, own):
+    """Where a workflow checks the repository `name` out (its path, "" for
+    the workspace), or None when it does not: its own repository is the
+    checkout that names no repository, another one the checkout whose
+    repository is <owner>/<name>."""
+    for s in steps:
+        if not s.get("uses", "").startswith("actions/checkout"):
+            continue
+        w = s.get("with", {})
+        repo = w.get("repository")
+        if (repo is None and own) or (repo is not None and repo.rsplit("/", 1)[-1].lower() == name.lower()):
+            return posixpath.normpath(w.get("path") or ".")
+    return None
+
+
+_SPLIT_RX = re.compile(r"&&|\|\||[;|\n]|(?:^|(?<=\s))(?:then|do|else)(?=\s|$)")
+_PREFIXES = ("sudo", "env", "time", "exec", "command", "nice")
+_INTERPRETER_RX = re.compile(r"^(?:python[0-9.]*|bash|sh)$")
+
+
+def _commands(run):
+    """The simple commands of a step's run text, each as its words, with
+    what only starts the real command taken off: sudo and its flags, env,
+    time, exec, and variable assignments."""
+    import shlex
+    out = []
+    for part in _SPLIT_RX.split(run.replace("\\\n", " ")):
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            words = part.split()
+        while words:
+            if words[0] in _PREFIXES:
+                words = words[1:]
+                while words and words[0].startswith("-"):
+                    words = words[1:]
+            elif re.match(r"^[A-Za-z_]\w*=", words[0]):
+                words = words[1:]
+            else:
+                break
+        if words:
+            out.append(words)
+    return out
+
+
+def _segments_match(path, pattern):
+    """A path against a path or a glob, one segment against one segment
+    ('*' never crosses a '/')."""
+    import fnmatch
+    a, b = path.split("/"), pattern.split("/")
+    return len(a) == len(b) and all(fnmatch.fnmatchcase(x, y) for x, y in zip(a, b))
+
+
+def _discovers(args, full, at):
+    """Whether `python -m unittest discover ARGS` finds the test: its
+    directory is the start directory (-s, default the working directory)
+    and its file name matches the pattern (-p, default test*.py)."""
+    import fnmatch
+    start, pattern = ".", "test*.py"
+    for i, a in enumerate(args):
+        if a in ("-s", "--start-directory") and i + 1 < len(args):
+            start = args[i + 1]
+        elif a in ("-p", "--pattern") and i + 1 < len(args):
+            pattern = args[i + 1]
+    return posixpath.dirname(full) == at(start) and fnmatch.fnmatchcase(posixpath.basename(full), pattern)
+
+
+def _pytest_runs(args, full, at):
+    """Whether pytest ARGS collects the test: named, or its directory given
+    and its file name one pytest collects (test_*.py, *_test.py)."""
+    import fnmatch
+    name = posixpath.basename(full)
+    collected = fnmatch.fnmatchcase(name, "test_*.py") or fnmatch.fnmatchcase(name, "*_test.py")
+    for a in args:
+        if a.startswith("-") or "$" in a:
+            continue
+        if at(a) == full or (collected and at(a) == posixpath.dirname(full)):
+            return True
+    return False
+
+
+def workflow_runs(steps, test_path):
+    """Whether a step of the workflow runs the test at test_path (its path
+    in the workspace: the checkout's path joined to the test's path in its
+    repository). Only what a step's run commands execute counts, each path
+    resolved against the step's working-directory: the command itself
+    (a script run directly, or a C test's built binary, <dir>/<stem>);
+    the script an interpreter runs (python, bash, sh), a glob matching the
+    whole path; a for loop's list over the test; unittest discover from
+    the test's own directory with a pattern its name matches; pytest on
+    the test or its own directory. An argument to anything else (echo, a
+    build, an install) does not run the test."""
+    full = posixpath.normpath(test_path)
+    stem, ext = posixpath.splitext(posixpath.basename(full))
+    compiled = ext in (".c", ".cc", ".cpp")
+    for s in steps:
+        run = s.get("run")
+        if not run:
+            continue
+        wd = s.get("working-directory") or "."
+
+        def at(p):
+            return posixpath.normpath(posixpath.join(wd, p))
+
+        def names(p):
+            return "$" not in p and _segments_match(full, at(p))
+        for words in _commands(run):
+            cmd, args = words[0], words[1:]
+            if cmd == "for" and "in" in args:
+                if any(names(p) for p in args[args.index("in") + 1:]):
+                    return True
+            elif _INTERPRETER_RX.match(posixpath.basename(cmd)):
+                if "-m" in args:
+                    i = args.index("-m")
+                    mod, rest = (args[i + 1], args[i + 2:]) if i + 1 < len(args) else ("", [])
+                    if (mod == "unittest" and rest[:1] == ["discover"] and _discovers(rest[1:], full, at)) or \
+                       (mod == "pytest" and _pytest_runs(rest, full, at)):
+                        return True
+                else:
+                    script = next((a for a in args if not a.startswith("-")), None)
+                    if script and names(script):
+                        return True
+            elif posixpath.basename(cmd) == "pytest":
+                if _pytest_runs(args, full, at):
+                    return True
+            elif names(cmd) or (compiled and "/" in cmd and posixpath.basename(cmd) == stem):
+                return True
+    return False
+
+
+def host_row_problems(manifest, host=HOST_TESTED, root=REPO_ROOT, sources=SOURCES):
+    """HOST_TESTED rows that prove nothing: a glob that selects no
+    behavioral file of its component (the same defect as an empty covers
+    entry), a host test or a workflow that does not exist, a workflow that
+    cannot be read where it should be, one that does not check out the
+    test's repository, or one with no step that runs the test. Whether a
+    workflow runs its test is not checked where it cannot be read (see
+    read_source). Returns [(component, glob, host test, why)]."""
+    out = []
+    for comp, pat, ref, ci in host:
+        files = manifest.files(comp)
+        if files is None or not [p for p, _b in match_files(files, pat) if not non_behavioral(comp, p)]:
+            out.append((comp, pat, ref, "selects nothing"))
+        why = _ref_problem(manifest, ref, "host test", root) or _ref_problem(manifest, ci, "workflow", root)
+        if why:
+            out.append((comp, pat, ref, why))
+            continue
+        text, why = read_source(manifest, ci, root, sources)
+        if why:
+            out.append((comp, pat, ref, "%s %s" % (ci, why)))
+            continue
+        if text is None:
+            continue
+        steps = workflow_steps(text)
+        test_repo, _sep, test_path = ref.partition(":")
+        prefix = checkout_path(steps, repo_name(manifest, test_repo), test_repo == ci.partition(":")[0])
+        if prefix is None:
+            out.append((comp, pat, ref, "%s does not check out %s" % (ci, test_repo)))
+        elif not workflow_runs(steps, posixpath.join(prefix, test_path)):
+            out.append((comp, pat, ref, "%s does not run it" % ci))
+    return out
+
+
+def coverage_report(manifest, tests, allow=NON_BEHAVIORAL, host=HOST_TESTED):
+    """Which manifest paths neither a test nor a host test covers.
 
     tests: iterable with .covers. allow: iterable of (component, glob)
     that need no coverage (docs, CI, licenses...); a BEHAVIORAL path is
-    never allowed away, as it is never taken out of a fingerprint. Returns
+    never allowed away, as it is never taken out of a fingerprint. host:
+    the HOST_TESTED rows, whose paths count as covered. Returns
     {component: [uncovered paths]} for the non-dev-only components.
     """
     covered = {}
     for t in tests:
         for comp, pat in t.covers:
             covered.setdefault(comp, []).append(glob_to_regex(pat))
+    for comp, pat, _ref, _ci in host:
+        covered.setdefault(comp, []).append(glob_to_regex(pat))
     allowed = {}
     for comp, pat in allow:
         allowed.setdefault(comp, []).append(glob_to_regex(pat))

@@ -12,9 +12,10 @@
 #  - shared UI files: theme.css and the vendored Bootstrap the page
 #    carries are byte-identical to forgectrl's at its pinned revision
 #  - coverage lint: every source path of every component pinned by the
-#    recipes must be selected by some catalog test's coverage globs (the
-#    tree manifest is generated from the pins with git - no Yocto build);
-#    enforced: an uncovered path fails the job (https://docs.forgefirm.org/developers/acceptance/).
+#    recipes must be selected by some catalog test's coverage globs or by a
+#    host-tested row naming the host test that proves it (the tree manifest
+#    is generated from the pins with git - no Yocto build); enforced: an
+#    uncovered path fails the job (https://docs.forgefirm.org/developers/testing/).
 
 name: forgetest-ci
 
