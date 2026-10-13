@@ -26,7 +26,8 @@ reported messages:
      soft reset, no alarm; latch relocked, never armed)
   7. outside the arm wait the button is the pause/resume toggle: a press
      while running feed-holds, a press while held resumes; the arming
-     press itself is not a pause press
+     press itself is not a pause press; a travel job (no laser, no arm
+     wait) takes the same toggle, and its resumed move lands on its target
   8. the lid or the interlock loop opening mid-job cancels the job (the
      default lid_policy): reason reported, armed window closed, a soft
      reset with the position kept (no alarm), the head returns to the
@@ -936,7 +937,8 @@ def start_armed_move(s, tag, gcode="G1 X30 F60"):
 def test_button_pause_resume():
     """Rule 7: outside the arm wait the button is the pause/resume toggle -
     a press while running is a feed hold, a press while held is a cycle
-    start; the arming press itself is not a pause press."""
+    start; the arming press itself is not a pause press. A travel job takes
+    the same toggle, and its resumed move lands on its target."""
     s = Session("button-toggle", disarm_s=60, switches=SW_CLOSED)
     try:
         start_armed_move(s, "button-toggle")
@@ -955,6 +957,41 @@ def test_button_pause_resume():
             fail("[button-toggle] no resume message")
         s.sock.sendall(b"\x18")
         print("PASS [button-toggle]: press paused (Hold), press resumed (Run); the arming press did not")
+    finally:
+        s.close()
+
+    # The same toggle on a travel job: no laser, so no arm wait, and the
+    # move resumed from the hold lands where it was programmed to.
+    s = Session("button-toggle-travel", disarm_s=60, switches=SW_CLOSED)
+    try:
+        x0 = s.mpos_x()
+        if x0 is None:
+            fail("[button-toggle-travel] no position in the status report")
+        s.send_raw("M5")
+        s.send_raw("G91")
+        s.send_raw("G1 X40 F300")                       # 8 s
+        if not s.wait_state("Run", 5):
+            fail("[button-toggle-travel] the travel job never reported Run")
+        if s.count(PROMPT):
+            fail("[button-toggle-travel] a job with no laser asked for the arm press")
+        time.sleep(1.0)
+        s.press_button()
+        if not s.wait_state("Hold", 3):
+            fail("[button-toggle-travel] a press while running did not feed-hold (state %s)" % s.state())
+        held = s.mpos_x()
+        if held is None or not x0 < held < x0 + 40.0:
+            fail("[button-toggle-travel] held at X %s, not part-way from %s" % (held, x0))
+        time.sleep(0.5)
+        s.press_button()
+        if not s.wait_state("Run", 3):
+            fail("[button-toggle-travel] a press while held did not resume (state %s)" % s.state())
+        if not s.wait_state("Idle", 15):
+            fail("[button-toggle-travel] the resumed move did not complete (state %s)" % s.state())
+        x1 = s.mpos_x()
+        if x1 is None or abs(x1 - x0 - 40.0) > 0.05:
+            fail("[button-toggle-travel] the resumed move ended at X %s, not %.3f" % (x1, x0 + 40.0))
+        print("PASS [button-toggle-travel]: a travel job held at %.3f mm and resumed to its target, "
+              "%.3f mm" % (held - x0, x1 - x0))
     finally:
         s.close()
 
