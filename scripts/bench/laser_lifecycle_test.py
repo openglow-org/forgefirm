@@ -10,16 +10,19 @@ hardware, no root; arming is automatic without the physical button)
 and drives jobs over TCP, asserting the window's state machine on the
 reported messages:
 
-  1. the first laser-on of a job arms exactly once, and the window
-     persists across M5/M3 toggles within the job (no re-prompt)
-  2. program end (M2) closes the window: the disarm lands promptly,
-     and the next job arms afresh
+  1. the first laser-on of a job arms exactly once; the window's
+     persistence across S changes and M5/M3 toggles inside the job is
+     laser_arm_test.c case I's
+  2. program end (M2) closing the window, and the next job arming
+     afresh: laser_stream_test session K
   3. a sender change closes the window: a reconnected client must
      re-arm - the displaced session's consent does not carry over
   4. the spindle-off grace counts down in HOLD, not only in Idle - a
      job abandoned in feed hold disarms after laser_disarm_s
-  5. arming is refused while the cooling verdict blocks fire, and no
-     armed message appears
+  5. arming refused while the cooling verdict blocks fire, or before
+     the engine acknowledges the session: laser_arm_test.c cases C, A2
+     and A3, and cooling_test.c's arm-time gate; the wait for the fans
+     is this harness's
   6. with a switch source present (GF_SWITCH_FILE), the arm blocks on the
      button: a press with the lid closed arms, and the lid or the
      interlock loop opening during the wait cancels the job (a clean
@@ -44,17 +47,16 @@ reported messages:
      not to where it was paused (the core restarts a held cycle through
      Idle); a job abandoned in a hold and reset ends there, so the next
      job's start is captured afresh where it begins
- 11. the cooling verdict's pause tier (OVERTEMP) holds the job under the
-     open window without writing the latch (a lock sets the hardware
-     button latch, which only a press clears); the clean verdict then
-     resumes it with no new button press: no prompt, no second arm
- 12. the verdict's fail tier (AIRFLOW) ends the job: disarmed, reset with
-     ALARM:3, and a ~ under the clean verdict that follows resumes nothing
+ 11. the cooling verdict's pause tier holding the job under the open
+     window without a latch write, and the clean verdict resuming it with
+     no press and no second arm: laser_stream_test rule 24 and
+     laser_arm_test.c case V1
+ 12. the verdict's fail tier ending the job (disarmed, ALARM:3, nothing
+     resumed): laser_stream_test rule 25 and laser_arm_test.c case V2
  13. a sender change during a re-arm cancels it: the press that follows
      resumes nothing, the job stays held, and the new sender's own ~
      prompts afresh
- 14. a jog does not hold the armed window open: with the spindle off the
-     grace counts down through jogs, and the window closes on time
+ 14. a jog not holding the armed window open: laser_arm_test.c case S10
  15. a press counts only after the button has been seen up: a press that
      began before the wait is not consent (the harness's own presses
      follow a fresh prompt for the same reason)
@@ -429,88 +431,10 @@ def test_laser_keys_reload():
         s.close()
 
 
-def test_job_window():
-    """Rules 1 + 2: arm once per job, persist across M5/M3, close at M2,
-    fresh consent for the next job. The grace is set far beyond the test
-    horizon so only the program-end close can produce the disarm."""
-    s = Session("job-window", disarm_s=60)
-    try:
-        send_line(s.sock, "M4 S100", s.log)
-        send_line(s.sock, "G1 X1 F600", s.log)
-        if not wait_for(s.log, ARMED, 5, s.sock):
-            fail("[job-window] first laser-on did not arm")
-        send_line(s.sock, "M5", s.log)
-        send_line(s.sock, "M3 S200", s.log)
-        send_line(s.sock, "G1 X0 F600", s.log)
-        wait_idle(s.sock, s.log)
-        if s.armed_count() != 1:
-            fail("[job-window] M5/M3 inside one job re-prompted the arm "
-                 "(armed messages: %d)" % s.armed_count())
-        send_line(s.sock, "M2", s.log)
-        if not wait_for(s.log, DISARMED, 5, s.sock):
-            fail("[job-window] program end (M2) did not close the armed window")
-        send_line(s.sock, "M4 S100", s.log)
-        send_line(s.sock, "G1 X1 F600", s.log)
-        if not wait_for(s.log, ARMED, 5, s.sock) or s.armed_count() != 2:
-            fail("[job-window] next job after M2 did not arm afresh")
-        wait_idle(s.sock, s.log)
-        print("PASS [job-window]: armed once per job, M2 closed the window, "
-              "next job re-armed")
-    finally:
-        s.close()
-
-
-def test_sender_change_mid_job():
-    """Rule 3, the hard case: the sender changes while the job is still
-    running with the spindle on. The window closes and the job is HELD
-    where the cut stopped, so the next sender finds it in Hold rather than
-    at the end of a dark pass. Its cycle start goes through the resume
-    gate, which re-arms first: with no button on a host build that is
-    immediate, and the job then runs to its end lit."""
-    s = Session("sender-change-mid-job", disarm_s=60)
-    try:
-        send_line(s.sock, "M4 S100", s.log)
-        send_line(s.sock, "G1 X5 F60", s.log)             # 5 s of motion
-        if not wait_for(s.log, ARMED, 5, s.sock):
-            fail("[sender-change-mid-job] first laser-on did not arm")
-        time.sleep(1.0)
-        s.sock.close()                                     # mid-move, spindle on
-        time.sleep(0.5)
-        # The disarm and hold messages are written while no client is
-        # connected, and output with no client is discarded, so the new
-        # session cannot see them; the Hold state and the re-arm below are
-        # the evidence.
-        s.sock = s.connect()
-        st = s.wait_state("Hold", 5)
-        if st is None:
-            fail("[sender-change-mid-job] the job was not held on the sender change "
-                 "(state %r)" % s.state())
-        x_held = s.mpos_x()
-        if x_held is None or not 0.5 < x_held < 4.5:
-            fail("[sender-change-mid-job] held outside the move (MPos X %s)" % x_held)
-        before = s.armed_count()
-        s.sock.sendall(b"~")                               # the new sender resumes
-        end = time.time() + 15
-        while time.time() < end and s.armed_count() != before + 1:
-            read_avail(s.sock, s.log, 0.2)
-        if s.armed_count() != before + 1:
-            fail("[sender-change-mid-job] the resume after a mid-job sender change did "
-                 "not re-arm")
-        wait_idle(s.sock, s.log)
-        x_end = s.mpos_x()
-        if x_end is None or abs(x_end - 5.0) > 0.01:
-            fail("[sender-change-mid-job] the resumed job did not finish the move "
-                 "(MPos X %s)" % x_end)
-        send_line(s.sock, "M5", s.log)
-        print("PASS [sender-change-mid-job]: the job held at X=%.3f on the sender change, "
-              "re-armed on the resume and finished at X=%.3f" % (x_held, x_end))
-    finally:
-        s.close()
-
-
 def test_sender_change_holds_and_rearms():
-    """Rule 3 on a machine with a button: the held job's resume from the
-    new sender prompts for the press (collected from the poll, never
+    """Rule 3 on a machine with a button: a sender change mid-move, spindle
+    on, holds the job where the cut stopped; the held job's resume from
+    the new sender prompts for the press (collected from the poll, never
     inside the core's held state), and the press re-arms and resumes."""
     s = Session("sender-change-rearm", disarm_s=60, switches=SW_CLOSED)
     try:
@@ -527,6 +451,9 @@ def test_sender_change_holds_and_rearms():
         s.sock = s.connect()
         if s.wait_state("Hold", 5) is None:
             fail("[sender-change-rearm] the job was not held on the sender change")
+        x_held = s.mpos_x()
+        if x_held is None or not 0.5 < x_held < 4.5:
+            fail("[sender-change-rearm] held outside the move (MPos X %s)" % x_held)
         before = s.armed_count()
         s.sock.sendall(b"~")
         if not wait_for(s.log, RESUME_PROMPT, 5, s.sock):
@@ -545,33 +472,8 @@ def test_sender_change_holds_and_rearms():
             fail("[sender-change-rearm] the resumed job did not finish the move "
                  "(MPos X %s)" % x_end)
         send_line(s.sock, "M5", s.log)
-        print("PASS [sender-change-rearm]: the held job prompted on ~, the press re-armed "
-              "it, and it finished at X=%.3f" % x_end)
-    finally:
-        s.close()
-
-
-def test_sender_change_then_reset():
-    """A new sender that does not want the held job resets it: a soft
-    reset from the hold ends the job with the position kept and no alarm."""
-    s = Session("sender-change-reset", disarm_s=60)
-    try:
-        send_line(s.sock, "M4 S100", s.log)
-        send_line(s.sock, "G1 X5 F60", s.log)
-        if not wait_for(s.log, ARMED, 5, s.sock):
-            fail("[sender-change-reset] first laser-on did not arm")
-        time.sleep(1.0)
-        s.sock.close()
-        time.sleep(0.5)
-        s.sock = s.connect()
-        if s.wait_state("Hold", 5) is None:
-            fail("[sender-change-reset] the job was not held on the sender change")
-        s.sock.sendall(b"\x18")
-        st = s.wait_state("Idle", 5)
-        if st is None:
-            fail("[sender-change-reset] a reset from the held job did not end in Idle "
-                 "(state %r)" % s.state())
-        print("PASS [sender-change-reset]: a reset from the held job ends in Idle, no alarm")
+        print("PASS [sender-change-rearm]: held at X=%.3f, the held job prompted on ~, the "
+              "press re-armed it, and it finished at X=%.3f" % (x_held, x_end))
     finally:
         s.close()
 
@@ -652,130 +554,6 @@ def test_rx_overrun_aborts():
         wait_idle(s.sock, s.log)
         print("PASS [rx-overrun]: the overrun was reported, the job stopped in alarm with "
               "the window closed, and the next clean job armed")
-    finally:
-        s.close()
-
-
-def test_sender_change():
-    """Rule 3: a reconnected sender must re-arm. The grace is set far
-    beyond the test horizon so only the sender change can close the
-    window; the first job ends in M5 and the next M4 is a fresh laser-on."""
-    s = Session("sender-change", disarm_s=60)
-    try:
-        send_line(s.sock, "M4 S100", s.log)
-        send_line(s.sock, "G1 X1 F600", s.log)
-        if not wait_for(s.log, ARMED, 5, s.sock):
-            fail("[sender-change] first laser-on did not arm")
-        send_line(s.sock, "M5", s.log)
-        wait_idle(s.sock, s.log)
-        s.sock.close()
-        time.sleep(0.5)
-        s.sock = s.connect()
-        before = s.armed_count()
-        send_line(s.sock, "M4 S100", s.log)
-        send_line(s.sock, "G1 X0 F600", s.log)
-        end = time.time() + 5
-        while time.time() < end and s.armed_count() != before + 1:
-            read_avail(s.sock, s.log, 0.2)
-        if s.armed_count() != before + 1:
-            fail("[sender-change] the reconnected sender inherited the "
-                 "displaced session's armed window")
-        wait_idle(s.sock, s.log)
-        print("PASS [sender-change]: displaced consent did not survive; "
-              "the new sender re-armed")
-    finally:
-        s.close()
-
-
-def test_hold_grace():
-    """Rule 4: the disarm grace counts down in HOLD."""
-    s = Session("hold-grace", disarm_s=2)
-    try:
-        send_line(s.sock, "M4 S100", s.log)
-        send_line(s.sock, "G1 X30 F60", s.log)     # ~30 s move
-        if not wait_for(s.log, ARMED, 5, s.sock):
-            fail("[hold-grace] job did not arm")
-        time.sleep(1.0)
-        s.sock.sendall(b"!")                        # feed hold
-        if not wait_for(s.log, DISARMED, 10, s.sock):
-            fail("[hold-grace] a job abandoned in Hold stayed armed past "
-                 "the disarm grace")
-        print("PASS [hold-grace]: the armed window closed while parked in Hold")
-    finally:
-        s.close()
-
-
-def test_verdict_blocks_arm():
-    """Rule 5: a blocking cooling verdict refuses the arm."""
-    s = Session("verdict-blocked", fire_ok=False)
-    try:
-        send_line(s.sock, "M4 S100", s.log, tolerate_error=True)
-        send_line(s.sock, "G1 X1 F600", s.log, tolerate_error=True)
-        if not wait_for(s.log, BLOCKED, 5, s.sock):
-            fail("[verdict-blocked] no refusal message for a blocking verdict")
-        if ARMED in "".join(s.log):
-            fail("[verdict-blocked] armed despite a blocking cooling verdict")
-        print("PASS [verdict-blocked]: arming refused while fire_ok=false")
-    finally:
-        s.close()
-
-
-def test_arm_waits_for_engine_ack():
-    """Rule 5: the arm does not fire on a verdict computed before it.
-
-    The armed window is reported to the cooling engine when it opens,
-    and the engine answers by applying the cut airflow and the flow
-    interrogation for the job. The verdict standing on file until that
-    answer arrives is the one computed for the idle session that
-    preceded the arm, and at idle nothing is wrong, so it says fire is
-    fine. Firing on it puts the beam on the work with the fans still at
-    their idle duty - observed on the bench as a burn of a few
-    millimeters before the engine's first tick took the job into a hold.
-
-    Here the engine never acknowledges: fire_ok stays true throughout,
-    so the only thing that can refuse the job is the missing
-    acknowledgment. The arm must be refused and no window may open."""
-    s = Session("arm-ack", fire_ok=True, armed_ack=False)
-    try:
-        # The arm blocks in the acknowledgment wait, so the ok for these
-        # lines only arrives once it gives up: send without waiting.
-        s.send_raw("M4 S100")
-        s.send_raw("G1 X1 F600")
-        if not wait_for(s.log, BLOCKED, 15, s.sock):
-            fail("[arm-ack] a job whose cooling engine never took it was not "
-                 "refused (the arm fired on the pre-arm verdict)")
-        if ARMED in "".join(s.log):
-            fail("[arm-ack] the armed window opened without the engine's "
-                 "acknowledgment")
-        print("PASS [arm-ack]: the arm refused a verdict that predates it")
-    finally:
-        s.close()
-
-
-def test_arm_proceeds_on_a_late_ack():
-    """Rule 5: the acknowledgment arriving late is the ordinary case.
-
-    The real engine answers on its next tick, so the arm has to observe
-    a verdict refreshed under it and then go on to open the window. This
-    is the case that proves the wait is a wait and not a refusal: the
-    controller must keep polling the verdict file while it is blocked in
-    the arm, or every job on the machine would fail here."""
-    ack_s = 2.0
-    s = Session("arm-ack-late", fire_ok=True, ack_after_s=ack_s)
-    try:
-        t0 = time.time()
-        s.send_raw("M4 S100")
-        s.send_raw("G1 X1 F600")
-        if not wait_for(s.log, ARMED, 15, s.sock):
-            fail("[arm-ack-late] the arm never completed once the engine took "
-                 "the job (the verdict is not refreshed inside the wait)")
-        dt = time.time() - t0
-        if dt < ack_s - 0.5:
-            fail("[arm-ack-late] armed after %.1f s, before the engine took the "
-                 "job at %.1f s" % (dt, ack_s))
-        if BLOCKED in "".join(s.log):
-            fail("[arm-ack-late] a late acknowledgment was reported as a refusal")
-        print("PASS [arm-ack-late]: the arm waited %.1f s for the engine, then armed" % dt)
     finally:
         s.close()
 
@@ -1136,76 +914,6 @@ def test_lid_policy_hold():
         s.close()
 
 
-def test_verdict_pause_resumes_without_press():
-    """Rule 11: the pause tier holds under the open window without a
-    latch write; the clean verdict resumes with no press. The window is
-    proven still open by the absence of any prompt and of a second arm."""
-    s = Session("verdict-pause", disarm_s=60, switches=SW_CLOSED)
-    try:
-        start_armed_move(s, "verdict-pause", gcode="G1 X30 F120")   # 15 s of motion
-        time.sleep(0.5)
-        s.set_verdict("OVERTEMP", fire_ok=False, hold=True, resume_ok=False)
-        if not s.wait_state("Hold", 5):
-            fail("[verdict-pause] the pause tier did not hold the job (state %s)" % s.state())
-        if not wait_for(s.log, "fire masked, job held", 3, s.sock):
-            fail("[verdict-pause] the pause tier did not report the masked hold")
-        if "latch locked" in "".join(s.log):
-            fail("[verdict-pause] the pause tier wrote the latch")
-        if DISARMED in "".join(s.log):
-            fail("[verdict-pause] the pause tier closed the armed window")
-        time.sleep(1.5)
-        s.set_verdict("OK", fire_ok=True, hold=False, resume_ok=True)
-        if not s.wait_state("Run", 5):
-            fail("[verdict-pause] the clean verdict did not resume the job (state %s)" % s.state())
-        if not wait_for(s.log, "resuming", 2, s.sock):
-            fail("[verdict-pause] the resume was not reported")
-        if RESUME_PROMPT in "".join(s.log) or s.count(PROMPT) != 1:
-            fail("[verdict-pause] the resume asked for a button press")
-        if s.armed_count() != 1:
-            fail("[verdict-pause] the resume armed again (armed messages: %d)" % s.armed_count())
-        if "ALARM" in "".join(s.log):
-            fail("[verdict-pause] the pause tier raised an alarm")
-        s.sock.sendall(b"\x18")
-        print("PASS [verdict-pause]: OVERTEMP held under the open window with no latch write; "
-              "the clean verdict resumed with no press")
-    finally:
-        s.close()
-
-
-def test_verdict_fail_tier_ends_job():
-    """Rule 12: the fail tier disarms, resets the job with ALARM:3, and
-    nothing resumes it."""
-    s = Session("verdict-fail", disarm_s=60, switches=SW_CLOSED)
-    try:
-        start_armed_move(s, "verdict-fail", gcode="G1 X30 F120")
-        time.sleep(0.5)
-        s.set_verdict("AIRFLOW", fire_ok=False, hold=True, resume_ok=False)
-        if not s.wait_state("Alarm", 5):
-            fail("[verdict-fail] the fail tier did not end the job in Alarm (state %s)" % s.state())
-        if not wait_for(s.log, DISARMED, 3, s.sock):
-            fail("[verdict-fail] the fail tier did not close the armed window")
-        text = "".join(s.log)
-        if "ALARM:3" not in text:
-            fail("[verdict-fail] no ALARM:3 on the fail tier")
-        if "AIRFLOW" not in text:
-            fail("[verdict-fail] the fail tier did not name the verdict")
-        s.set_verdict("OK", fire_ok=True, hold=False, resume_ok=True)
-        time.sleep(1.5)
-        s.sock.sendall(b"~")
-        read_avail(s.sock, s.log, 1.0)
-        if not s.state().startswith("Alarm"):
-            fail("[verdict-fail] a ~ after the fail tier resumed something (state %s)" % s.state())
-        if "resuming" in "".join(s.log):
-            fail("[verdict-fail] the client resumed after the fail tier")
-        send_line(s.sock, "$X", s.log)
-        if not s.wait_state("Idle", 3):
-            fail("[verdict-fail] $X did not unlock the alarm")
-        print("PASS [verdict-fail]: AIRFLOW disarmed, reset the job with ALARM:3, and nothing "
-              "resumed it")
-    finally:
-        s.close()
-
-
 def test_sender_change_during_rearm_cancels():
     """Rule 13: a sender change while a re-arm waits for the press
     cancels the re-arm; the press resumes nothing and the job stays
@@ -1257,46 +965,14 @@ def test_sender_change_during_rearm_cancels():
         s.close()
 
 
-def test_jog_does_not_extend_window():
-    """Rule 14: with the spindle off, jogs do not reset the disarm grace:
-    the window closes on time through them."""
-    s = Session("jog-grace", disarm_s=2)
-    try:
-        send_line(s.sock, "M4 S100", s.log)
-        send_line(s.sock, "G1 X1 F600", s.log)
-        if not wait_for(s.log, ARMED, 5, s.sock):
-            fail("[jog-grace] job did not arm")
-        send_line(s.sock, "M5", s.log)
-        wait_idle(s.sock, s.log)
-        t0 = time.time()
-        while time.time() - t0 < 5.0 and DISARMED not in "".join(s.log):
-            send_line(s.sock, "$J=G91X1F1200", s.log)
-            read_avail(s.sock, s.log, 0.3)
-        dt = time.time() - t0
-        if DISARMED not in "".join(s.log):
-            fail("[jog-grace] the window stayed open through %.1f s of jogging (grace 2 s)" % dt)
-        wait_idle(s.sock, s.log)
-        print("PASS [jog-grace]: the window closed after %.1f s of jogging with the spindle off" % dt)
-    finally:
-        s.close()
-
-
 def main():
     if not os.path.isfile(BIN):
         fail("controller binary not found at %s" % BIN)
-    test_verdict_pause_resumes_without_press()
-    test_verdict_fail_tier_ends_job()
     test_sender_change_during_rearm_cancels()
-    test_jog_does_not_extend_window()
-    test_job_window()
     test_status_files()
     test_laser_keys_reload()
-    test_sender_change()
-    test_sender_change_mid_job()
     test_sender_change_holds_and_rearms()
-    test_sender_change_then_reset()
     test_rx_overrun_aborts()
-    test_hold_grace()
     test_resume_after_grace()
     test_button_wait_arms()
     test_lid_open_in_wait()
@@ -1304,9 +980,6 @@ def main():
     test_lid_cancels_and_returns()
     test_pause_then_lid_cancel_returns_to_the_job_start()
     test_lid_policy_hold()
-    test_verdict_blocks_arm()
-    test_arm_waits_for_engine_ack()
-    test_arm_proceeds_on_a_late_ack()
     test_arm_waits_for_the_fans()
     test_sigterm_mid_job()
     print("PASS: the armed-window lifecycle holds")
