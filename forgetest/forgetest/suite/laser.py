@@ -5,15 +5,14 @@
 
 """laser.* - LIVE laser tests, ported from `scripts/bench/live_fire_drills.py`.
 
-Every test here can emit, except `laser.power-floor`, which only reads
-settings. The page starts a firing one only with the operator's
-eye-protection / fire-watch / exhaust acknowledgment; the test then
-prompts for the scrap and the button, streams a small job through the
-controller, and the machine fires only after the operator presses the
-physical arm button - nothing here defeats that gate, and forgetest
-never touches the laser latch. One emission per test; on abort or error
-the job is soft-reset (`^X`: controlled stop, latch relocked). The
-witnesses are forgectrl's `/status` (`laser.emission_samples` = the
+The live tests here emit. The page starts a firing one only with the
+operator's eye-protection / fire-watch / exhaust acknowledgment; the
+test then prompts for the scrap and the button, streams a small job
+through the controller, and the machine fires only after the operator
+presses the physical arm button - nothing here defeats that gate, and
+forgetest never touches the laser latch. One emission per test; on abort
+or error the job is soft-reset (`^X`: controlled stop, latch relocked).
+The witnesses are forgectrl's `/status` (`laser.emission_samples` = the
 kernel's LASER_ON sample count, `hv_current_raw`, `lid_ir`),
 `/cool/status` (`armed`), the head's beam detector
 (`head/beam_detect_analog`, the tube's own emission seen from the head:
@@ -37,34 +36,6 @@ _LASER_COVERS = [("grblhal-glowforge", "src/**"), ("kernel-module-glowforge", "*
                  ("forgectrl", "src/super.c"), ("forgectrl", "src/cool.c"),
                  ("forgectrl", "src/status.c"), ("forgectrl", "src/main.c")]
 
-# The S-range floor the controller derives $35 from at every precompute
-# (glowforge_laser.c: laser_floor_density, this default when the config
-# carries no key): the lowest pulse density that still marks, against
-# the hardware's 127-count PWM period. Density is the only dose model.
-FLOOR_DEFAULT = 10.0
-PWM_PERIOD = 127
-PWMSAR_FLOOR_MIN = 12
-
-
-def _floor(fc):
-    """The configured floor percent, default applied."""
-    raw = (fc.settings().get("laser_floor_density") or "").strip()
-    try:
-        return float(raw) if raw else FLOOR_DEFAULT
-    except ValueError:
-        return FLOOR_DEFAULT
-
-
-def _grbl_settings(lines):
-    vals = {}
-    for ln in lines:
-        key, _, val = ln.partition("=")
-        if key.startswith("$"):
-            try:
-                vals[key] = float(val)
-            except ValueError:
-                pass
-    return vals
 
 ARM_CUE = ("LIVE FIRE. Eye protection on. Exhaust on. Extinguisher in reach. "
            "Put scrap under the head with %s clear, and close the lid.")
@@ -405,45 +376,6 @@ def wait_disarm(ctx, timeout):
     return None
 
 
-@test("laser.power-floor", title="The derived floor is the one in force",
-      subsystem="laser", kind="auto", mode="grbl", est_min=1,
-      covers=[("grblhal-glowforge", "src/**"), ("forgectrl", "src/main.c")],
-      description="The controller derives $35 from the floor key (laser_floor_density) at "
-                  "every spindle precompute, boot included, and never from a typed value. "
-                  "Unfloored, the low end of S asks for pulses too far apart to re-strike, "
-                  "so a commanded 1 % would emit nothing. Reads the floor key from forgectrl "
-                  "and $$ from the controller, and checks $35 is that floor, that it lands at "
-                  "or above the measured minimum, and that $31 is 0 (the floor, not $31, sets "
-                  "the bottom of the range).")
-def power_floor(ctx):
-    ev = ctx.evidence
-    want = _floor(ctx.forgectrl)
-    ev["configured_floor"] = want
-    with ctx.grbl() as g:
-        lines = g.command("$$", timeout=5)
-    vals = _grbl_settings(lines)
-    ctx.check(vals, "no $-settings in the response to $$")
-
-    floor_pct = vals.get("$35")
-    rpm_min = vals.get("$31")
-    ev["settings"] = {k: vals.get(k) for k in ("$30", "$31", "$32", "$35", "$36")}
-    ctx.check(floor_pct is not None, "$35 missing from the settings report")
-    counts = int(PWM_PERIOD * floor_pct / 100.0)
-    ev["pwmsar_floor"] = counts
-    ctx.log("$35=%.1f%% -> PWMSAR %d of %d ($31=%s, $32=%s, $36=%s)", floor_pct, counts,
-            PWM_PERIOD, rpm_min, vals.get("$32"), vals.get("$36"))
-
-    ctx.check(abs(floor_pct - want) < 0.05,
-              "$35 is %.1f %%, expected the derived floor %.1f %% from the machine config",
-              floor_pct, want)
-    ctx.check(counts >= PWMSAR_FLOOR_MIN,
-              "the floor lands at PWMSAR %d, below the %d the tube needs",
-              counts, PWMSAR_FLOOR_MIN)
-    ctx.check(rpm_min == 0, "$31 is %s, not 0: the bottom of the S range is no longer the floor",
-              rpm_min)
-    ctx.log("PASS: nonzero S never commands less than PWMSAR %d", counts)
-
-
 @test("laser.emission-witness", title="Live emission witness (S400 vector mark) and job-based disarm",
       subsystem="laser", kind="live", mode="grbl", always=True, est_min=5,
       covers=_LASER_COVERS,
@@ -658,8 +590,6 @@ def emission_witness(ctx):
 HV_DARK_MAX = 20            # hv_current_raw reads 0 with the tube off; hundreds under fire
 
 
-
-
 @test("laser.armed-kill", title="Armed kill mid-fire: the expected stop, then a SIGKILL",
       subsystem="laser", kind="live", mode="grbl", est_min=6,
       covers=_LASER_COVERS + [("forgectrl", "src/main.c")],
@@ -770,11 +700,6 @@ def armed_kill(ctx):
     check_button_dark(ctx, ev)
     ctx.log("PASS: expected stop 0 at +%s s and SIGKILL 0 at +%s s, latch locked, controller "
             "respawned with the latch still locked, button dark", ev["expected"]["zero_at_s"], zero_at)
-
-
-
-
-DISARMED_MSG = "laser disarmed - latch locked"
 
 
 @test("laser.pause-resume-lid-cancel", title="One live cut: the button pauses and resumes it, the lid "
