@@ -222,7 +222,7 @@ JOB_Z = [
 # the moves are counted from: Z3 is 9 half-steps on the screw, Z4 is 12.
 LENS_CONF = "lens_hall_edge_z_mm = 3\n"
 
-# Session B: M3 constant power to the end of the stream. The core never
+# M3 constant power to the end of the stream (session F). The core never
 # issues a laser-off update for M3, so the stream engine itself must
 # terminate the cycle dark (rule 7).
 JOB_M3_TERM = [
@@ -1016,15 +1016,6 @@ def main():
           % (len(data), sum(1 for b in data if b & 0x80), len(fire_ticks),
              powers, x_max, tail_steps, gap_a))
 
-    # --- session B: M3 constant power to stream end, rule 7 -------------
-    data = run_session("m3-term", JOB_M3_TERM, conf=ANALOG_CONF)
-    if not count_fire(data):
-        fail("[m3-term] no FIRE bits in the stream")
-    check_termination("m3-term", data)
-    gap_b = check_fire_gaps("m3-term", data)
-    print("PASS [m3-term]: %d bytes, %d fire ticks end dark, max fire gap %d"
-          % (len(data), count_fire(data), gap_b))
-
     # --- session C: cycle churn, rules 8-9 ------------------------------
     data = run_session("churn", JOB_CHURN, conf=ANALOG_CONF)
     if not count_fire(data):
@@ -1086,8 +1077,9 @@ def main():
     if got != 1.0:
         fail("[density-full] S1000 rendered density %.4f, expected 1.0" % got)
     check_termination("density-full", full)
-    print("PASS [density-full]: S1000 -> density 1.0000 over %d ticks, ends dark"
-          % (b - a))
+    gap_f = check_fire_gaps("density-full", full)
+    print("PASS [density-full]: S1000 -> density 1.0000 over %d ticks, ends dark, max fire gap %d"
+          % (b - a, gap_f))
 
     # --- session G: churn under the model (rules 7-9 still hold) --------
     ch = run_session("density-churn", JOB_CHURN, conf=DENSITY_CONF)
