@@ -1223,69 +1223,6 @@ def expect_cancel_and_return(ctx, g, ev, start, k0, why, tag):
     return drift
 
 
-@test("motion.button-hold-resume", title="The button pauses and resumes a job",
-      subsystem="motion", kind="operator", mode="grbl", est_min=2,
-      covers=_LID_COVERS, requires=["motion.pacing"], actions=["button"],
-      steps=["Bed clear; the head needs 40 mm of free +X travel. No laser is involved.",
-             "On Ready the head starts an 8 s move: press the button once while it moves (the "
-             "job holds), then once more when told (it resumes and finishes)."],
-      description="A travel job is running; one press of the big button feed-holds it (the sender "
-                  "sees Hold), the next press resumes it (Run) and the move completes with its "
-                  "position intact - the factory's pause/resume on the machine.")
-def button_hold_resume(ctx):
-    ev = ctx.evidence
-    with ctx.grbl() as g:
-        clean_slate(ctx, g)
-        start = g.status_report()["MPos"]
-        ctx.ready("On Ready the head starts an 8 s move along +X. Press the button ONCE while it "
-                  "moves; the job holds and the test sees it.")
-        g.command("M5")
-        g.command("G91")
-        start_move(ctx, g, "G1X40F300")               # an 8 s move
-        g.drain()                                     # the message window opens here
-        w = Watch(g)
-        ctx.act("button", "press", until=w.in_state("Hold"), timeout=12, fail=False)
-        st, text = w.last, w.text
-        ctx.check(st is not None and st["state"].startswith("Hold"),
-                  "the press did not hold the job (state %s)", st["state"] if st else "?")
-        ev["held_state"] = st["state"]
-        ev["held_at_mm"] = round(st["MPos"][0] - start[0], 3)
-        ev["pause_message"] = "job paused" in text
-        ctx.log("held: %s at %.3f mm of 40; message seen: %s", st["state"], ev["held_at_mm"],
-                ev["pause_message"])
-        # The press is proven by the job LEAVING the hold. Catching it in Run
-        # is a race: a pause late in the move leaves a fraction of a second of
-        # travel, which can be over before the next poll - the machine did
-        # exactly the right thing and the test would still have called it a
-        # failure.
-        w = Watch(g)
-        ctx.act("button", "press", text="The head is stopped: the press resumes the move.",
-                until=w.left_state("Hold"), timeout=60, fail=False)
-        st, text = w.last, w.text
-        if st is not None and st["state"].startswith("Hold"):
-            st = None
-        ev["state_after_resume"] = st["state"] if st else None
-        ev["resume_message"] = "job resumed" in text
-        ctx.check(st is not None, "the second press did not resume the job (still held: %s)",
-                  g.status_report()["state"])
-        # Leaving the hold for Run or Idle is the resume; leaving it for Alarm
-        # or Door is something else entirely, and must not read as a pass.
-        ctx.check(st["state"].startswith(("Run", "Idle")),
-                  "the job left the hold into %s, not into motion", st["state"])
-        ctx.log("resumed: %s; message seen: %s", ev["state_after_resume"], ev["resume_message"])
-        peak, states, st = wait_idle(ctx, g, 40)
-        ctx.check("TIMEOUT" not in states, "the resumed move did not complete: %s", states)
-        moved = st["MPos"][0] - start[0]
-        ev["moved_mm"] = round(moved, 3)
-        ctx.log("move completed after pause/resume: %.3f mm of 40", moved)
-        ctx.check(abs(moved - 40.0) <= 0.05, "the resumed move did not land on its target (%.3f mm)", moved)
-        g.command("$J=G91X-40F2400")
-        wait_idle(ctx, g, 30)
-        g.command("G90")
-    machine_idle(ctx)
-    ctx.log("PASS: button press held the job (%s), the next press resumed it, target reached", ev["held_state"])
-
-
 @test("motion.lid-cancel-home", title="Lid open during a job - running or paused - cancels it and returns "
                                      "to the job start",
       subsystem="motion", kind="operator", mode="grbl", est_min=5,

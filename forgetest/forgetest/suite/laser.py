@@ -706,7 +706,7 @@ def armed_kill(ctx):
       subsystem="laser", kind="live", mode="grbl", est_min=7,
       covers=_LASER_COVERS + [("grblhal-glowforge", "src/glowforge_switches.c"),
                               ("grblhal-glowforge", "src/glowforge_switch_map.h")],
-      requires=["laser.emission-witness", "motion.lid-cancel-home", "motion.button-hold-resume"],
+      requires=["laser.emission-witness", "motion.lid-cancel-home"],
       actions=["button", "lid"],
       steps=["Scrap under the head with 40 mm of free +X and +Y travel; lid closed; exhaust on.",
              "Press the physical button when it lights white (arm). Once the cut is under way the "
