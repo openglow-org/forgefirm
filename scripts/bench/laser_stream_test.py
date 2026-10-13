@@ -71,7 +71,10 @@ over TCP, then checks the dumps against the kernel feeder contract:
  18. the floor is derived, never typed: $35 is loaded from the floor
      key at every precompute, so a $35 typed by the sender is
      overwritten - the ladder renders through the key's floor, and the
-     arm report names the model, the floor and the curve in force
+     arm report names the model, the floor and the curve in force;
+     read with $$ on the fresh controller and again after the arm, $31
+     is 0 (the floor, not $31, sets the bottom of the S range) and $35
+     is the board's floor, landing at PWMSAR_FLOOR_MIN or above
  19. the dose curve bends S onto the density that delivers the
      commanded light fraction: with the bench-default curve in force a
      ladder of S rungs renders the curve's densities (half light lands
@@ -169,6 +172,9 @@ PWM_PERIOD = 127
 PWM_MIN_PCT = 10.0
 PWM_MIN = int(PWM_PERIOD * PWM_MIN_PCT / 100.0)
 RPM_MAX = 1000.0
+# The floor lands at this PWMSAR count or above: the level the tube needs
+# for a nonzero S to emit at all (rule 18 reads it off the controller).
+PWMSAR_FLOOR_MIN = 12
 
 
 def duty_for(s):
@@ -1163,16 +1169,35 @@ def main():
     # The same ladder with a $35=0 typed ahead of it, under the shipped
     # density default (no floor key): the arm loads the board's floor and
     # every rung renders through it.
-    floored = run_session("floor-derived", JOB_DENSITY, conf=DENSITY_CONF_FLOORED)
+    floored = run_session("floor-derived", ["$$"] + JOB_DENSITY + [WAIT_IDLE, "$$"],
+                          conf=DENSITY_CONF_FLOORED)
+    text = run_session.text
     expect_levels = tuple(duty_for(x) for x in LADDER_S)
     check_density("floor-derived", floored, expect_levels, DENSITY_PERIOD_TICKS,
                   DENSITY_MIN_MACHINE_TICKS)
-    if "laser armed (density, floor %g %%, curve off)" % PWM_MIN_PCT not in run_session.text:
+    if "laser armed (density, floor %g %%, curve off)" % PWM_MIN_PCT not in text:
         fail("[floor-derived] the arm report does not name the derived floor "
-             "(text: %r)" % run_session.text[-400:])
+             "(text: %r)" % text[-400:])
+    # The two $$ reads: the fresh controller's, and the one after the arm
+    # overwrote the typed $35. The typed line itself is not echoed.
+    reads = {k: [float(v) for v in re.findall(r"^\$%s=([-\d.]+)" % k, text, re.M)]
+             for k in ("31", "35")}
+    if len(reads["31"]) != 2 or len(reads["35"]) != 2:
+        fail("[floor-derived] expected two $$ reads of $31 and $35, got %s" % reads)
+    if reads["31"] != [0.0, 0.0]:
+        fail("[floor-derived] $31 reads %s, not 0: the bottom of the S range is no longer "
+             "the floor" % reads["31"])
+    if reads["35"] != [PWM_MIN_PCT, PWM_MIN_PCT]:
+        fail("[floor-derived] $35 reads %s (fresh, after the arm), expected the board's floor "
+             "%g both times" % (reads["35"], PWM_MIN_PCT))
+    counts = int(PWM_PERIOD * reads["35"][0] / 100.0)
+    if counts < PWMSAR_FLOOR_MIN:
+        fail("[floor-derived] the floor lands at PWMSAR %d, below the %d the tube needs"
+             % (counts, PWMSAR_FLOOR_MIN))
     print("PASS [floor-derived]: a typed $35=0 is overwritten at the arm; the "
-          "ladder renders through the %g %% floor key, levels %s"
-          % (PWM_MIN_PCT, list(expect_levels)))
+          "ladder renders through the %g %% floor key, levels %s; $31=0 and $35=%g "
+          "(PWMSAR %d) fresh and after the arm"
+          % (PWM_MIN_PCT, list(expect_levels), PWM_MIN_PCT, counts))
 
     # --- rule 20: the corner rolloff starves the accel head -------------
     # One long M4 line from rest under the curve, at gamma 1 and the
