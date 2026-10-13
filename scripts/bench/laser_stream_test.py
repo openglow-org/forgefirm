@@ -1319,6 +1319,9 @@ def main():
         fail("[verdict-rehold] the client did not resume its own hold once the verdict cleared")
     if "fire masked, job held" not in text:
         fail("[verdict-rehold] the pause tier did not report the masked hold")
+    if text.count("laser armed") != 1:
+        fail("[verdict-rehold] armed %d times: the pause tier closed the window and the "
+             "resume re-armed it (it must hold under the open window)" % text.count("laser armed"))
     if "latch locked" in text.split("Pgm End")[0]:
         fail("[verdict-rehold] the pause tier locked the latch")
     if "ALARM" in text:
