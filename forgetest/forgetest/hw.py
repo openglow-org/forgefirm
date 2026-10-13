@@ -14,9 +14,12 @@ exercised against a mock on a host:
   GRBL_HOST / GRBL_PORT  default 127.0.0.1 / 23
   FORGETEST_INITD        default /etc/init.d
 """
+import glob
 import json
 import os
+import select
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -308,6 +311,89 @@ def button_lit():
     if not vals:
         return None
     return any(v > 0 for v in vals)
+
+
+# ----------------------------------------------------------- the button
+
+EV_SW = 0x05
+SW_BUTTON = 2               # the button's EV_SW code (bit 2 of the switch word)
+
+
+def switches_device():
+    """The machine's switches as forgectrl and the controller find them:
+    GF_SWITCH_DEV, else the input device the device tree names
+    "switches". None when there is none."""
+    dev = os.environ.get("GF_SWITCH_DEV")
+    if dev:
+        return dev
+    for d in sorted(glob.glob("/sys/class/input/event*")):
+        try:
+            with open(os.path.join(d, "device", "name")) as f:
+                if f.read().strip() == "switches":
+                    return "/dev/input/" + os.path.basename(d)
+        except OSError:
+            continue
+    return None
+
+
+class ButtonEdges:
+    """The button as edges, from the switches' input events. A press is an
+    event however short it is, so nothing has to be held long enough for a
+    poll to land on it: an operator's press is never longer than a quarter
+    second. Open it before the press is asked for. It reads without a
+    grab, so forgectrl and the controller see the switches as always."""
+
+    EVENT = struct.Struct("llHHi")      # struct input_event: time, type, code, value
+
+    def __init__(self):
+        self.fd = None
+        self.pending = b""          # events read and not yet looked at
+        dev = switches_device()
+        if dev:
+            try:
+                self.fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+            except OSError:
+                self.fd = None
+
+    @property
+    def available(self):
+        return self.fd is not None
+
+    def wait(self, value, timeout, checkpoint=None):
+        """The seconds until the button's next edge to `value` (1 pressed,
+        0 released), or None at the timeout. checkpoint() is called about
+        every 0.1 s (an abort raises out of it)."""
+        size = self.EVENT.size
+        t0 = time.time()
+        while True:
+            # The events already read come first: a short press arrives
+            # with its release in one read, and the release is the next
+            # wait's.
+            while len(self.pending) >= size:
+                _sec, _usec, typ, code, val = self.EVENT.unpack_from(self.pending, 0)
+                self.pending = self.pending[size:]
+                if typ == EV_SW and code == SW_BUTTON and val == value:
+                    return time.time() - t0
+            if time.time() - t0 >= timeout:
+                return None
+            if checkpoint:
+                checkpoint()
+            ready, _, _ = select.select([self.fd], [], [], 0.1)
+            if not ready:
+                continue
+            try:
+                data = os.read(self.fd, size * 64)
+            except BlockingIOError:
+                continue
+            if not data:
+                time.sleep(0.02)        # a FIFO with no writer (the host tests) reads empty
+                continue
+            self.pending += data
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
 
 
 # --------------------------------------------------------------- init.d

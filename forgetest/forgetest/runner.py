@@ -125,6 +125,8 @@ ACT_TIMEOUT_S = 180
 # machine by pressing its button. Generous: they may be setting up the
 # scrap, and nothing fires until it lands.
 PRESENCE_TIMEOUT_S = 600
+ARM_LIT_WAIT_S = 1800                # an arm can wait minutes (a coolant settle) before it lights
+ARM_PRESS_WAIT_S = 3600              # the controller's own button timeout, at most
 
 
 class Run:
@@ -316,17 +318,31 @@ class Context:
 
         fixture = getattr(self.runner, "fixture", None) if self.runner is not None else None
         if fixture is not None and fixture.covers("button"):
+            # The press is read as an edge from the switches' events, opened
+            # before the notice goes up: a press of any length counts, and
+            # nobody holds the button for a poll to land on it.
+            edges = hw.ButtonEdges()
             self.notice(text + " Then press the button on the machine to start.")
             self.log("READY: waiting for the operator's press on the machine "
                      "(the bench then does every press in this test)")
-            pressed = self.wait_for(lambda: self.switch("button") is True, PRESENCE_TIMEOUT_S)
-            self.clear_notice()
+            try:
+                if edges.available:
+                    pressed = edges.wait(1, PRESENCE_TIMEOUT_S, self.checkpoint)
+                    # The release, so this press is never read as the arm
+                    # press or a pause toggle; a short press has queued it.
+                    if pressed is not None:
+                        edges.wait(0, 10, self.checkpoint)
+                else:
+                    pressed = self.wait_for(lambda: self.switch("button") is True, PRESENCE_TIMEOUT_S,
+                                            poll=0.05)
+                    if pressed is not None:
+                        self.wait_for(lambda: self.switch("button") is False, 10, poll=0.05)
+            finally:
+                edges.close()
+                self.clear_notice()
             if pressed is None:
                 raise Failed("no press on the machine within %d s: %s"
                              % (PRESENCE_TIMEOUT_S, text))
-            # Let the button come back up, so this press is never read as
-            # the arm press or a pause toggle.
-            self.wait_for(lambda: self.switch("button") is False, 10)
             self.run.fixture_takeover = True
             self.evidence.setdefault("actions", []).append(
                 {"channel": "button", "state": "presence", "by": "operator",
@@ -461,6 +477,7 @@ class Context:
                 self.log("ARM: WARNING the bench actuator took this test's presses and is now "
                          "gone - asking the operator for the arm press")
             self.notice(text)
+            self._clear_when_taken()
             return False
         try:
             fixture.act("button", "press")
@@ -472,6 +489,36 @@ class Context:
         rec["by"] = "fixture"
         self.log("ARM press by the fixture, at the machine's own press prompt")
         return True
+
+    def _clear_when_taken(self, lit_timeout=ARM_LIT_WAIT_S):
+        """Take the arm notice down the moment the press is taken: the
+        controller lights the button white for its arm wait and puts it out
+        at the press. Without this the notice stood until the test's next
+        step, and an operator who still saw it pressed again, which pauses
+        the job. A notice replaced meanwhile is left alone."""
+        with self.run._lock:
+            nid = (self.run.notice or {}).get("id")
+        if nid is None:
+            return
+
+        def watch():
+            t0 = time.time()
+            while hw.button_lit() is not True:
+                if time.time() - t0 > lit_timeout:
+                    return
+                time.sleep(0.05)
+            while hw.button_lit() is not False:
+                if time.time() - t0 > lit_timeout + ARM_PRESS_WAIT_S:
+                    return
+                time.sleep(0.05)
+            with self.run._lock:
+                same = (self.run.notice or {}).get("id") == nid
+                if same:
+                    self.run.notice = None
+            if same:
+                self.log("ARM: the button went out at the press; the notice is down")
+
+        threading.Thread(target=watch, daemon=True, name="forgetest-arm-notice").start()
 
     def arm_press(self, text="The button lights white: press it to arm. The machine fires after your press.",
                   lit_timeout=60):
@@ -499,6 +546,7 @@ class Context:
                 self.log("ARM: WARNING the bench actuator took this test's presses and is now "
                          "gone - asking the operator for the arm press")
             self.notice(text)
+            self._clear_when_taken()
             return False
         self.log("ARM: the fixture presses when the button lights (the bench's arm_press opt-in)")
 

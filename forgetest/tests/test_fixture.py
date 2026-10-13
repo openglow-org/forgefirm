@@ -734,6 +734,73 @@ class RoutingTests(unittest.TestCase):
         finally:
             runner_mod.hw.button_lit = saved
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a FIFO for the switches' event device")
+    def test_ready_reads_a_short_press_as_an_edge(self):
+        """The presence press is the switches' input events, so a press
+        far shorter than a quarter second counts: the press and release
+        land back to back, and the status the old poll read never shows
+        the button down at all."""
+        dev = os.path.join(self.tmp, "switches")
+        os.mkfifo(dev)
+        os.environ["GF_SWITCH_DEV"] = dev
+        ev = runner_mod.hw.ButtonEdges.EVENT
+
+        def press():
+            with open(dev, "wb") as w:
+                w.write(ev.pack(0, 0, runner_mod.hw.EV_SW, runner_mod.hw.SW_BUTTON, 1) +
+                        ev.pack(0, 0, 0, 0, 0) +
+                        ev.pack(0, 0, runner_mod.hw.EV_SW, runner_mod.hw.SW_BUTTON, 0))
+        try:
+            run = Run("test", "r.live", "r.live")
+            ctx = Context(run, self.runner, self.reg["r.live"])
+            self.runner.probe_fixture(force=True)
+            self.press_button(False)                     # the status never shows it down
+            threading.Timer(0.3, press).start()
+            t0 = time.time()
+            ctx.ready("LIVE FIRE. Scrap under the head.")
+            self.assertLess(time.time() - t0, 5)
+            self.assertTrue(run.fixture_takeover)
+            rec = [r for r in run.evidence["actions"] if r["state"] == "presence"]
+            self.assertEqual(len(rec), 1)
+            self.assertIsNone(run.notice)                # the notice is down with the press
+        finally:
+            os.environ.pop("GF_SWITCH_DEV", None)
+
+    def test_the_arm_notice_comes_down_when_the_press_is_taken(self):
+        """The controller puts the button out at the press: the operator's
+        arm notice goes down then, not at the test's next step, so nobody
+        presses again (a press during the job pauses it)."""
+        run = Run("test", "r.live", "r.live")
+        ctx = Context(run, self.runner, self.reg["r.live"])
+        self.runner.probe_fixture(force=True)
+        lit = {"v": False}
+        saved = runner_mod.hw.button_lit
+        runner_mod.hw.button_lit = lambda: lit["v"]
+        try:
+            self.assertFalse(ctx.arm_press())            # the operator's press
+            self.assertIsNotNone(run.notice)
+            time.sleep(0.2)
+            self.assertIsNotNone(run.notice)             # dark before the arm: still asked for
+            lit["v"] = True
+            time.sleep(0.2)
+            self.assertIsNotNone(run.notice)             # lit: the arm waits for the press
+            lit["v"] = False                             # the press taken
+            deadline = time.time() + 2
+            while run.notice is not None and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertIsNone(run.notice)
+            # A notice put up meanwhile is not the arm's: it stays.
+            lit["v"] = False
+            self.assertFalse(ctx.arm_press())
+            ctx.notice("Something else.")
+            lit["v"] = True
+            time.sleep(0.2)
+            lit["v"] = False
+            time.sleep(0.3)
+            self.assertEqual((run.notice or {}).get("text"), "Something else.")
+        finally:
+            runner_mod.hw.button_lit = saved
+
 
 if __name__ == "__main__":
     unittest.main()
