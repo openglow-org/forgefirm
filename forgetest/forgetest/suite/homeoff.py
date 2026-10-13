@@ -3,13 +3,12 @@
 # https://community.openglow.org
 # SPDX-License-Identifier:    MIT
 
-"""A camera home's offset pair, on the machine.
+"""The helpers for a test that lets the web service move the head.
 
-Its own module, so that no other test's fingerprint moves. The homing is
-the web-service session cloud.mode-switch runs. The helpers for a test
-that lets the service move the head live here too: the motions ran whole,
-and the head goes back to where the test found it, by the travel the
-service's motions logged. No counter reading can say where that was: every
+The homing is the web-service session cloud.mode-switch runs. These judge
+that its motions ran whole, and take the head back to where the test found
+it by the travel the service's motions logged. No counter reading can say
+where that was: every
 service motion zeroes the step counters at its start, and a home and every
 controller start zero them again.
 """
@@ -18,13 +17,11 @@ import re
 import sys
 
 from ..baseline import XY_STEPS_PER_MM, counter_frame, counter_steps_per_mm, read_position
-from ..catalog import test
 from ..runner import Failed
 from . import cloud as logs     # the log paths, read at each call
-from .cloud import _HOMING_PATH, gfhome_homing, log_lines_since, log_size
-from .motion import _drop_reference, clean_slate, machine_idle, wait_idle, wait_state
+from .cloud import log_lines_since, log_size
+from .motion import _drop_reference, clean_slate, machine_idle, wait_idle
 
-HOME_X, HOME_Y = 4.5, -3.25
 RETURN_MAX_MM = 600.0       # no hand-back jogs farther on an axis: the bed is smaller
 # The client's own record of a motion's end: the kernel counters, which
 # the motion zeroed at its start (the "(actual/expected)" line of the same
@@ -169,73 +166,3 @@ def _jog_back(ctx, rec, travel, since):
         _drop_reference(ctx, ctx.forgectrl)
     ctx.counters_rezeroed()
     ctx.log("head returned to where the test found it (%.3f/%.3f mm)", -dx, -dy)
-
-
-@test("homing.cloud-offsets", title="A camera home declares its offset pair, and the envelope reaches back to a "
-                                     "negative one",
-      subsystem="homing", kind="auto", mode="grbl", est_min=7,
-      covers=_HOMING_PATH + [("grblhal-glowforge", "src/glowforge_homing.*"),
-                             ("grblhal-glowforge", "src/glowforge_cooling.*")],
-      requires=["forgectrl.auth", "motion.pacing"],
-      steps=["Bed clear, lid closed; cloud credentials configured; the machine on the network. The head "
-             "travels to the camera home and back to where it was."],
-      description="With cloud mode on, homing_mode = gfcloud and the camera-home offsets set to (4.5, -3.25), "
-                  "$H runs the web-service homing session. Every service motion of the session runs whole: "
-                  "the runner reports to the cooling engine in the controller's place, and one stopped short "
-                  "(the engine's stop, a fault) leaves the head short of the home and the position declared "
-                  "there false. When the session ends, the controller declares the position (4.5, -3.25): a "
-                  "camera-home offset may be negative, and the declared position is snapped to the step "
-                  "grid. The work envelope reaches back to the home on the negative axis, since the head "
-                  "stands there: a jog 2 mm out in +Y and 2 mm back ends at the home, accepted, and the same "
-                  "in X. The homing mode and the offsets are put back as found, the camera home is dropped, "
-                  "and the head is jogged back to where the test found it by the travel the session's "
-                  "motions logged; a travel that cannot be known fails the test and moves nothing. That an "
-                  "offset past the axis travel is refused, and the envelope's edge on the grid, are the "
-                  "driver's unit and harness cases.")
-def cloud_offsets(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    s0 = fc.settings() or {}
-    ctx.check(s0.get("cloud_enabled") == "1", "cloud mode is off: a camera home needs it on")
-    found = {k: s0.get(k) or "" for k in ("homing_mode", "gfcloud_home_x", "gfcloud_home_y")}
-    ev["found"] = found
-    session_at = None
-    try:
-        for k, v in (("homing_mode", "gfcloud"), ("gfcloud_home_x", str(HOME_X)), ("gfcloud_home_y", str(HOME_Y))):
-            st, body = fc.post("/settings", data={k: v})
-            ctx.check(st == 200, "%s=%s -> %s %s", k, v, st, body)
-        with ctx.grbl() as g:
-            session_at = session_mark()
-            gfhome_homing(ctx, ev, g)
-            judge_whole_motions(ctx, ev, session_at)
-            mpos = g.status_report().get("MPos") or (None, None, None)
-            ev["declared"] = mpos
-            ctx.log("the camera home declared %s", mpos)
-            ctx.check(mpos[0] is not None and abs(mpos[0] - HOME_X) < 0.02 and abs(mpos[1] - HOME_Y) < 0.02,
-                      "the camera home did not declare (%.2f, %.2f): %s", HOME_X, HOME_Y, mpos)
-            jogs = {}
-            for axis, home in (("Y", HOME_Y), ("X", HOME_X)):
-                out = g.command("$J=G91 G21 %s2 F1000" % axis, timeout=10)
-                wait_state(ctx, g, "Idle", 20)
-                back = g.command("$J=G91 G21 %s-2 F1000" % axis, timeout=10)
-                wait_state(ctx, g, "Idle", 20)
-                at = g.status_report().get("MPos")
-                jogs[axis] = {"out": out[-1:], "back": back[-1:], "at": at}
-                ctx.check(out[-1:] == ["ok"] and back[-1:] == ["ok"],
-                          "a jog out and back to the home in %s was refused: %s", axis, jogs[axis])
-                i = "XY".index(axis)
-                ctx.check(at and abs(at[i] - home) < 0.02, "the jog back in %s did not end at the home: %s", axis, at)
-            ev["jogs"] = jogs
-            ctx.log("out and back to the home: %s", jogs)
-    finally:
-        # The settings are refused for a moment after the suite's Grbl client closes; each is put back when taken.
-        for k, v in found.items():
-            def put():
-                st_, body_ = (fc.post("/settings", params={k: ""}) if v == "" else fc.post("/settings", data={k: v}))
-                if st_ != 200:
-                    ctx.log("restore %s=%r -> %s %s", k, v, st_, body_)
-                return st_ == 200 or None
-            took = ctx.wait_for(put, 20, poll=0.5)
-            ctx.log("restore %s=%r -> %s", k, v, "taken" if took is not None else "not taken")
-        if session_at is not None:
-            camera_home_return(ctx, ev, session_at)

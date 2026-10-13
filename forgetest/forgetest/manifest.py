@@ -125,6 +125,12 @@ BEHAVIORAL = [
 # catalog test exercises on the hardware belongs in that test's covers, not
 # here.
 HOST_TESTED = [
+    # An extension package's holds as the engine reads them (forgeext's
+    # holdkeep_test and run_test prove the writer's side).
+    ("forgectrl", "src/holds.*", "forgectrl:tests/holds_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The M-code relay to the package that answers (the controller's side is
+    # the null-sink mcode_test harness, under grblhal-glowforge's src/**).
+    ("forgectrl", "src/mcode.*", "forgectrl:tests/mcode_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a

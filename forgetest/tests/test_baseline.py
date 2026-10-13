@@ -531,9 +531,9 @@ class ExtensionFreeTests(BaselineTests):
 
 class TransientNotLeftoverTests(BaselineTests):
     """A leftover is what a run left behind, not the machine part-way
-    through its own work. Found on the bench reference, where
-    laser.arm-wait-lid passed every check it makes and failed its
-    hand-back on the post-job smoke clear."""
+    through its own work. Found on the bench reference, where a laser
+    test passed every check it makes and failed its hand-back on the
+    post-job smoke clear."""
 
     def test_a_fading_button_led_is_not_a_leftover(self):
         # the trigger fades brightness toward target: target 0 with

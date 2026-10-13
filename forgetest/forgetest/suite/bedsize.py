@@ -9,7 +9,7 @@ Its own module, so that no other test's fingerprint moves. The check is
 driven from here inside the travel the machine already knows: a few jogs
 out from the camera home, never toward an end, so it needs no operator.
 Measuring the real ends is the operator's own run of the check. The
-homing is the web-service session homing.cloud-offsets runs.
+homing is the web-service session cloud.mode-switch runs.
 """
 
 import json

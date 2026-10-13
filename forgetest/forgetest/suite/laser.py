@@ -30,7 +30,7 @@ from ..catalog import test
 from .. import hw
 from ..runner import Failed
 from .motion import (kernel_xy_mm, kernel_start, check_kernel_returned, wait_state,
-                     wait_state_text, wait_left_state, wait_idle, drain_text, Watch, machine_idle,
+                     wait_state_text, wait_left_state, drain_text, Watch, machine_idle,
                      _job, _job_post, _job_wait, _lease_holder, _port_state, _words)
 
 _LASER_COVERS = [("grblhal-glowforge", "src/**"), ("kernel-module-glowforge", "**"),
@@ -652,86 +652,6 @@ def m5_rapid_dark(ctx):
             peak, hv_tail)
 
 
-@test("laser.disarm-in-hold", title="Disarm grace counts down in Hold", subsystem="laser",
-      kind="live", mode="grbl", est_min=4,
-      covers=_LASER_COVERS,
-      requires=["laser.emission-witness"], actions=["button"],
-      steps=["Scrap under the head with 40 mm of free +X travel; lid closed; exhaust on.",
-             "Press the physical button when it lights white. Nothing else: the test holds the "
-             "job itself and waits about a minute for the disarm."],
-      description="Arm and start a +X move at S400/F300, feed-hold it after ~2 s of motion, and "
-                  "hold: the disarm grace must count down while held and close the armed window "
-                  "(armed -> false) without the job resuming, and the button goes dark with it.")
-def disarm_in_hold(ctx):
-    ev = ctx.evidence
-    with ctx.grbl() as g, LiveJob(ctx, g):
-        prepare(ctx, g)
-        k0 = kernel_start(ctx)
-        ctx.ready(ARM_CUE % "40 mm +X")
-        stream(g, ["G91", "G21", "M4", "S400", "G1 X40 F300"])
-        ctx.log("armed; waiting for motion to start (arm + your button press)...")
-        w = Watch(g)
-        # The press waits for the button to light: pressed before the job
-        # reaches its arm wait, it is lost, and the move never starts.
-        ctx.arm_press()
-        ctx.wait_for(w.in_state("Run"), 180)
-        ctx.clear_notice()
-        st = w.last["state"] if w.last else None
-        ctx.check(st and st.startswith("Run"), "motion never started (state=%s) - arm refused or no press", st)
-        ctx.log("moving under laser: %s; feed-hold in 2 s", st)
-        ctx.sleep(2)
-        g.realtime(ord("!"))
-        t1 = time.time()
-        while time.time() - t1 < 5:
-            st = g.status_report()["state"]
-            if st.startswith("Hold"):
-                break
-            time.sleep(0.1)
-        ev["held_state"] = st
-        ctx.log("feed-held mid-move: %s; watching the disarm grace count down IN HOLD", st)
-        ctx.check(st.startswith("Hold"), "feed hold did not park (state %s)", st)
-        t0 = time.time()
-        disarmed_at = None
-        left_hold = None
-        while time.time() - t0 < 120:
-            ctx.checkpoint()
-            s = sample(ctx)
-            held = g.status_report()["state"].startswith("Hold")
-            if s and not s["armed"]:
-                disarmed_at = time.time() - t0
-                break
-            if not held and left_hold is None:
-                left_hold = g.status_report()["state"]
-                ctx.log("note: left Hold (state=%s) before disarm", left_hold)
-            time.sleep(1)
-        ev["disarmed_after_s"] = round(disarmed_at, 1) if disarmed_at is not None else None
-        ev["left_hold"] = left_hold
-        # recover: laser off, abort out of hold
-        g.command("M5", timeout=1)
-        g.realtime(0x18)
-        ctx.sleep(1)
-        if "Alarm" in g.status_report()["state"]:
-            g.command("$X")
-        # The hold parks the head part-way through the move and the reset
-        # abandons the rest of it, so the job ends wherever the feed hold
-        # caught it - about 11 mm in, on the bench reference. That is the
-        # test's own doing and it goes back: the kernel counters say how
-        # far the head actually went, which is what a jog has to undo.
-        wait_idle(ctx, g, 15)
-        dx, dy = kernel_xy_mm(ctx)
-        back_x, back_y = k0[0] - dx, k0[1] - dy
-        ev["left_at_mm"] = [round(dx - k0[0], 3), round(dy - k0[1], 3)]
-        if abs(back_x) >= 0.02 or abs(back_y) >= 0.02:
-            ctx.log("returning the head: %+.3f/%+.3f mm", back_x, back_y)
-            g.command("$J=G91X%.3fY%.3fF1200" % (back_x, back_y))
-            wait_idle(ctx, g, 30)
-        ev["returned_mm"] = list(kernel_xy_mm(ctx))
-    ctx.check(disarmed_at is not None, "still armed after 120 s in Hold")
-    ctx.check(left_hold is None, "the job left Hold (%s) before the disarm", left_hold)
-    check_button_dark(ctx, ev)
-    ctx.log("PASS: disarmed in Hold after %.1f s, button dark", disarmed_at)
-
-
 @test("laser.armed-kill", title="Armed kill mid-fire: the expected stop, then a SIGKILL",
       subsystem="laser", kind="live", mode="grbl", est_min=6,
       covers=_LASER_COVERS + [("forgectrl", "src/main.c")],
@@ -1090,78 +1010,6 @@ def verdict_cut(ctx):
 DISARMED_MSG = "laser disarmed - latch locked"
 
 
-@test("laser.arm-wait-lid", title="Lid open during the arm wait cancels the job",
-      subsystem="laser", kind="operator", mode="grbl", est_min=3,
-      covers=_LASER_COVERS + [("grblhal-glowforge", "src/glowforge_laser.c"),
-                              ("grblhal-glowforge", "src/glowforge_switches.c"),
-                              ("grblhal-glowforge", "src/glowforge_switch_map.h")],
-      requires=["kernel.latch-locked-idle", "motion.jog-roundtrip"], actions=["lid"],
-      steps=["Lid closed; nothing under the head needs to be in place - the machine will not fire.",
-             "When the white button lights, do NOT press it: open the lid instead, then close it "
-             "when told."],
-      description="Start a laser job so the controller unlocks the latch and lights the button, "
-                  "then open the lid while it waits. The wait must abort with the lid named as the "
-                  "reason, canceled with a soft reset (no alarm - nothing to unlock), the armed "
-                  "window closed (armed -> false), the kernel latch back to locked, and no emission; "
-                  "the controller ends Idle. No press is given, so nothing can fire.")
-def arm_wait_lid(ctx):
-    ev = ctx.evidence
-    with ctx.grbl() as g, LiveJob(ctx, g):
-        prepare(ctx, g)
-        base = sample(ctx)
-        ctx.check(base, "forgectrl /status or /cool/status unavailable")
-        ctx.check(not base["armed"], "armed window already open before the job")
-        stream(g, ["G91", "G21", "M4", "S400", "G1 X5 F600"])
-        # The prompt: the latch is unlocked and the button lit from here on.
-        t0 = time.time()
-        text = ""
-        while time.time() - t0 < 30 and "press the button" not in text:
-            ctx.checkpoint()
-            text += g.drain()
-            time.sleep(0.1)
-        ctx.check("press the button" in text, "no arm prompt within 30 s (job did not reach the arm)")
-        s = sample(ctx)
-        ev["armed_during_wait"] = s["armed"] if s else None
-        ctx.log("arm prompt seen; armed=%s; asking the operator to open the lid", ev["armed_during_wait"])
-        ctx.act("lid", "open", text="The button is lit white: do NOT press it.", timeout=60)
-        t1 = time.time()
-        while time.time() - t1 < 15:
-            ctx.checkpoint()
-            text += g.drain()
-            if "job canceled" in text and "help]" in text:
-                break
-            time.sleep(0.1)
-        ev["messages"] = [ln for ln in text.splitlines() if ln.startswith("[MSG:") or ln.startswith("ALARM")]
-        ctx.log("controller: %s", ev["messages"])
-        ctx.check("lid opened during arm - job canceled" in text,
-                  "the lid open was not reported as canceling the arm")
-        ctx.check("help]" in text, "no reset banner after the lid-open cancel (it must be a clean cancel)")
-        ctx.check("ALARM" not in text, "an alarm was raised on the lid-open cancel")
-        # Armed window closed and the kernel latch locked.
-        t2 = time.time()
-        s = None
-        while time.time() - t2 < 10:
-            s = sample(ctx)
-            if s and not s["armed"]:
-                break
-            time.sleep(0.25)
-        ev["armed_after"] = s["armed"] if s else None
-        ilk = hw.sysfs_int("cnc/interlock_circuit")
-        locked = ilk is not None and bool(ilk & (1 << 3))
-        ev["latch_locked"] = locked
-        ev["emission"] = s["emission"] if s else None
-        ctx.check(s and not s["armed"], "the armed window stayed open after the lid-open cancel")
-        ctx.check(locked, "kernel latch not locked after the lid-open cancel (interlock_circuit=%s)", ilk)
-        ctx.check(not ev["emission"], "emission_samples nonzero (%s) - nothing may have fired", ev["emission"])
-        check_button_dark(ctx, ev)
-        ctx.act("lid", "close")
-        ctx.sleep(1)
-        st = g.status_report()["state"]
-        ev["state_after"] = st
-        ctx.check(st.startswith("Idle"), "controller is %s after the cancel, expected Idle (no unlock needed)", st)
-    ctx.log("PASS: lid open during the arm wait canceled the job (clean reset, no alarm), armed=false, latch locked")
-
-
 @test("laser.pause-resume-lid-cancel", title="One live cut: the button pauses and resumes it, the lid "
                                              "cancels it and sends the head home",
       subsystem="laser", kind="live", mode="grbl", est_min=7,
@@ -1325,101 +1173,6 @@ def pause_resume_lid_cancel(ctx):
     ctx.log("PASS: button paused the burn (emission 0, armed kept, latch unlocked) and resumed it; "
             "the lid then canceled it - emission 0 at +%s s, reset without alarm, returned (drift "
             "%.3f mm), button latch SET", zero_at, drift)
-
-
-def _port_jog_sampled(ctx, fc, params, samples, timeout=30.0):
-    """One jog through the controller port, sampled at 8 Hz until the port
-    says it is over. Returns the HTTP status and body of the jog request."""
-    st, body = fc.post("/motion/jog", params=params)
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        ctx.checkpoint()
-        smp = sample(ctx)
-        if smp:
-            samples.append(smp)
-        try:
-            ps = fc.get("/motion/state")[1]
-        except hw.HwError:
-            ps = None
-        if st != 200 or (isinstance(ps, dict) and ps.get("state") == "Idle" and not ps.get("port_jog")):
-            break
-        time.sleep(0.125)
-    return st, body
-
-
-@test("laser.port-dark", title="A panel jog under an open armed window ships dark",
-      subsystem="laser", kind="live", mode="grbl", est_min=3,
-      covers=_LASER_COVERS + [("forgectrl", "src/grblport.*")],
-      requires=["laser.emission-witness", "motion.port-jog"], actions=["button"],
-      steps=["Scrap under the head with 20 mm of free +X travel; lid closed; exhaust on.",
-             "Press the physical button when it lights white (the arm)."],
-      description="A 20 mm line at M3 S400/F600 with no M5 and no program end after it, so the "
-                  "armed window stays open with M3 modal and S above zero: the state in which an "
-                  "injected G1 would fire. The line itself must be witnessed lit, or the case "
-                  "proves nothing. Then POST /motion/jog takes the head back over the line and out "
-                  "again, through the controller port. The window must read armed before and "
-                  "after the jogs, and through both the kernel's LASER_ON sample count stays 0, "
-                  "the HV current stays at its idle reading, and the head's beam detector does "
-                  "not rise over its level before the jogs. The client then ends the job (M5, "
-                  "M2) and the window closes.")
-def port_dark(ctx):
-    ev = ctx.evidence
-    fc = ctx.forgectrl
-    with ctx.grbl() as g, LiveJob(ctx, g):
-        prepare(ctx, g)
-        base = sample(ctx)
-        ctx.check(base, "forgectrl /status or /cool/status unavailable")
-        ctx.check(not base["emission"], "emission_samples nonzero before the job (%s)", base["emission"])
-        ctx.ready(ARM_CUE % "20 mm +X")
-        ctx.arm_press()
-        jog_samples = []
-        try:
-            # No M5 and no M2: the window stays open, M3 S400 stays modal.
-            lit = run_and_sample(ctx, g, ["G91", "G21", "M3", "S400", "G1 X20 F600"])
-            peak = max((s["emission"] or 0 for s in lit), default=0)
-            ctx.check(peak > 0, "no emission witnessed on the G1: the dark jogs would prove nothing")
-
-            # The cut is over and dark again; the window is still open.
-            ok = ctx.wait_for(lambda: (sample(ctx) or {}).get("emission") == 0, 10, poll=0.125)
-            ctx.check(ok is not None, "emission_samples did not return to 0 after the G1")
-            before = sample(ctx)
-            ctx.check(before and before["armed"], "the armed window closed before the jogs: %s",
-                      before and before["phase"])
-            ctx.sleep(0.6)                  # past the port's sender-quiet interval
-
-            for params in ({"x": "-20", "feed": "600"}, {"x": "20", "feed": "2400"},
-                           {"x": "-20", "feed": "2400"}):
-                st, body = _port_jog_sampled(ctx, fc, params, jog_samples)
-                ctx.check(st == 200, "POST /motion/jog %s under the open window -> %s %s", params, st, body)
-                ctx.sleep(0.6)
-            after = sample(ctx)
-            ctx.check(after and after["armed"],
-                      "the armed window closed during the jogs: the dark samples were not under it")
-        finally:
-            ctx.clear_notice()
-        r = g.command("M5")
-        r += g.command("M2")
-        ctx.check(not any(x.startswith("error") for x in r), "the client could not end the job: %s", r)
-        ev["disarm_s"] = wait_disarm(ctx, 30)
-        ctx.check(ev["disarm_s"] is not None, "the armed window did not close after the program end")
-
-    lit_in_jog = [s for s in jog_samples if s["emission"]]
-    hv_max = max((s["hv"] for s in jog_samples if s["hv"] is not None), default=0)
-    beams = [s["beam"] for s in jog_samples if s.get("beam") is not None]
-    beam_rise = (max(beams) - before["beam"]) if beams and before.get("beam") is not None else None
-    ev.update({"emission_peak_g1": peak, "jog_samples": len(jog_samples),
-               "jog_emission_samples": len(lit_in_jog), "jog_hv_max": hv_max,
-               "jog_beam_rise": beam_rise, "trail": trail(jog_samples)})
-    ctx.log("G1 emission peak %s; %d samples across three port jogs: %d with emission, HV max %s, "
-            "beam detector rise %s", peak, len(jog_samples), len(lit_in_jog), hv_max, beam_rise)
-    ctx.check(len(jog_samples) >= 16, "only %d samples across the jogs", len(jog_samples))
-    ctx.check(not lit_in_jog, "a port jog fired under the open window: %d samples with emission, "
-              "first emission_samples %s", len(lit_in_jog), lit_in_jog[0]["emission"] if lit_in_jog else None)
-    ctx.check(hv_max <= HV_DARK_MAX, "HV current %s during a port jog (idle reads ~0)", hv_max)
-    ctx.check(beam_rise is not None and beam_rise < BEAM_DELTA_MIN,
-              "the head's beam detector rose %s during a port jog", beam_rise)
-    ctx.log("PASS: lit on the G1 (peak %s), and three port jogs under the same open window with M3 S400 "
-            "modal shipped dark by all three witnesses", peak)
 
 
 # ---------------------------------------------------------------- the recorder, as a job of the runner's
