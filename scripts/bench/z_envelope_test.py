@@ -96,6 +96,8 @@ class Session:
             for k, v in (conf or {}).items():
                 f.write("%s = %s\n" % (k, v))
         env["GFHOME_CONF"] = conf_path
+        self.dump = os.path.join(self.workdir, "stream.bin")
+        env["GFSINK_DUMP"] = self.dump
         if referenced:
             with open(os.path.join(self.workdir, "lens.home"), "w") as f:
                 f.write("edge 0 3 3\n")
@@ -179,6 +181,16 @@ class Session:
         if "ok" not in reply:
             fail("unexpected reply to %r: %r" % (gcode, reply))
         return False
+
+    def steps(self):
+        """Step ticks shipped so far: a tick byte (bit 7 clear) with an X, Y
+        or Z step bit (0x25) set, as ctlport_test.py counts them."""
+        try:
+            with open(self.dump, "rb") as f:
+                data = f.read()
+        except OSError:
+            return 0
+        return sum(1 for b in data if not b & 0x80 and b & 0x25)
 
     def recover(self):
         self.sock.sendall(b"\x18")
@@ -286,15 +298,19 @@ def homed_cases():
         m = re.search(r"MPos:(-?[\d.]+),(-?[\d.]+)", st)
         check(m and abs(float(m.group(1))) < 0.01 and abs(float(m.group(2))) < 0.01,
               "homed: X and Y sit at the origin", "homed: X/Y are not at the origin: %r" % st)
-        check(s.move("G90 G0 X%.1f" % (x_travel + 5)), "homed: X past the bed alarms",
-              "homed: a move past X max ran")
-        s.wait_idle()
-        check(s.move("G90 G0 Y%.1f" % (y_travel + 5)), "homed: Y past the bed alarms",
-              "homed: a move past Y max ran")
-        s.wait_idle()
-        check(s.move("G90 G0 X-1"), "homed: X past the near edge alarms",
-              "homed: a move past X min ran")
-        s.wait_idle()
+
+        def refused_still(gcode, what):
+            # ALARM:2 before any motion: the shipped stream gains no step.
+            n0 = s.steps()
+            blocked = s.move(gcode)
+            n1 = s.steps()
+            check(blocked and n1 == n0, "homed: %s alarms before any motion" % what,
+                  "homed: %s %s, %d step ticks shipped" % (what, "alarmed" if blocked else "ran", n1 - n0))
+            s.wait_idle()
+
+        refused_still("G90 G0 X%.1f" % (x_travel + 5), "a move past X max")
+        refused_still("G90 G0 Y%.1f" % (y_travel + 5), "a move past Y max")
+        refused_still("G90 G0 X-1", "a move past X min")
         reply = s.send("$J=G91X%.1fF1200" % (x_travel + 5), 1.5)
         check("error:15" in reply, "homed: a jog past the bed is refused with error 15",
               "homed: a jog past the bed was not refused with error 15: %r" % reply)
@@ -302,9 +318,13 @@ def homed_cases():
         # until an empty line (or a $ command) clears it: the sender's
         # acknowledgment at compatibility level 0.
         s.send("", 1.0)
+        n0 = s.steps()
         check(not s.move("G90 G0 X10 Y10"), "homed: a move inside the bed runs",
               "homed: a move inside the bed was blocked")
         s.wait_idle()
+        # The step count the refusals were judged by does see motion.
+        check(s.steps() > n0, "homed: the move inside the bed shipped steps",
+              "homed: the move inside the bed shipped no step: the stream dump sees no motion")
         # A settings write does not drop them: the driver re-applies the
         # mask after the core clears it.
         s.write_setting("$20=0")
