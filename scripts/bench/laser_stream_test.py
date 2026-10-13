@@ -88,7 +88,8 @@ over TCP, then checks the dumps against the kernel feeder contract:
      under the open window; the deceleration into that first hold runs
      lit to the stop, as a feed hold's does (the segments already planned
      at speed would otherwise play dark and leave a gap in the cut), and
-     the stream engine's per-tick gate masks the stream from the stop on;
+     the stream engine's per-tick gate masks the stream from the stop on,
+     so the stationary stretch of each hold ships no FIRE;
      a ~ under that verdict, which is what a button press or a sender
      does, moves the head dark for at most one client poll before the
      client holds it again and says so; the clean verdict then resumes
@@ -110,7 +111,8 @@ over TCP, then checks the dumps against the kernel feeder contract:
      holds the job the moment the client's cache expires, on its own
      clock between two of its file reads, lit to the stop like rule 24:
      no dark cut runs out while the client waits for its next read; the
-     engine's return resumes the cut lit
+     hold's stationary stretch ships no FIRE; the engine's return resumes
+     the cut lit
  28. a scheduling stall of the step producer (GFSINK_STALL_MS: the
      producer is kept off the CPU longer than its lead) maps events
      behind the ship cursor. Inside an armed window that is a fault:
@@ -704,6 +706,22 @@ def check_decel_lit(name, ticks, hold, what):
     return lead
 
 
+# One step pulse straddles each edge of a hold's stationary stretch, so
+# the edges are left out of its FIRE count (rule 21's margin).
+HOLD_EDGE_TICKS = int(120 * XY_SCALE)
+
+
+def check_hold_dark(name, ticks, hold, what):
+    """No FIRE tick inside the stationary stretch of `hold`, its edges
+    aside: the beam is off for as long as the job is held."""
+    hs, he = hold
+    lit = sum(1 for t in ticks[hs + HOLD_EDGE_TICKS:he - HOLD_EDGE_TICKS] if t & 0x10)
+    if lit:
+        fail("[%s] FIRE while held: %d fire ticks in the stationary stretch of %d ticks (%s)"
+             % (name, lit, he - hs, what))
+    return he - hs
+
+
 def tick_bytes(data):
     """The stream with power bytes stripped (tick bytes only)."""
     return bytes(b for b in data if not b & 0x80)
@@ -1286,6 +1304,7 @@ def main():
              ("sleep", 0.5), ("verdict", "clean"), WAIT_IDLE, "M5", "M2",
              ("expect_text", "laser disarmed")]
     data = run_session("verdict-rehold", steps, conf=DENSITY_CONF_FLOORED)
+    check_fire_gaps("verdict-rehold", data)
     text = run_session.text
     if "held again" not in text:
         fail("[verdict-rehold] the client did not say it held the job again")
@@ -1308,6 +1327,8 @@ def main():
     (_h1s, h1e), (h2s, h2e) = holds
     lit_lead = check_decel_lit("verdict-rehold", ticks, holds[0],
                                "a pause keeps the beam through its first deceleration")
+    held = [check_hold_dark("verdict-rehold", ticks, h, "the pause tier masks FIRE while it holds")
+            for h in holds]
     between = sum(fire[h1e:h2s])
     if between:
         fail("[verdict-rehold] FIRE while resumed under the hold verdict: %d fire ticks "
@@ -1323,9 +1344,10 @@ def main():
     if seq != ["unlock", "lock"]:
         fail("[verdict-rehold] latch ownership sequence %s, expected unlock (arm) and lock "
              "(program end) only: a pause must not write the latch" % seq)
-    print("PASS [verdict-rehold]: held lit to %d ticks before the stop, resumed dark for "
-          "%d ticks (%.2f s), held again, lit after the clear (%d fire ticks), latch %s"
-          % (lit_lead, h2s - h1e, (h2s - h1e) / float(TICK_HZ), lit_after, seq))
+    print("PASS [verdict-rehold]: held lit to %d ticks before the stop, dark while held (%d and "
+          "%d ticks), resumed dark for %d ticks (%.2f s), held again, lit after the clear (%d fire "
+          "ticks), latch %s"
+          % (lit_lead, held[0], held[1], h2s - h1e, (h2s - h1e) / float(TICK_HZ), lit_after, seq))
 
     # --- rule 25: the verdict's fail tier --------------------------------
     # The same line; mid-move the verdict goes to AIRFLOW. The job ends:
@@ -1390,6 +1412,7 @@ def main():
              ("verdict", "stale"), ("wait_state", "Hold:0", 6.0), ("sleep", 0.5),
              ("verdict", "clean"), WAIT_IDLE, "M5", "M2", ("expect_text", "laser disarmed")]
     data = run_session("verdict-stale", steps, conf=DENSITY_CONF_FLOORED)
+    check_fire_gaps("verdict-stale", data)
     text = run_session.text
     if "cooling service lost" not in text:
         fail("[verdict-stale] the client did not report the engine gone")
@@ -1401,6 +1424,7 @@ def main():
         fail("[verdict-stale] expected one hold in the stream, found %d: %s" % (len(holds), holds))
     lit_lead = check_decel_lit("verdict-stale", ticks, holds[0],
                                "the hold must land at the cache's expiry, lit to the stop")
+    held = check_hold_dark("verdict-stale", ticks, holds[0], "a stale verdict masks FIRE while it holds")
     fire = [1 if t & 0x10 else 0 for t in ticks]
     step = [1 if t & 0x05 else 0 for t in ticks]
     last = len(step) - 1 - step[::-1].index(1)
@@ -1412,8 +1436,8 @@ def main():
         fail("[verdict-stale] latch ownership sequence %s, expected unlock (arm) and lock "
              "(program end) only" % seq)
     print("PASS [verdict-stale]: the expired cache held the job lit to %d ticks (%.0f ms) "
-          "before the stop, lit after the return (%d fire ticks), latch %s"
-          % (lit_lead, lit_lead * 1e3 / MACHINE_TICK_HZ, lit_after, seq))
+          "before the stop, dark while held (%d ticks), lit after the return (%d fire ticks), "
+          "latch %s" % (lit_lead, lit_lead * 1e3 / MACHINE_TICK_HZ, held, lit_after, seq))
 
     # --- rules 28 and 29: the stalls -------------------------------------
     # The step density the job plans: F3000 at 53.333 steps/mm is 2667
