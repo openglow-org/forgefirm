@@ -49,7 +49,8 @@ over TCP, then checks the dumps against the kernel feeder contract:
  14. a laser state change made while the stream is idle survives to the
      next run: a standalone S word between moves, from a sender slow
      enough to drain the planner, must still cut at the level it asked
-     for rather than dark at a stale duty
+     for rather than dark or at a stale level (judged under the shipped
+     density model, where the level is the FIRE density)
  16. and the off transition survives the same way: an M5 executed with
      the planner drained and the kernel run over must darken the rapids
      that follow it, and a bare G0 sent with the spindle off must ship
@@ -1115,26 +1116,15 @@ def main():
           % (len(pa), sorted(set(pa)), len(pd)))
 
     # --- session I: a level set while idle still cuts (rule 14) ---------
-    idle_s = run_session("idle-s", JOB_IDLE_S, conf=ANALOG_CONF)
-    fire_by_duty = {}
-    cur = None
-    for b in idle_s:
-        if b & 0x80:
-            cur = b & 0x7F
-        elif b & 0x10:
-            fire_by_duty[cur] = fire_by_duty.get(cur, 0) + 1
-    want_ticks = IDLE_S_MM / (IDLE_S_FEED / 60.0) * MACHINE_TICK_HZ
-    for level in IDLE_S_LEVELS:
-        duty = duty_for(level)
-        got = fire_by_duty.get(duty, 0)
-        if got < want_ticks * 0.9:
-            fail("[idle-s] S%d (duty %d) fired %d ticks, expected ~%d: a level "
-                 "set while the stream was idle was dropped and the move ran "
-                 "dark or at a stale duty (all: %s)"
-                 % (level, duty, got, want_ticks, fire_by_duty))
+    # Under the shipped density model the level rides the FIRE bits at full
+    # duty: each move's span must render the level its own S asked for, not
+    # the one before it, and the stream ends dark.
+    idle_s = run_session("idle-s", JOB_IDLE_S, conf=DENSITY_CONF_FLOORED)
+    got = check_density("idle-s", idle_s, tuple(duty_for(l) for l in IDLE_S_LEVELS),
+                        DENSITY_PERIOD_TICKS, DENSITY_MIN_MACHINE_TICKS)
     check_termination("idle-s", idle_s)
-    print("PASS [idle-s]: standalone S across idle gaps -> fire ticks per duty %s"
-          % {duty_for(l): fire_by_duty[duty_for(l)] for l in IDLE_S_LEVELS})
+    print("PASS [idle-s]: standalone S across idle gaps -> densities %s, each its own level"
+          % [d for _l, d in got])
 
     # --- session J: M5 executed while idle darkens the next run (rule 16) ---
     for model, conf in (("analog", ANALOG_CONF), ("density", DENSITY_CONF)):
