@@ -96,7 +96,8 @@ Drills (pass a name):
             reads dark after the M5, and laser_on_sampled never goes
             nonzero again after its first zero past the line. Prints the
             9 s after the line at 40 ms steps. The catalog's
-            laser.m5-rapid-dark is its port.
+            laser.emission-witness carries its check: a rapid after
+            the M5, sampled dark.
   m4corner  M4 velocity-scaled power into corners and short segments:
             a corner-heavy vector pattern (a long line, 1.1 mm zigzag
             teeth, a 2 mm square, a 180 degree reversal, 0.5 mm teeth)

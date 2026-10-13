@@ -457,15 +457,45 @@ def power_floor(ctx):
                   "(G4) between its second and third sides: emission_samples (the kernel's "
                   "LASER_ON sample count) goes nonzero during the fire window and returns to 0 "
                   "at Idle, HV current rises during the burn, the head's beam detector sees the "
-                  "beam, the armed window is observed, the M2 program end disarms promptly at "
-                  "Idle (job-based, not the 60 s idle grace) and the button goes dark. Across "
-                  "the dwell the kernel run ends and restarts: HV_ENABLE drops with the "
-                  "charge-pump watchdog and is back for the third side, while the hardware "
-                  "button latch stays clear (cnc/button_latch 0 in every armed sample), so the "
-                  "second half of the square marks without a second press. The operator "
-                  "confirms all four sides.")
+                  "beam, and the armed window is observed. Across the dwell the kernel run ends "
+                  "and restarts: HV_ENABLE drops with the charge-pump watchdog and is back for "
+                  "the third side, while the hardware button latch stays clear (cnc/button_latch "
+                  "0 in every armed sample), so the second half of the square marks without a "
+                  "second press. The square ends at M5 with the window still open; once the "
+                  "LASER_ON count reads 0 (the dark point), a rapid runs 20 mm out over the "
+                  "first side and back, then the program ends. From the dark point until the "
+                  "window closes, every sample reads no emission and the HV current at its idle "
+                  "reading, and the head's reports place the rapid inside that stretch: LASER_ON "
+                  "stays off with FIRE clear while the chain can fire. The M2 program end "
+                  "disarms promptly (job-based, not the 60 s idle grace) and the button goes "
+                  "dark. The operator confirms all four sides.")
 def emission_witness(ctx):
     ev = ctx.evidence
+    # The rapid after the M5 (G91 is modal from the square): out over the
+    # first side and back, then the program end.
+    rapid_tail = ["G0 X20", "G4 P2.5", "G0 X-20", "G4 P0.5", "G90", "M2"]
+
+    def sample_to_disarm(g, timeout=20.0, sample_hz=8):
+        """Sample until the armed window closes, or the timeout, with the
+        controller's state and machine X beside each sample ("x"). A G4
+        dwell reports Idle, so Idle cannot end this; the window closing at
+        the program end does."""
+        samples = []
+        period = 1.0 / sample_hz
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            ctx.checkpoint()
+            smp = sample(ctx)
+            rep = g.status_report()
+            if smp:
+                smp["gstate"] = rep.get("state")
+                smp["x"] = (rep.get("MPos") or (None,))[0]
+                samples.append(smp)
+                if not smp["armed"]:
+                    break
+            time.sleep(period)
+        return samples
+
     with ctx.grbl() as g, LiveJob(ctx, g):
         prepare(ctx, g)
         base = sample(ctx)
@@ -475,21 +505,46 @@ def emission_witness(ctx):
                 base["armed"], base["verdict"])
         ctx.check(not base["emission"], "emission_samples nonzero before the job (%s)", base["emission"])
         ctx.ready(ARM_CUE % "20 mm +X and +Y")
+        # The square ends at M5 with no program end: the window stays open
+        # for the rapid that follows.
         job = ["G91", "G21", "M4", "S400",
                "G1 X20 F600", "G1 Y20 F600", "G4 P2", "G1 X-20 F600", "G1 Y-20 F600",
-               "M5", "G90", "M2"]
+               "M5"]
         ctx.arm_press()
         try:
-            samples = run_and_sample(ctx, g, job)
+            cut = run_and_sample(ctx, g, job)
+            # The dark point: the M5 has run, the LASER_ON count reads 0, and
+            # the window is still open. The rapid is sent only after it, so
+            # the dark stretch covers the rapid by construction, and the
+            # mid-square dwell's own zero cannot be taken for it.
+            ctx.wait_for(lambda: (sample(ctx) or {}).get("emission") == 0, 10, poll=0.125)
+            dark = sample(ctx)
+            ctx.check(dark and dark["emission"] == 0,
+                      "the LASER_ON count did not return to 0 after the M5 (%s)", dark and dark["emission"])
+            ctx.check(dark["armed"], "the armed window closed after the M5, before the rapid "
+                      "(phase %s): the rapid would not run under it", dark["phase"])
+            # The engine's armed flag can still read true after the latch has
+            # locked, and a dark reading with the latch locked is the unarmed
+            # case this sample is here to exclude: the SoC lock line must read
+            # released.
+            ctx.check(dark["locked"] is False, "the laser latch is locked at the dark point "
+                      "(laser_locked %s): the rapid would run unarmed", dark["locked"])
+            rep = g.status_report()
+            dark["gstate"] = rep.get("state")
+            dark["x"] = (rep.get("MPos") or (None,))[0]
+            ctx.check(dark["x"] is not None, "the controller reports no machine position: %s", rep)
+            stream(g, rapid_tail)
+            tail = sample_to_disarm(g)
         finally:
             ctx.clear_notice()
+        samples = cut + [dark] + tail
         ev["trail_fields"] = list(TRAIL_FIELDS)
         ev["trail"] = trail(samples)
-        beam = beam_witness(ctx, ev, samples, base)
-        emis = [s["emission"] for s in samples if s["emission"] is not None]
+        beam = beam_witness(ctx, ev, cut, base)
+        emis = [s["emission"] for s in cut if s["emission"] is not None]
         peak = max(emis) if emis else 0
-        end = emis[-1] if emis else None
-        hv = [s["hv"] for s in samples if s["hv"] is not None]
+        end = next((s["emission"] for s in reversed(samples) if s["emission"] is not None), None)
+        hv = [s["hv"] for s in cut if s["hv"] is not None]
         ir_peak = [0, 0, 0, 0]
         for s in samples:
             if s["ir"] and len(s["ir"]) == 4:
@@ -533,12 +588,34 @@ def emission_witness(ctx):
         ev["exhaust_floor"] = floor
         ctx.log("exhaust at the first emission sample: %s rpm (floor %.0f)",
                 ev["exhaust_at_first_fire"], floor)
-        # X-3: job-based disarm at Idle after M2
-        dt = wait_disarm(ctx, 75)
-        ev["disarm_after_idle_s"] = round(dt, 1) if dt is not None else None
-        ctx.log("time-to-disarm after Idle: %s s", ev["disarm_after_idle_s"])
+    # The rapid after the M5, with the window open and FIRE clear: every
+    # sample from the dark point until the window closes reads no emission
+    # and the HV current at its idle reading. The head's reports place the
+    # rapid inside that stretch: out to +20 mm, then back at the start.
+    stretch = [dark] + tail
+    x0 = dark["x"]
+    i_out = next((i for i, s in enumerate(stretch) if s.get("x") is not None and s["x"] - x0 >= 19.5), None)
+    i_back = (next((i for i in range(i_out + 1, len(stretch))
+                    if stretch[i].get("x") is not None and abs(stretch[i]["x"] - x0) < 0.05), None)
+              if i_out is not None else None)
+    closed = stretch[-1] if not stretch[-1]["armed"] else None
+    relit = [s for s in stretch if s["emission"]]
+    hv_dark = max((s["hv"] for s in stretch if s["hv"] is not None), default=0)
+    dt = (closed["t"] - stretch[i_back]["t"]) if (closed and i_back is not None) else None
+    ev["rapid"] = {"samples": len(stretch), "span_s": round(stretch[-1]["t"] - dark["t"], 2),
+                   "x_start": x0, "x_max": max((s["x"] for s in stretch if s.get("x") is not None), default=None),
+                   "out_at_s": round(stretch[i_out]["t"] - dark["t"], 2) if i_out is not None else None,
+                   "back_at_s": round(stretch[i_back]["t"] - dark["t"], 2) if i_back is not None else None,
+                   "relit": [(round(s["t"] - dark["t"], 2), s["emission"]) for s in relit][:8],
+                   "hv_max": hv_dark, "locked_at_dark": dark["locked"],
+                   "locked_at_out": stretch[i_out]["locked"] if i_out is not None else None}
+    ev["disarm_after_idle_s"] = round(dt, 1) if dt is not None else None
+    ctx.log("the rapid after the M5: %d samples over %.1f s from the dark point, out at +%s s, back at +%s s, "
+            "%d with emission, HV max %s; the window closed %s s after the head was back", len(stretch),
+            ev["rapid"]["span_s"], ev["rapid"]["out_at_s"], ev["rapid"]["back_at_s"], len(relit), hv_dark,
+            ev["disarm_after_idle_s"])
     ctx.check(armed_seen, "the armed window was never observed (arm refused, or no button press)")
-    ctx.check(peak > 0, "no emission witnessed (emission_samples stayed 0)")
+    ctx.check(peak > 0, "no emission witnessed on the square (emission_samples stayed 0)")
     first_idle_fire = ev["idle_airflow_fire"][0] if idle_fire else (None, None, None)
     ctx.check(not idle_fire,
               "the laser fired while the cooling engine had no run session, so the fans were at "
@@ -550,8 +627,18 @@ def emission_witness(ctx):
               "emission sample, floor %.0f)", ev["exhaust_at_first_fire"], floor)
     ctx.check(hv and max(hv) > min(hv), "HV current did not rise during the burn (%s..%s)",
               ev["hv_min"], ev["hv_max"])
+    ctx.check(i_out is not None and i_back is not None,
+              "the rapid did not run inside the dark stretch: out at %s, back at %s (X from %s, max %s)",
+              ev["rapid"]["out_at_s"], ev["rapid"]["back_at_s"], x0, ev["rapid"]["x_max"])
+    ctx.check(stretch[i_out]["locked"] is False, "the laser latch was locked with the head at +20 mm "
+              "(laser_locked %s): the rapid ran unarmed", stretch[i_out]["locked"])
+    ctx.check(not relit, "the laser emitted after the M5: %d samples, first at +%s s (emission_samples %s) "
+              "- a rapid after M5 fired", len(relit), relit[0]["t"] - dark["t"] if relit else None,
+              relit[0]["emission"] if relit else None)
+    ctx.check(hv_dark <= HV_DARK_MAX, "HV current %s after the M5 (idle reads ~0): the discharge ran "
+              "through the rapid", hv_dark)
     ctx.check(dt is not None and dt < 10.0,
-              "the M2 job did not disarm promptly at Idle (%s s; the idle grace is ~60 s)",
+              "the M2 job did not disarm promptly (%s s after the head was back; the idle grace is ~60 s)",
               ev["disarm_after_idle_s"])
     ctx.check(gap["button_latch_unlocked_samples"] and gap["button_latch_unlocked_max"] == 0,
               "the hardware button latch read SET while the laser latch was unlocked (max %s over %d "
@@ -563,93 +650,14 @@ def emission_witness(ctx):
     judge_beam(ctx, beam)
     check_button_dark(ctx, ev)
     ctx.confirm("Did the laser mark a 20 mm square outline on the scrap, all four sides?")
-    ctx.log("PASS: emission peak %s -> 0, HV %s..%s, beam +%s, disarmed %.1f s after Idle, button "
-            "dark, mark confirmed", peak, ev["hv_min"], ev["hv_max"], beam["delta"], dt)
+    ctx.log("PASS: emission peak %s -> 0, HV %s..%s, beam +%s; the rapid after the M5 dark (HV max %s); "
+            "disarmed %.1f s after the head was back, button dark, mark confirmed", peak, ev["hv_min"],
+            ev["hv_max"], beam["delta"], hv_dark, dt)
 
 
 HV_DARK_MAX = 20            # hv_current_raw reads 0 with the tube off; hundreds under fire
 
 
-@test("laser.m5-rapid-dark", title="The rapids after an M5 ship dark",
-      subsystem="laser", kind="live", mode="grbl", est_min=3,
-      covers=_LASER_COVERS,
-      requires=["laser.emission-witness"], actions=["button"],
-      steps=["Scrap under the head with 20 mm of free +X travel; lid closed; exhaust on.",
-             "Press the physical button when it lights white (the arm)."],
-      description="A 20 mm line at constant power (M3 S400/F600), then M5, a dwell, a rapid back "
-                  "over the line, a dwell, a rapid forward, a dwell, and the program end. M5 "
-                  "executes with the planner drained and the kernel run over, and the core "
-                  "issues no per-segment laser update for moves made with the spindle off, so "
-                  "only the stream's own wanted state decides whether those rapids fire; a stale "
-                  "true there lights them at the last level, full duty under the density model. "
-                  "The kernel's LASER_ON sample count must go to 0 after the M5 and stay 0 "
-                  "through both rapids, and the HV current must stay at its idle reading.")
-def m5_rapid_dark(ctx):
-    ev = ctx.evidence
-    with ctx.grbl() as g, LiveJob(ctx, g):
-        prepare(ctx, g)
-        base = sample(ctx)
-        ctx.check(base, "forgectrl /status or /cool/status unavailable")
-        ctx.check(not base["emission"], "emission_samples nonzero before the job (%s)", base["emission"])
-        ctx.ready(ARM_CUE % "20 mm +X")
-        # +20 out on the cut, then the two rapids the test is about, then
-        # a third that puts the head back where the job found it: the
-        # first two net to +20 and a job that walks the head 20 mm and
-        # leaves it there is dirt the hand-back has to jog out. The
-        # return is inside the sampling window and after the M5, so it is
-        # one more rapid that must be dark, which is what the test asks
-        # of the other two.
-        job = ["G91", "G21", "M3", "S400",
-               "G1 X20 F600",
-               "M5", "G4 P2.5",
-               "G0 X-20", "G4 P2.5",
-               "G0 X20", "G4 P2.5",
-               "G0 X-20", "G4 P0.5",
-               "G90", "M2"]
-        ctx.arm_press()
-        try:
-            samples = run_and_sample(ctx, g, job)
-            # The controller reports Idle inside a G4 dwell, so the sampler
-            # above can return before the rapids; the window closing at M2
-            # is the end of the job. Keep sampling until then.
-            t0 = time.time()
-            while time.time() - t0 < 30:
-                ctx.checkpoint()
-                smp = sample(ctx)
-                if smp:
-                    samples.append(smp)
-                    if not smp["armed"]:
-                        break
-                time.sleep(0.125)
-        finally:
-            ctx.clear_notice()
-    emis = [(s["t"], s["emission"], s["hv"]) for s in samples if s["emission"] is not None]
-    peak = max((e for _t, e, _hv in emis), default=0)
-    ctx.check(peak > 0, "no emission witnessed on the G1 (emission_samples stayed 0)")
-    # The first zero after the peak is the dark window the M5 and its dwell
-    # produce; everything after it is the two rapids and their dwells.
-    i_peak = max(range(len(emis)), key=lambda i: emis[i][1])
-    after = [x for x in emis[i_peak:] if x[1] == 0]
-    ctx.check(after, "emission_samples never returned to 0 after the M5")
-    t_dark = after[0][0]
-    tail = [x for x in emis if x[0] >= t_dark]
-    relit = [x for x in tail if x[1]]
-    hv_tail = max((hv for _t, _e, hv in tail if hv is not None), default=0)
-    ev.update({"samples": len(samples), "emission_peak": peak, "tail_samples": len(tail),
-               "relit_samples": len(relit), "hv_tail_max": hv_tail,
-               "relit_first": relit[0] if relit else None})
-    ctx.log("emission peak %s; dark from +%.1f s; %d samples after it spanning %.1f s, %d with "
-            "emission, HV max after dark %s", peak, t_dark - emis[0][0], len(tail),
-            tail[-1][0] - t_dark, len(relit), hv_tail)
-    ctx.check(tail[-1][0] - t_dark >= 5.0, "sampling ended %.1f s after the dark point, before "
-              "both rapids and their dwells (~5.2 s) had run", tail[-1][0] - t_dark)
-    ctx.check(not relit, "the laser emitted after the M5: %d samples, first at +%.1f s "
-              "(emission_samples %s) - a rapid after M5 fired at the last level",
-              len(relit), (relit[0][0] - t_dark) if relit else 0, relit[0][1] if relit else None)
-    ctx.check(hv_tail <= HV_DARK_MAX, "HV current %s after the M5 (idle reads ~0): the discharge "
-              "ran through a rapid", hv_tail)
-    ctx.log("PASS: emission peak %s on the G1, 0 through both rapids, HV %s after the M5",
-            peak, hv_tail)
 
 
 @test("laser.armed-kill", title="Armed kill mid-fire: the expected stop, then a SIGKILL",
