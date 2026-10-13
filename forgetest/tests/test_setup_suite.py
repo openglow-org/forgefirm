@@ -76,13 +76,7 @@ class RegistrationTests(unittest.TestCase):
                                                 "laser.focus": "the tray was replaced",
                                                 "airflow": "not run yet"})
 
-    def test_the_gate_parts_and_the_optional_steps_are_never_recommended(self):
-        self.assertFalse(set(setup.RECOMMENDED_STEPS) & set(setup.NEVER_RECOMMENDED))
-        self.assertFalse(set(setup.RECOMMENDED_STEPS) & set(setup.REQUIRED_STEPS))
-        for wid in ("advisories", "account", "airflow.intakes", "laser.floor", "motion.envelope"):
-            self.assertIn(wid, setup.NEVER_RECOMMENDED)
-        for wid in ("lens.travel", "laser.focus", "airflow", "switches"):
-            self.assertIn(wid, setup.RECOMMENDED_STEPS)
+    def test_the_form_wizards_and_the_required_steps(self):
         self.assertEqual(setup.FORM_WIZARDS, ("advisories", "account", "preferences", "machine", "cloud"))
         # in the order the gate's reason names them
         self.assertEqual(setup.REQUIRED_FORM_STEPS, ("preferences", "machine", "cloud"))

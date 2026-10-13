@@ -52,15 +52,6 @@ FORM_WIZARDS = ("advisories", "account", "preferences", "machine", "cloud")
 # the calibration among them, so the form steps are what they walk.
 REQUIRED_FORM_STEPS = ("preferences", "machine", "cloud")
 REQUIRED_STEPS = REQUIRED_FORM_STEPS + ("cooling.flow",)
-# What the image's step table recommends on a record with the required
-# steps done and nothing else (setup.c): every step after them. The
-# cloud header joins on a machine with cloud mode on. The gate's own
-# parts (the advisories, the account, the required steps, the intake fan
-# count) are never recommended as not run yet, and the laser floor and
-# the bed size are offered, never recommended.
-RECOMMENDED_STEPS = ("switches", "sensors", "airflow", "cooling.aa-offset", "motion",
-                     "cameras", "lens.travel", "laser.focus")
-NEVER_RECOMMENDED = ("advisories", "account", "airflow.intakes", "laser.floor", "motion.envelope")
 # The setting that counts the intake fans: the gate holds without it.
 INTAKE_KEY = "cool_intake_fans"
 ADVISORY_DOCS = ("safety-and-risk", "licenses", "privacy", "cloud-service")
@@ -393,10 +384,9 @@ _GATE_COVERS = [("forgectrl", "src/setup.*"), ("forgectrl", "src/super.c"),
                   "the account and no step done, the same with the reason 'setup required: "
                   "preferences, machine, cloud, cooling.flow'. With those four done as well and "
                   "no flag, the "
-                  "gate is open with no reason: the supervisor spawns the controller, the Grbl "
-                  "port accepts, and GET /wiz recommends every other step as not run yet (never "
-                  "the advisories, the account, the four required steps, or the intake fan "
-                  "count; not the optional laser floor or bed size). On that record the intake "
+                  "gate is open with no reason: the supervisor spawns the controller and the Grbl "
+                  "port accepts. (Which steps the table requires, misses and recommends is "
+                  "forgectrl's setup_test, on the image's own table.) On that record the intake "
                   "fan count is cleared: the gate closes live with the reason naming the intake "
                   "fans, GET /wiz reports them not counted, and the supervisor stops the "
                   "controller; the count written back as found opens the gate again and the "
@@ -463,11 +453,6 @@ def gate_blocks_controllers(ctx):
         with ctx.takeover():
             write_file(record_path(), encoded(record_without_wizards(record)))
         gated("required steps", "setup required: " + ", ".join(REQUIRED_STEPS))
-        # The page opens the steps the gate waits for from this list.
-        w = wiz(fc)
-        ev["missing_none_done"] = w.get("missing")
-        ctx.check(w.get("missing") == list(REQUIRED_STEPS),
-                  "GET /wiz does not name the required steps as missing: %s", w.get("missing"))
         with ctx.takeover():
             write_file(record_path(), encoded(record_with_required_steps(record)))
 
@@ -477,17 +462,7 @@ def gate_blocks_controllers(ctx):
         ev["open_wiz"] = wiz_summary(w)
         ctx.check(w.get("gate") == "open" and not w.get("why") and w.get("fans_counted") is True,
                   "the consent, the account, and the required steps do not open the gate: %s", wiz_summary(w))
-        ctx.check(w.get("missing") == [], "GET /wiz names steps as missing with the required ones done: %s",
-                  w.get("missing"))
         running("with the required steps done")
-        recm = recommended(w)
-        missing = [s for s in RECOMMENDED_STEPS if s not in recm]
-        ctx.check(not missing, "GET /wiz does not recommend %s: %s", missing, recm)
-        stray = [s for s in recm if s in NEVER_RECOMMENDED + REQUIRED_STEPS]
-        ctx.check(not stray, "GET /wiz recommends %s", stray)
-        other = {k: v for k, v in recm.items() if v != "not run yet"}
-        ctx.check(not other, "with nothing else done, steps are recommended for another reason: %s", other)
-        ctx.log("recommended, each not run yet: %s", sorted(recm))
 
         # the intake fan count holds the gate as the account does
         with Restore(ctx, [INTAKE_KEY]) as count:
