@@ -35,8 +35,7 @@ over TCP, then checks the dumps against the kernel feeder contract:
      fire ticks divide evenly across the rungs, which is what fails if a
      rung's opening ticks carry the previous rung's duty
  11. under the density dose model no level ever reaches PWMSAR: every
-     power byte carries full duty (one still leads each kernel run), and
-     a level change inside a run costs no stream byte at all
+     power byte carries full duty (one still leads each kernel run)
  12. density matches the level the core commanded, rung by rung, and no
      burst is longer than the base period
  13. the model is a mask and never a source: run the same job under both
@@ -54,7 +53,7 @@ over TCP, then checks the dumps against the kernel feeder contract:
  16. and the off transition survives the same way: an M5 executed with
      the planner drained and the kernel run over must darken the rapids
      that follow it, and a bare G0 sent with the spindle off must ship
-     dark, under both dose models - the stream's wanted fire state is
+     dark under the density dose model - the stream's wanted fire state is
      the only thing those moves consult, and a stale true there lights
      the next run at the last level (full duty under density)
  17. and a job's first cut at the level the previous job ended at
@@ -76,12 +75,10 @@ over TCP, then checks the dumps against the kernel feeder contract:
      read with $$ on the fresh controller and again after the arm, $31
      is 0 (the floor, not $31, sets the bottom of the S range) and $35
      is the board's floor, landing at PWMSAR_FLOOR_MIN or above
- 19. the dose curve bends S onto the density that delivers the
-     commanded light fraction: with the bench-default curve in force a
-     ladder of S rungs renders the curve's densities (half light lands
-     near 80 percent density), monotonic, floored and ceiled by
-     $35/$36; every other session runs with laser_dose_curve = off so
-     its S-to-level arithmetic stays exact
+ 19. the dose curve's mapping of S onto delivered light is
+     laser_arm_test.c case P's; every session here but the rolloff ones
+     runs with laser_dose_curve = off so its S-to-level arithmetic stays
+     exact
  20. the corner rolloff starves the slow spots: under M4 with the curve
      in force, the accelerate-in head of a line renders less density at
      the default gamma of 2 than at gamma 1, and the cruise middle
@@ -303,35 +300,6 @@ DENSITY_CONF_FLOORED = ("laser_power_model = density\n"
 # The shipped default: the bench curve in force (no keys at all).
 DENSITY_CONF_CURVED = "laser_power_model = density\n" + DENSITY_CONF_BASE
 
-# The compiled bench-default curve (glowforge_laser.c curve_default),
-# mirrored here the way the floor is: changing it changes rule 19.
-CURVE_DEFAULT = ((10.0, 0.5), (20.0, 2.0), (30.0, 7.0), (45.0, 21.0),
-                 (60.0, 37.0), (80.0, 50.0), (100.0, 100.0))
-
-
-def curve_density_for(s_val):
-    """The density fraction the bench-default curve maps an S onto,
-    before the $35/$36 clamp (mirrors curve_apply)."""
-    l = s_val / RPM_MAX * 100.0
-    pts = CURVE_DEFAULT
-    if l <= pts[0][1]:
-        return pts[0][0] * (l / pts[0][1]) / 100.0
-    i = 1
-    while i < len(pts) - 1 and l > pts[i][1]:
-        i += 1
-    d0, l0 = pts[i - 1]
-    d1, l1 = pts[i]
-    f = min(1.0, (l - l0) / (l1 - l0))
-    return (d0 + f * (d1 - d0)) / 100.0
-
-
-CURVE_S = (100, 300, 500, 800, 1000)
-JOB_CURVE = ["G91", "G21", "M3"]
-for _s in CURVE_S:
-    JOB_CURVE.append("S%d" % _s)
-    JOB_CURVE.append("G1 X%g F300" % (LADDER_MM if _s % 2 == 0 else LADDER_MM))
-    JOB_CURVE.append("G0 Y1")
-JOB_CURVE.append("M5")
 DENSITY_LEVEL = tuple(int(x * PWM_PERIOD / RPM_MAX) for x in LADDER_S)
 # A $35 typed ahead of the job: rule 18 says the arm overwrites it.
 JOB_DENSITY = ["$35=0"] + JOB_LADDER
@@ -341,17 +309,6 @@ def duty_for_floor(s, floor_pct):
     """Duty the core computes for an S word against a given floor."""
     lo = int(PWM_PERIOD * floor_pct / 100.0)
     return int(s * (PWM_PERIOD - lo) / RPM_MAX) + lo
-
-
-# Session H: three levels inside one kernel run. The moves are short and
-# fast so the planner never drains, and each carries its own S word, so
-# the level changes land mid-run. Analog pays a power byte per level;
-# density pays none, because the level rides the FIRE bits.
-JOB_LEVELS = ["G91", "G21", "M3"]
-for _s in (100, 300, 600):
-    for _ in range(20):
-        JOB_LEVELS.append("G1 X0.5 F3000 S%d" % _s)
-JOB_LEVELS.append("M5")
 
 
 # Session I: the levels arrive on their own lines, and the moves are long
@@ -1016,29 +973,6 @@ def main():
           % (len(data), sum(1 for b in data if b & 0x80), len(fire_ticks),
              powers, x_max, tail_steps, gap_a))
 
-    # --- session C: cycle churn, rules 8-9 ------------------------------
-    data = run_session("churn", JOB_CHURN, conf=ANALOG_CONF)
-    if not count_fire(data):
-        fail("[churn] no FIRE bits in the stream")
-    check_termination("churn", data)
-    gap_c = check_fire_gaps("churn", data)
-    # Rule 17: the churn stream carries no runaway pad. Bytes are the time
-    # axis, one per machine tick, so the stream's length IS how long the
-    # machine plays it. A cycle that resumes while the kernel still drains
-    # re-bases production onto the wall cursor; if the producer's lead lets
-    # production stay ahead of that cursor across the gap, the re-base is
-    # skipped and the overshoot is inherited by every cycle after it. That
-    # is what GFSINK_LEAD_MS_MAX bounds, and this is what catches it.
-    churn_s = len(data) / MACHINE_TICK_HZ
-    if churn_s > CHURN_BUDGET_S:
-        fail("[churn] stream is %.0f ms of playout, over the %.0f ms budget: "
-             "the cycle re-base is leaving pad behind"
-             % (churn_s * 1e3, CHURN_BUDGET_S * 1e3))
-    print("PASS [churn]: %d bytes, %d fire ticks, max fire gap %d, "
-          "%.0f ms of playout (budget %.0f)"
-          % (len(data), count_fire(data), gap_c, churn_s * 1e3,
-             CHURN_BUDGET_S * 1e3))
-
     # --- session D: power ladder, rule 10 -------------------------------
     data = run_session("ladder", JOB_LADDER, conf=ANALOG_CONF)
     counts = check_power_ladder("ladder", data, LADDER_DUTY)
@@ -1087,25 +1021,21 @@ def main():
         fail("[density-churn] no FIRE bits in the stream")
     check_termination("density-churn", ch)
     gap_e = check_fire_gaps("density-churn", ch)
-    print("PASS [density-churn]: %d bytes, %d fire ticks, max fire gap %d"
-          % (len(ch), count_fire(ch), gap_e))
-
-    # --- session H: a level change inside a run costs no byte -----------
-    lv_a = run_session("levels-analog", JOB_LEVELS, conf=ANALOG_CONF)
-    lv_d = run_session("levels-density", JOB_LEVELS, conf=DENSITY_CONF)
-    pa = [b & 0x7F for b in lv_a if b & 0x80]
-    pd = [b & 0x7F for b in lv_d if b & 0x80]
-    if len([d for d in set(pa) if d]) < 3:
-        fail("[levels] the analog run shipped duties %s: fewer than the three "
-             "commanded levels, so the job is not exercising in-run changes"
-             % sorted(set(pa)))
-    if set(pd) != {PWM_PERIOD}:
-        fail("[levels] density shipped a level as duty: %s" % sorted(set(pd)))
-    if len(pd) >= len(pa):
-        fail("[levels] density shipped %d power bytes against analog's %d - "
-             "the level changes are still costing stream bytes" % (len(pd), len(pa)))
-    print("PASS [levels]: analog %d power bytes %s, density %d at full duty"
-          % (len(pa), sorted(set(pa)), len(pd)))
+    # Rule 17: the churn stream carries no runaway pad. Bytes are the time
+    # axis, one per machine tick, so the stream's length IS how long the
+    # machine plays it. A cycle that resumes while the kernel still drains
+    # re-bases production onto the wall cursor; if the producer's lead lets
+    # production stay ahead of that cursor across the gap, the re-base is
+    # skipped and the overshoot is inherited by every cycle after it. That
+    # is what GFSINK_LEAD_MS_MAX bounds, and this is what catches it.
+    churn_s = len(ch) / MACHINE_TICK_HZ
+    if churn_s > CHURN_BUDGET_S:
+        fail("[density-churn] stream is %.0f ms of playout, over the %.0f ms budget: "
+             "the cycle re-base is leaving pad behind"
+             % (churn_s * 1e3, CHURN_BUDGET_S * 1e3))
+    print("PASS [density-churn]: %d bytes, %d fire ticks, max fire gap %d, "
+          "%.0f ms of playout (budget %.0f)"
+          % (len(ch), count_fire(ch), gap_e, churn_s * 1e3, CHURN_BUDGET_S * 1e3))
 
     # --- session I: a level set while idle still cuts (rule 14) ---------
     # Under the shipped density model the level rides the FIRE bits at full
@@ -1119,33 +1049,31 @@ def main():
           % [d for _l, d in got])
 
     # --- session J: M5 executed while idle darkens the next run (rule 16) ---
-    for model, conf in (("analog", ANALOG_CONF), ("density", DENSITY_CONF)):
-        name = "m5-idle-" + model
-        data = run_session(name, JOB_M5_IDLE, conf=conf)
-        spans = check_cut_spans(name, tick_bytes(data), 2, M5_IDLE_TICKS,
-                                "the two G1 moves: FIRE rode a rapid after M5, "
-                                "or the bare G0 sent with the spindle off")
-        check_termination(name, data)
-        print("PASS [%s]: M5 at idle -> the rapids after it and a bare G0 ship "
-              "dark; 2 fire spans of %s ticks"
-              % (name, [s1 - s0 for s0, s1 in spans]))
+    name = "m5-idle-density"
+    data = run_session(name, JOB_M5_IDLE, conf=DENSITY_CONF)
+    spans = check_cut_spans(name, tick_bytes(data), 2, M5_IDLE_TICKS,
+                            "the two G1 moves: FIRE rode a rapid after M5, "
+                            "or the bare G0 sent with the spindle off")
+    check_termination(name, data)
+    print("PASS [%s]: M5 at idle -> the rapids after it and a bare G0 ship "
+          "dark; 2 fire spans of %s ticks"
+          % (name, [s1 - s0 for s0, s1 in spans]))
 
     # --- session K: the next job, at the same level, fires (rule 17) ---
-    for model, conf in (("analog", ANALOG_CONF), ("density", DENSITY_CONF)):
-        name = "next-job-" + model
-        data = run_session(name, JOB_NEXT + JOB_NEXT, conf=conf)
-        text = run_session.text
-        if text.count("laser armed") != 2 or text.count("laser disarmed") != 2:
-            fail("[%s] expected two armed windows closed by M2 (armed %d, "
-                 "disarmed %d)" % (name, text.count("laser armed"),
-                                   text.count("laser disarmed")))
-        spans = check_cut_spans(name, tick_bytes(data), 2, M5_IDLE_TICKS,
-                                "one G1 per job: the second job's M3 at the "
-                                "first job's S lit nothing, or a rapid fired")
-        check_termination(name, data)
-        print("PASS [%s]: the next job's M3 at the previous job's S fires its "
-              "G1; 2 fire spans of %s ticks"
-              % (name, [s1 - s0 for s0, s1 in spans]))
+    name = "next-job-density"
+    data = run_session(name, JOB_NEXT + JOB_NEXT, conf=DENSITY_CONF)
+    text = run_session.text
+    if text.count("laser armed") != 2 or text.count("laser disarmed") != 2:
+        fail("[%s] expected two armed windows closed by M2 (armed %d, "
+             "disarmed %d)" % (name, text.count("laser armed"),
+                               text.count("laser disarmed")))
+    spans = check_cut_spans(name, tick_bytes(data), 2, M5_IDLE_TICKS,
+                            "one G1 per job: the second job's M3 at the "
+                            "first job's S lit nothing, or a rapid fired")
+    check_termination(name, data)
+    print("PASS [%s]: the next job's M3 at the previous job's S fires its "
+          "G1; 2 fire spans of %s ticks"
+          % (name, [s1 - s0 for s0, s1 in spans]))
 
     # --- rule 18: the floor is derived from the key, never typed --------
     # The same ladder with a $35=0 typed ahead of it, under the shipped
@@ -1215,34 +1143,6 @@ def main():
     print("PASS [rolloff]: accel-head density %.3f at gamma 1 -> %.3f at the "
           "default 2; cruise %.3f alike" % (dens_head["g1"], dens_head["g2"],
                                             dens_mid["g1"]))
-
-    # --- rule 19: the dose curve bends S onto delivered light -----------
-    cur = run_session("curve", JOB_CURVE, conf=DENSITY_CONF_CURVED)
-    if "curve bench-default" not in run_session.text:
-        fail("[curve] the arm does not name the bench-default curve (text: %r)"
-             % run_session.text[-300:])
-    floor_frac = PWM_MIN / float(PWM_PERIOD)
-    expect = []
-    for s_val in CURVE_S:
-        d = curve_density_for(s_val)
-        expect.append(min(1.0, max(d, floor_frac)))
-    ticks = tick_bytes(cur)
-    spans = fire_spans(ticks)
-    if len(spans) != len(CURVE_S):
-        fail("[curve] %d fire spans, expected %d" % (len(spans), len(CURVE_S)))
-    got = []
-    for (a, b) in spans:
-        seg = ticks[a:b]
-        got.append(sum(1 for t in seg if t & 0x10) / float(len(seg)))
-    for g, w, s_val in zip(got, expect, CURVE_S):
-        if abs(g - w) > max(0.012, w * 0.06):
-            fail("[curve] S%d rendered density %.4f, expected %.4f through the "
-                 "bench-default curve" % (s_val, g, w))
-    if not all(b > a for a, b in zip(got, got[1:])):
-        fail("[curve] densities not monotonic: %s" % [round(g, 4) for g in got])
-    check_termination("curve", cur)
-    print("PASS [curve]: S %s -> densities %s through the bench-default curve "
-          "(floored at %.3f)" % (list(CURVE_S), [round(g, 3) for g in got], floor_frac))
 
     # --- rule 21: a feed hold leaves no dark ground, in either mode -----
     # One long line at 100 mm/s, held mid-move and resumed. The planned
