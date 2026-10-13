@@ -63,39 +63,6 @@ def wait_state(ctx, g, prefix, timeout):
     return None
 
 
-def wait_state_text(ctx, g, prefix, timeout):
-    """wait_state, keeping everything the controller said while polling.
-    The driver reports a press with a [MSG:] line the moment it acts on it -
-    inside the poll window - so a test that wants both the state and the
-    message has to collect them together."""
-    end = time.time() + timeout
-    text = ""
-    while time.time() < end:
-        ctx.checkpoint()
-        st = g.status_report()
-        text += g.drain()
-        if st["state"].startswith(prefix):
-            return st, text
-        time.sleep(0.1)
-    return None, text + g.drain()
-
-
-def wait_left_state(ctx, g, prefix, timeout):
-    """The first report whose state is no longer `prefix`, with the text.
-    Leaving a state is what proves a command was acted on; catching the
-    state it moves INTO is a race whenever the remaining work is short."""
-    end = time.time() + timeout
-    text = ""
-    while time.time() < end:
-        ctx.checkpoint()
-        st = g.status_report()
-        text += g.drain()
-        if not st["state"].startswith(prefix):
-            return st, text
-        time.sleep(0.1)
-    return None, text + g.drain()
-
-
 def wait_idle(ctx, g, timeout=30.0, poll=0.05, grace=0.3):
     """Poll until Idle; returns (peak_feed_mm_min, states_seen, final_report).
     An Idle report inside the first `grace` seconds counts only once a

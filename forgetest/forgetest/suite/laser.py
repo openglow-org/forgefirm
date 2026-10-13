@@ -28,8 +28,7 @@ import time
 from ..catalog import test
 from .. import hw
 from ..runner import Failed
-from .motion import (kernel_xy_mm, kernel_start, check_kernel_returned, wait_state,
-                     wait_state_text, wait_left_state, drain_text, Watch, machine_idle,
+from .motion import (kernel_xy_mm, kernel_start, check_kernel_returned, Watch, machine_idle,
                      _job, _job_post, _job_wait, _lease_holder, _port_state, _words)
 
 _LASER_COVERS = [("grblhal-glowforge", "src/**"), ("kernel-module-glowforge", "**"),
