@@ -293,6 +293,16 @@ class CoverageReportTests(unittest.TestCase):
         self.assertTrue(self._runs(step % "bash tests/fflog_e2e.sh", "tests/fflog_e2e.sh"))
         self.assertTrue(self._runs("steps:\n  - run: |\n      sudo -E FORGEEXT=build/forgeext \\\n"
                                    "        python3 -B tests/run_test.py\n", "tests/run_test.py"))
+        # python -m unittest given the test's file or its module (the third review: forgectrl's CI
+        # runs its mock test as a file), and not a module beside it or a -k pattern
+        self.assertTrue(self._runs(step % "python3 -B -m unittest -v tests/test_devserver_mock.py",
+                                   "tests/test_devserver_mock.py"))
+        self.assertTrue(self._runs(step % "python -m unittest tests.test_feeder", "tests/test_feeder.py"))
+        self.assertTrue(self._runs(step % "python -m unittest tests.test_feeder.FeederTests.test_one",
+                                   "tests/test_feeder.py"))
+        self.assertFalse(self._runs(step % "python -m unittest tests.test_lens", "tests/test_feeder.py"))
+        self.assertFalse(self._runs(step % "python -m unittest -k test_feeder tests.test_lens",
+                                    "tests/test_feeder.py"))
 
     def test_the_lint_says_when_it_could_not_read_a_workflow(self):
         import contextlib

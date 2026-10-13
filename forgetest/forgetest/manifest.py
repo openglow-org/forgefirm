@@ -430,6 +430,30 @@ def _discovers(args, full, at):
     return posixpath.dirname(full) == at(start) and fnmatch.fnmatchcase(posixpath.basename(full), pattern)
 
 
+def _unittest_names(args, full, at):
+    """Whether `python -m unittest ARGS` (not discover) runs the test: an
+    argument is its file (tests/test_x.py), or a dotted name whose module
+    is its file (tests.test_x, tests.test_x.Case.test_one)."""
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a in ("-k",):
+            skip = True
+            continue
+        if a.startswith("-") or "$" in a:
+            continue
+        if a.endswith(".py"):
+            if at(a) == full:
+                return True
+            continue
+        parts = a.split(".")
+        if any(at("/".join(parts[:k]) + ".py") == full for k in range(len(parts), 0, -1)):
+            return True
+    return False
+
+
 def _pytest_runs(args, full, at):
     """Whether pytest ARGS collects the test: named, or its directory given
     and its file name one pytest collects (test_*.py, *_test.py)."""
@@ -451,10 +475,12 @@ def workflow_runs(steps, test_path):
     resolved against the step's working-directory: the command itself
     (a script run directly, or a C test's built binary, <dir>/<stem>);
     the script an interpreter runs (python, bash, sh), a glob matching the
-    whole path; a for loop's list over the test; unittest discover from
-    the test's own directory with a pattern its name matches; pytest on
-    the test or its own directory. An argument to anything else (echo, a
-    build, an install) does not run the test."""
+    whole path; a for loop's list over the test; python -m unittest given
+    the test's file or a dotted name whose module is that file
+    (tests.test_x, tests.test_x.Case.test_one); unittest discover from the
+    test's own directory with a pattern its name matches; pytest on the
+    test or its own directory. An argument to anything else (echo, a build,
+    an install) does not run the test."""
     full = posixpath.normpath(test_path)
     stem, ext = posixpath.splitext(posixpath.basename(full))
     compiled = ext in (".c", ".cc", ".cpp")
@@ -478,8 +504,11 @@ def workflow_runs(steps, test_path):
                 if "-m" in args:
                     i = args.index("-m")
                     mod, rest = (args[i + 1], args[i + 2:]) if i + 1 < len(args) else ("", [])
-                    if (mod == "unittest" and rest[:1] == ["discover"] and _discovers(rest[1:], full, at)) or \
-                       (mod == "pytest" and _pytest_runs(rest, full, at)):
+                    if mod == "unittest" and rest[:1] == ["discover"]:
+                        if _discovers(rest[1:], full, at):
+                            return True
+                    elif (mod == "unittest" and _unittest_names(rest, full, at)) or \
+                         (mod == "pytest" and _pytest_runs(rest, full, at)):
                         return True
                 else:
                     script = next((a for a in args if not a.startswith("-")), None)
