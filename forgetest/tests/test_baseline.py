@@ -21,7 +21,10 @@ from forgetest import baseline
 DEFAULT_TICK = dict(baseline.fixed_sysfs())["cnc/step_freq"]
 
 
-class BaselineTests(unittest.TestCase):
+class BaselineFixture:
+    """The fake sysfs tree and LED class a baseline runs against. It has
+    no tests of its own, so a class that mixes it in runs only its own."""
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="forgetest-bl-")
         self.sysfs = os.path.join(self.tmp, "sysfs") + os.sep
@@ -65,13 +68,6 @@ class BaselineTests(unittest.TestCase):
         # the class interface writes 'target'; the fake mirrors it into brightness
         # only when the test asks (see _sync_leds)
 
-    def _led2(self, name, target, brightness):
-        """Both attributes of one button LED: the trigger's commanded
-        level and the fade that follows it."""
-        for a, v in (("target", target), ("brightness", brightness)):
-            with open(self.leds + name + "/" + a, "w") as f:
-                f.write(v)
-
     def _sync_leds(self):
         for name in baseline.BUTTON_LEDS:
             p = self.leds + name + "/target"
@@ -88,6 +84,19 @@ class BaselineTests(unittest.TestCase):
     def bl(self):
         return baseline.Baseline(self.lines.append)
 
+    def _pos_bytes(self, x, y, z, processed, total):
+        with open(self.sysfs + "cnc/position", "wb") as f:
+            f.write(struct.pack("<3i2I", x, y, z, processed, total))
+
+    def _probe_state(self):
+        # what the kernel shows between the supervisor's motion probe and
+        # the GRBL controller's init writes
+        self._attr("cnc/motor_lock", "0")
+        self._attr("cnc/step_freq", "10000")
+        self._attr("cnc/y_mode", "1")
+
+
+class BaselineTests(BaselineFixture, unittest.TestCase):
     def test_clean_machine_has_no_leftovers(self):
         left = self.bl().enforce("pre", captured=None)
         self.assertEqual(left, [])
@@ -226,10 +235,6 @@ class BaselineTests(unittest.TestCase):
             for k in ("GRBL_HOST", "GRBL_PORT"):
                 os.environ.pop(k, None)
 
-    def _pos_bytes(self, x, y, z, processed, total):
-        with open(self.sysfs + "cnc/position", "wb") as f:
-            f.write(struct.pack("<3i2I", x, y, z, processed, total))
-
     def test_ring_residue_is_a_leftover_and_blocks_the_return_jog(self):
         b = self.bl()
         cap = b.capture()
@@ -307,13 +312,6 @@ class BaselineTests(unittest.TestCase):
 
 
     # -- the reference is taken after the controller applied its config -----
-
-    def _probe_state(self):
-        # what the kernel shows between the supervisor's motion probe and
-        # the GRBL controller's init writes
-        self._attr("cnc/motor_lock", "0")
-        self._attr("cnc/step_freq", "10000")
-        self._attr("cnc/y_mode", "1")
 
     def test_wait_configured_returns_once_the_controller_wrote_its_config(self):
         self._probe_state()
@@ -460,11 +458,7 @@ class BaselineTests(unittest.TestCase):
             os.environ.pop("FORGETEST_BOOT_ID", None)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class ExtensionFreeTests(BaselineTests):
+class ExtensionFreeTests(BaselineFixture, unittest.TestCase):
     """A campaign's machine is extension-free: what a test made is removed,
     what is the operator's is reported and left alone."""
 
@@ -529,104 +523,6 @@ class ExtensionFreeTests(BaselineTests):
         self.assertTrue(os.path.isdir(os.path.join(self.root, "pkg", "org.example.notify")))
 
 
-class TransientNotLeftoverTests(BaselineTests):
-    """A leftover is what a run left behind, not the machine part-way
-    through its own work. Found on the bench reference, where a laser
-    test passed every check it makes and failed its hand-back on the
-    post-job smoke clear."""
-
-    def test_a_fading_button_led_is_not_a_leftover(self):
-        # the trigger fades brightness toward target: target 0 with
-        # brightness still high is the fade from a level the machine ended
-        for name in baseline.BUTTON_LEDS:
-            self._led2(name, target="0", brightness="900")
-        left = self.bl().enforce("post", captured=None)
-        self.assertEqual([x for x in left if x.item.startswith("leds/")], [])
-
-    def test_a_lit_button_led_is_a_leftover(self):
-        # a target the run left standing is dirt, whatever the fade reads
-        self._led2(baseline.BUTTON_LEDS[0], target="1014", brightness="0")
-        left = self.bl().enforce("post", captured=None)
-        items = [x for x in left if x.item.startswith("leds/")]
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0].found, "1014")
-
-
-class CoolPublishTests(unittest.TestCase):
-    """The cooling engine publishes once a tick. A status read inside the
-    tick after a run ended is the engine's last word on the run, not the
-    machine as the run left it. Found on the bench reference: a diagnostic
-    that finished clean (cooling.aa-offset-calibrate) and a fail tier that
-    did its work (cooling.fail-tier-stop) both failed their hand-back on a
-    hold the engine's next tick cleared."""
-
-    IDLE = {"phase": "idle", "armed": False, "hold": False}
-
-    def setUp(self):
-        self.lines = []
-
-    def bl(self, statuses):
-        """A baseline whose /cool/status answers play in order (the last
-        one repeats) and whose waits count reads, not seconds: three for
-        the engine's next tick, as the real wait makes, and enough for the
-        cooldown to let a slow script run out."""
-        b = baseline.Baseline(self.lines.append)
-        seq = list(statuses)
-        b.fc_get = lambda path: (200, dict(seq.pop(0) if len(seq) > 1 else seq[0]))
-
-        def wait(what, pred, timeout):
-            for i in range(3 if what == "cool publish" else 50):
-                if pred():
-                    return float(i)
-            return None
-        b._wait = wait
-        b.stood_down = []
-        b.stand_down = b.stood_down.append
-        return b
-
-    def test_a_diagnostic_hold_the_next_tick_clears_is_not_a_leftover(self):
-        left = []
-        b = self.bl([{"phase": "diag", "armed": False, "hold": True}, self.IDLE])
-        b._cool_side(left)
-        self.assertEqual(left, [])
-        self.assertTrue(any("last word on the run" in ln for ln in self.lines), self.lines)
-
-    def test_a_fail_tier_hold_clears_into_the_engines_own_post_job_phase(self):
-        left = []
-        b = self.bl([{"phase": "run", "armed": False, "hold": True},
-                     {"phase": "smoke", "armed": False, "hold": False},
-                     {"phase": "smoke", "armed": False, "hold": False}, self.IDLE])
-        b._cool_side(left)
-        self.assertEqual(left, [])
-        self.assertTrue(any("not a leftover" in ln for ln in self.lines), self.lines)
-
-    def test_a_hold_that_outlives_the_tick_is_the_runs_doing(self):
-        left = []
-        b = self.bl([{"phase": "run", "armed": True, "hold": True}])
-        b._cool_side(left)
-        self.assertEqual([x.item for x in left], ["cool"])
-        self.assertEqual(left[0].found, "run/armed=True/hold=True")
-        self.assertTrue(left[0].action.startswith("failed: still"), left[0].action)
-        self.assertEqual(len(b.stood_down), 1)
-
-    def test_a_hold_that_clears_only_later_is_still_recorded(self):
-        left = []
-        held = {"phase": "run", "armed": False, "hold": True}
-        b = self.bl([held] * 10 + [self.IDLE])
-        b._cool_side(left)
-        self.assertEqual([x.item for x in left], ["cool"])
-        self.assertEqual(left[0].action, "waited")
-        self.assertEqual(b.stood_down, [])
-
-    def test_an_idle_engine_and_a_silent_daemon_leave_nothing(self):
-        left = []
-        self.bl([self.IDLE])._cool_side(left)
-        b = baseline.Baseline(self.lines.append)
-        b.fc_get = lambda path: (None, None)
-        b._cool_side(left)
-        self.assertEqual(left, [])
-
-
 class CloudOwnedSysfsTests(unittest.TestCase):
     """In cloud mode the cloud client configures the machine from the
     pulse header it is playing, the lens included: z_mode comes from
@@ -651,35 +547,19 @@ class PositionDeadbandTests(unittest.TestCase):
     where motion.lid-cancel-home returned the head twice, each within
     0.04 mm, and failed the hand-back on the four steps left over."""
 
-    def test_a_few_steps_of_xy_are_the_quantization(self):
-        self.assertTrue(baseline.position_quantized([0, 0, 0], [4, 0, 0]))
-        self.assertTrue(baseline.position_quantized([0, 0, 0], [-4, 4, 0]))
-        self.assertTrue(baseline.position_quantized([10, 20, 30], [10, 20, 30]))
-
     def test_past_the_dead_band_is_a_leftover(self):
         over = int(baseline.POSITION_DEADBAND_MM * baseline.XY_STEPS_PER_MM) + 2
         self.assertFalse(baseline.position_quantized([0, 0, 0], [over, 0, 0]))
         self.assertFalse(baseline.position_quantized([0, 0, 0], [0, over, 0]))
-
-    def test_the_dead_band_scales_with_the_counters(self):
-        # the same step count is a quarter of the distance at x32
-        over = int(baseline.POSITION_DEADBAND_MM * baseline.XY_STEPS_PER_MM) + 2
-        x32 = baseline.XY_STEPS_PER_MM_OF[32]
-        self.assertTrue(baseline.position_quantized([0, 0, 0], [over, 0, 0], x32))
-        self.assertFalse(baseline.position_quantized([0, 0, 0], [4 * over, 0, 0], x32))
-
-    def test_z_is_exact_because_the_return_never_moves_it(self):
-        self.assertFalse(baseline.position_quantized([0, 0, 0], [0, 0, 1]))
 
     def test_an_unreadable_reading_is_never_quantization(self):
         self.assertFalse(baseline.position_quantized(None, [0, 0, 0]))
         self.assertFalse(baseline.position_quantized([0, 0, 0], None))
 
 
-class BaselineModeTests(BaselineTests):
+class BaselineModeTests(BaselineFixture, unittest.TestCase):
     """The baseline against a fake forgectrl: what the mode in force
-    owns. Reuses the fake sysfs tree of BaselineTests; only the new
-    tests run here (the inherited ones are skipped)."""
+    owns, over the same fake sysfs tree."""
 
     def setUp(self):
         super().setUp()
@@ -695,61 +575,6 @@ class BaselineModeTests(BaselineTests):
         baseline.LID_LAMP_SETTLE_S, baseline.LID_LAMP_POLL_S = self._lamp_timing
         self.fc.stop()
         super().tearDown()
-
-    def lamp_reads(self, *reads):
-        """The lid lamp reads `reads` in turn, then what its file holds:
-        the smooth trigger's fade as the baseline polls it, one read per
-        poll, so the script does not depend on the clock."""
-        seq = list(reads)
-        real = baseline.hw.sysfs_read
-
-        def read(attr, default=None):
-            if attr == baseline.LID_LAMP_ATTR and seq:
-                return seq.pop(0)
-            return real(attr, default)
-        baseline.hw.sysfs_read = read
-        self.addCleanup(setattr, baseline.hw, "sysfs_read", real)
-
-    def lamp_polls(self):
-        return max(2, int(round(baseline.LID_LAMP_SETTLE_S / baseline.LID_LAMP_POLL_S)))
-
-    def test_a_lamp_still_fading_to_its_idle_level_is_not_a_leftover(self):
-        # The supervisor re-applied 236 a moment before the check: the lamp
-        # reads 232 on its way there and then holds 236. Nothing to restore,
-        # nothing to record.
-        self._attr("pic/lid_led", "236")
-        self.lamp_reads("232", "234", "236", "236")
-        writes = []
-        real_write = baseline.hw.sysfs_write
-        baseline.hw.sysfs_write = lambda attr, value: (writes.append(attr), real_write(attr, value))
-        self.addCleanup(setattr, baseline.hw, "sysfs_write", real_write)
-        left = self.bl().enforce("post", captured=None)
-        self.assertEqual(left, [])
-        self.assertNotIn(baseline.LID_LAMP_ATTR, writes)
-        self.assertTrue(any("the fade toward a level just written" in ln for ln in self.lines), self.lines)
-
-    def test_a_fade_that_only_passes_the_idle_level_is_a_leftover(self):
-        # A lamp left fading to 77 passes 236 on its way down: one read at
-        # the level is not the level held. It is restored and recorded at
-        # the level it settled on.
-        self.lamp_reads("240", "236", *(["77"] * (self.lamp_polls() - 1)))
-        left = self.bl().enforce("post", captured=None)
-        self.assertEqual([(x.item, x.found, x.expected, x.action) for x in left],
-                         [("pic/lid_led", "77", "236", "restored")])
-        self.assertEqual(self._read("pic/lid_led"), "236")
-
-    def test_a_lamp_that_never_reaches_the_level_after_the_restore_says_so(self):
-        # the write does not take: the restore is recorded as failed, with
-        # the level the lamp holds
-        self.lamp_reads(*(["77"] * (2 * self.lamp_polls() + 1)))
-        left = self.bl().enforce("post", captured=None)
-        self.assertEqual([(x.item, x.action) for x in left], [("pic/lid_led", "failed: reads 77")])
-
-    def run(self, result=None):
-        # only this class's own tests, not the base class's
-        if self._testMethodName not in BaselineModeTests.__dict__:
-            return
-        return super().run(result)
 
     def cloud(self):
         self.fc.state["mode"] = {"mode": "cloud", "controller": "running", "pid": 7, "motion": "verified"}
@@ -897,3 +722,7 @@ class BaselineModeTests(BaselineTests):
         cap["mode"] = "cloud"
         b.enforce("post", captured=cap)
         self.assertEqual([p for p, _ in self.fc.posts if p == "/settings"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

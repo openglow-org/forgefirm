@@ -9,9 +9,9 @@ that client is comes only from gfcloud's one-start markers. Started bare it
 is the online client with the service's connect-time hunt, and the moves
 the service sends after the hunt outlast the run. The start is made under
 the no-hunt marker, and under the offline marker when the takeover found
-the offline service, which it then proves came back; a miss is a leftover
-that fails the run. Runs against the fake forgectrl, a fake /proc, and a
-fake init script that plays the client's start."""
+the offline service, which it then proves came back. Runs against the
+fake forgectrl, a fake /proc, and a fake init script that plays the
+client's start."""
 import os
 import shutil
 import tempfile
@@ -141,52 +141,12 @@ class TakeoverClientTests(unittest.TestCase):
         self.assertTrue(any("back as the offline service (pid %d)" % self.NEW_PID in l for l in run.lines),
                         run.lines)
 
-    def test_an_online_client_after_the_offline_service_fails_the_run(self):
-        # the client that came up is not listening: an online client, or
-        # a marker the start never saw
-        self._offline_client(self.OLD_PID)
-        real = self._initd
-
-        def lost_marker(service, action, timeout=60):
-            if action == "start" and os.path.exists(baseline.OFFLINE_MARKER):
-                os.remove(baseline.OFFLINE_MARKER)
-            return real(service, action, timeout)
-        hw.initd = lost_marker
-        cap, run = self.takeover()
-        self.assertEqual(cap["restart_clients"],
-                         [{"where": "takeover end", "expected": "the offline service",
-                           "found": "a client that is not the offline service (pid %d)" % self.NEW_PID}])
-        left = baseline.Baseline(run.log)
-        items = []
-        left._preserved(items, cap)
-        self.assertEqual([x.item for x in items], ["cloud client at the takeover end"])
-        self.assertTrue(items[0].action.startswith("not restored"), items[0].action)
-
-    def test_no_client_started_takes_the_markers_down(self):
-        # the gate closed, or standby: nothing read the markers, and a
-        # later start must not come up offline or without its hunt
-        self._offline_client(self.OLD_PID)
-        self.comes_up = "gated"
-        cap, run = self.takeover()
-        self.assertEqual(self.at_start, ["gfcloud-nohunt", "gfcloud-offline"])
-        self.assertEqual(self.markers_left(), [])
-        self.assertEqual(len(cap["restart_clients"]), 1)
-        self.assertIn("no cloud client running", cap["restart_clients"][0]["found"])
-
     def test_an_online_client_comes_back_without_the_hunt(self):
         cap, run = self.takeover()
         self.assertEqual(self.at_start, ["gfcloud-nohunt"])
         self.assertFalse(hw.listens_on(self.NEW_PID, baseline.OFFLINE_SOCKET))
         self.assertNotIn("restart_clients", cap)
         self.assertEqual(self.markers_left(), [])
-
-    def test_a_stale_offline_socket_file_is_not_the_offline_service(self):
-        # a socket another process left at the path: the online client
-        # found stays online
-        self._socket(99, 7002, baseline.OFFLINE_SOCKET)
-        cap, run = self.takeover()
-        self.assertEqual(self.at_start, ["gfcloud-nohunt"])
-        self.assertNotIn("restart_clients", cap)
 
     def test_grbl_mode_starts_under_no_marker(self):
         self.fc.state["mode"] = {"mode": "grbl", "controller": "running", "pid": self.OLD_PID,

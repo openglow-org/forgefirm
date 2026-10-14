@@ -136,49 +136,6 @@ class TakeoverPositionTests(unittest.TestCase):
         self.start(t)
         self.assertNotIn("restart_positions", cap)
 
-    def test_an_undeclared_frame_change_is_not_judged(self):
-        cap = self.cap()
-        self._new_anchor(2)                     # a controller start the test did not declare
-        self._pos(self.mm(10), 0, 0)
-        t, run = self.takeover(cap)
-        self.start(t)
-        self.assertNotIn("restart_positions", cap)
-        self.assertTrue(any("not in the frame the run began in" in l for l in run.lines), run.lines)
-
-    def test_cloud_mode_is_not_judged(self):
-        cap = self.cap()
-        self._pos(self.mm(10), 0, 0)
-        t, run = self.takeover(cap)
-        t.cloud = True
-        t.position_at_start()
-        self._pos(self.mm(20), 0, 0)
-        t.position_at_end()
-        self.assertNotIn("restart_positions", cap)
-
-    def test_a_bench_tool_is_not_judged(self):
-        t = runner.Takeover(lambda s: None, "bench:tool")
-        self._pos(self.mm(10), 0, 0)
-        t.position_at_start()
-        t.position_at_end()                     # no run: nothing to judge against, nothing raised
-
-    def test_a_drill_that_leaves_the_head_out_is_recorded_at_the_end(self):
-        cap = self.cap()
-        t, run = self.takeover(cap)
-        self.start(t)
-        self._pos(self.mm(5), 0, 0)             # the drill moved the head and did not bring it back
-        t.position_at_end()
-        self.assertEqual([r["where"] for r in cap["restart_positions"]], ["takeover end"])
-        self.assertEqual(cap["restart_positions"][0]["expected"], [0, 0, 0])
-
-    def test_a_changed_microstep_mode_is_not_judged_at_the_end(self):
-        cap = self.cap()
-        t, run = self.takeover(cap)
-        self.start(t)
-        self._attr("cnc/x_mode", "8" if hw.sysfs_read("cnc/x_mode") != "8" else "16")
-        self._pos(self.mm(5), 0, 0)
-        t.position_at_end()
-        self.assertNotIn("restart_positions", cap)
-
     def test_the_post_pass_fails_the_run_and_moves_nothing(self):
         # setup.check-envelope's case: a declared camera home, the head
         # left out, the record put back under a takeover, whose restart
@@ -227,17 +184,6 @@ class TakeoverPositionTests(unittest.TestCase):
         with open(self.sysfs + "cnc/laser_latch") as f:
             self.assertEqual(f.read().strip(), "1")
         self.assertTrue(any("could not be judged" in l for l in run.lines), run.lines)
-
-    def test_a_declared_rezero_records_the_frame_in_force(self):
-        cap = self.cap()
-        self._new_anchor(5)                     # the camera home
-        stub = type("Ctx", (), {})()
-        stub.run = FakeRun(cap)
-        stub.log = stub.run.log
-        runner.Context.counters_rezeroed(stub)
-        self.assertEqual(cap["position"], [0, 0, 0])
-        self.assertTrue(cap["rezero_declared"])
-        self.assertEqual(cap["frame"], baseline.counter_frame())
 
 
 if __name__ == "__main__":

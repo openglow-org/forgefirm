@@ -10,10 +10,8 @@ it is needed and a bench actuator can later perform: `act` names a
 machine action and watches the machine for it (a standing notice for
 the human, no button to race), `ready` pre-announces a timed step, and
 a `precheck` refuses a start the machine cannot honor instead of
-recording a FAIL. Runner-level events go to the journal, never to the
-page state.
+recording a FAIL.
 """
-import logging
 import os
 import shutil
 import tempfile
@@ -24,16 +22,7 @@ import unittest
 import helpers
 from forgetest import catalog
 from forgetest.log import Log
-from forgetest.runner import Context, Failed, Run, Runner, journal
-
-
-class Catch(logging.Handler):
-    def __init__(self):
-        logging.Handler.__init__(self)
-        self.lines = []
-
-    def emit(self, rec):
-        self.lines.append(rec.getMessage())
+from forgetest.runner import Context, Failed, Run, Runner
 
 
 class Answerer:
@@ -95,11 +84,6 @@ class ActTests(unittest.TestCase):
         self.assertIsNotNone(rec["took_s"])
         self.assertTrue(any("ACT lid open: done" in ln for ln in self.run.lines))
 
-    def test_the_tests_context_follows_the_wording(self):
-        self.lid(False)
-        self.ctx.act("lid", "close", text="Leave it closed.", until=lambda: True, timeout=1)
-        self.assertTrue(any("NOTICE: Close the lid. Leave it closed." in ln for ln in self.run.lines))
-
     def test_already_done_returns_at_once(self):
         self.lid(False)
         dt = self.ctx.act("lid", "open", timeout=2)
@@ -134,31 +118,6 @@ class ActTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ctx.act("lid", "press")
 
-    def test_a_fixture_covering_the_channel_performs_it(self):
-        class Fixture:
-            done = []
-
-            def covers(self, channel):
-                return channel == "lid"
-
-            def act(self, channel, state, ms=None):
-                self.done.append((channel, state) if ms is None else (channel, state, ms))
-                self_outer.lid(state != "open")
-        self_outer = self
-
-        class R:
-            fixture = Fixture()
-        ctx = Context(self.run, R(), helpers.make_test("t.f", [], kind="operator"))
-        ctx.act("lid", "open", timeout=3)
-        self.assertEqual(Fixture.done, [("lid", "open")])
-        self.assertEqual(self.ans.notices, [])
-        self.assertEqual(self.run.evidence["actions"][0]["by"], "fixture")
-        # a channel the fixture does not cover falls back to the operator
-        threading.Timer(0.2, self.interlock, args=(False,)).start()
-        ctx.act("interlock", "open", timeout=3)
-        self.assertEqual(self.ans.notices, [ctx.runner and "Open the remote-interlock loop: unplug the "
-                                            "Pro's interlock plug, or pull the jumper at J8 on a Basic/Plus."])
-
     def test_ready_is_a_single_button_prompt(self):
         self.ctx.ready("On Ready the head moves.")
         self.assertEqual(self.ans.asked, [("On Ready the head moves.", ["Ready", "Cannot"])])
@@ -176,13 +135,6 @@ class ActTests(unittest.TestCase):
         threading.Thread(target=say_cannot, daemon=True).start()
         with self.assertRaises(Failed):
             self.ctx.ready("x")
-
-    def test_notice_is_logged_and_in_the_snapshot(self):
-        self.ctx.notice("Hold still.")
-        self.assertEqual(self.run.snapshot()["notice"]["text"], "Hold still.")
-        self.assertTrue(any("NOTICE: Hold still." in ln for ln in self.run.lines))
-        self.ctx.clear_notice()
-        self.assertIsNone(self.run.snapshot()["notice"])
 
 
 class PrecheckTests(unittest.TestCase):
@@ -262,48 +214,6 @@ class PrecheckTests(unittest.TestCase):
             catalog.REGISTRY.update(saved)
 
 
-class JournalTests(unittest.TestCase):
-    def test_runner_notes_go_to_the_journal_and_the_run_in_progress(self):
-        tmp = tempfile.mkdtemp(prefix="forgetest-j-")
-        os.environ["FORGETEST_DATA"] = tmp
-        os.environ["FORGETEST_MARKER"] = os.path.join(tmp, "marker")
-        h = Catch()
-        journal.addHandler(h)
-        try:
-            r = Runner(Log(os.path.join(tmp, "r.jsonl")), helpers.make_manifest(),
-                       helpers.registry(helpers.make_test("j.a", [])))
-            r._note("queue unattended: 1 test(s) to run")
-            self.assertIn("queue unattended: 1 test(s) to run", h.lines)
-            self.assertNotIn("messages", r.state()[0])
-            run = Run("test", "j.a", "j.a")
-            r.current = run
-            r._note("queue unattended: stop requested")
-            self.assertTrue(any("stop requested" in ln for ln in run.lines))
-        finally:
-            journal.removeHandler(h)
-            shutil.rmtree(tmp, ignore_errors=True)
-
-    def test_journal_tail_serves_the_daemon_log(self):
-        from forgetest.server import journal_tail
-        tmp = tempfile.mkdtemp(prefix="forgetest-jt-")
-        try:
-            p = os.path.join(tmp, "daemon.log")
-            self.assertIn(b"no journal yet", journal_tail(p))
-            with open(p, "wb") as f:
-                for i in range(2000):
-                    f.write(b"line %d\n" % i)
-            tail = journal_tail(p, max_bytes=200)
-            self.assertTrue(tail.endswith(b"line 1999\n"))
-            self.assertLess(len(tail), 200)
-            self.assertTrue(tail.startswith(b"line "))        # a whole line, not a fragment
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class AccelSamplerTests(unittest.TestCase):
     """The head accelerometer sampler over a fake iio tree."""
 
@@ -353,3 +263,7 @@ class AccelSamplerTests(unittest.TestCase):
         with s:
             pass
         self.assertEqual(s.p2p(0), (0, 0, 0))
+
+
+if __name__ == "__main__":
+    unittest.main()

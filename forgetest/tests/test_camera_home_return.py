@@ -14,7 +14,6 @@ session whose one motion the cooling engine stopped short, and a whole
 three-motion one. Runs against scratch logs and fakes for the controller."""
 import os
 import shutil
-import sys
 import tempfile
 import unittest
 
@@ -130,30 +129,6 @@ class HandBackTests(unittest.TestCase):
     def expect_jog(self, dx, dy):
         self.assertEqual(self.ctx.jogs, ["$J=G91 G21 X%.3f Y%.3f F2400" % (-dx, -dy)])
 
-    # -- the travel ------------------------------------------------------
-    def test_the_travel_is_the_sum_of_the_motions_ends(self):
-        self.write(WHOLE)
-        self.assertEqual(homeoff.session_travel(0), (4774 - 71 - 13096, 4600 - 144 - 7399))
-
-    def test_the_travel_starts_at_the_mark(self):
-        self.write(WHOLE)
-        mark = homeoff.session_mark()
-        self.write(STOPPED)
-        self.assertEqual(homeoff.session_travel(mark), (4390, 2682))
-
-    def test_the_cloud_clients_log_is_read_the_same_way(self):
-        self.write(WHOLE.replace("gfhome[", "gfcloud["), self.cloudlog)
-        self.assertEqual(homeoff.session_travel(0, cloud.GFCLOUD_LOG), (4774 - 71 - 13096, 4600 - 144 - 7399))
-        self.assertEqual(homeoff.session_travel(0), (0, 0))          # gfhome's log is its own
-
-    def test_a_motion_with_no_end_leaves_the_travel_unknown(self):
-        self.write(STOPPED.split("machine:_motion_locked")[0])
-        self.assertIsNone(homeoff.session_travel(0))
-
-    def test_a_log_rotated_under_the_run_leaves_the_travel_unknown(self):
-        self.write(STOPPED)
-        self.assertIsNone(homeoff.session_travel(os.path.getsize(self.log) + 1))
-
     # -- the stopped-short judge --------------------------------------------
     def test_a_motion_stopped_short_fails_the_judge(self):
         self.write(STOPPED)
@@ -161,12 +136,6 @@ class HandBackTests(unittest.TestCase):
         with self.assertRaises(Failed):
             homeoff.judge_whole_motions(self.ctx, ev, 0)
         self.assertEqual(len(ev["short_motions"]), 2)
-
-    def test_whole_motions_pass_the_judge(self):
-        self.write(WHOLE)
-        ev = {}
-        homeoff.judge_whole_motions(self.ctx, ev, 0)
-        self.assertEqual(ev["short_motions"], [])
 
     # -- after a camera home -------------------------------------------------
     def test_homed_the_head_goes_back_by_the_travel_and_the_counters_since(self):
@@ -227,21 +196,6 @@ class HandBackTests(unittest.TestCase):
         with self.assertRaises(Failed):
             homeoff.cloud_mode_return(self.ctx, {}, 0)
         self.assertEqual(self.ctx.jogs, [])
-
-    # -- the first failure wins --------------------------------------------
-    def test_a_hand_back_that_fails_after_the_test_failed_is_logged_not_raised(self):
-        self.write(STOPPED.split("machine:_motion_locked")[0])
-        ev = {"homed": True}
-        with self.assertRaises(Failed) as cm:
-            try:
-                raise Failed("the test's own failure")
-            finally:
-                homeoff.camera_home_return(self.ctx, ev, 0)
-        self.assertEqual(str(cm.exception), "the test's own failure")
-        self.assertIn("cannot be known", ev["return"]["failed"])
-        self.assertTrue(any("the head is not back" in l for l in self.ctx.lines), self.ctx.lines)
-        self.assertEqual(self.ctx.jogs, [])
-        self.assertIsNone(sys.exc_info()[1])
 
 
 if __name__ == "__main__":

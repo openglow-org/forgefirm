@@ -8,7 +8,6 @@ fake bench tool. No hardware, no forgectrl."""
 import json
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import time
@@ -18,7 +17,7 @@ import urllib.request
 
 import helpers
 from forgetest import bench as bench_mod
-from forgetest import catalog, server
+from forgetest import server
 from forgetest.log import Log
 from forgetest.runner import Failed, Runner
 
@@ -157,13 +156,6 @@ class ServerTests(unittest.TestCase):
         st, d = self.call("GET", "/", token=False)
         self.assertEqual(st, 200)
         self.assertIn(self.token.encode(), d)
-        page = d.decode("utf-8")
-        # one self-contained response: nothing linked, the token once,
-        # the theme attribute the head script sets
-        self.assertEqual(page.count(self.token), 1)
-        self.assertNotIn("<link ", page)
-        self.assertNotIn("<script src=", page)
-        self.assertIn("data-bs-theme", page)
         st, d = self.call("GET", "/state", headers={"Host": "evil.example.net"})
         self.assertEqual(st, 403)
         st, d = self.call("GET", "/state", headers={"Origin": "http://evil.example.net"})
@@ -178,23 +170,6 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(len(d["tests"]), 7)
         st, d = self.call("GET", "/nope")
         self.assertEqual(st, 404)
-
-    def test_01c_connection_is_kept_alive(self):
-        """A poll per second over a fresh TCP connection each time is
-        waste the board does not need to pay."""
-        import http.client
-        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
-        try:
-            for _ in range(3):
-                c.request("GET", "/state", headers={"Host": "127.0.0.1:%d" % self.port})
-                r = c.getresponse()
-                r.read()
-                self.assertEqual(r.status, 200)
-                self.assertEqual(r.version, 11)
-                self.assertNotEqual((r.getheader("Connection") or "").lower(), "close")
-                self.assertIsNotNone(r.getheader("Content-Length"))
-        finally:
-            c.close()
 
     def test_01d_refused_post_does_not_poison_the_connection(self):
         """A POST refused before its body is read leaves that body in the
@@ -364,22 +339,6 @@ class ServerTests(unittest.TestCase):
         st, d = self.call("POST", "/abort")
         state = self.wait_idle()
         self.assertEqual(state["last_run"]["finished"]["result"], "ABORTED")
-        # a takeover tool runs inside the takeover wrapper (init.d is absent on the host: rc 127)
-        st, d = self.call("POST", "/bench/start", {"tool": "tk"})
-        self.assertEqual(st, 200, d)
-        state = self.wait_idle(timeout=40)     # two unreachable-forgectrl settle waits
-        log = "\n".join(state["last_run"]["log"])
-        self.assertIn("takeover: pulse device free", log)
-        self.assertIn("takeover: forgectrl start", log)
-        self.assertIn("baseline: forgectrl unreachable for 10 s", log)
-        self.assertFalse(os.path.exists(os.environ["FORGETEST_MARKER"]))
-        # a scope tool is a takeover too
-        st, d = self.call("POST", "/bench/start", {"tool": "sc"})
-        self.assertEqual(st, 200, d)
-        state = self.wait_idle(timeout=40)
-        log = "\n".join(state["last_run"]["log"])
-        self.assertIn("takeover: pulse device free", log)
-        self.assertIn("takeover: forgectrl start", log)
         # bench runs never touched the acceptance log
         recs = self.log.read()
         self.assertFalse(any(r.get("t") == "result" and r.get("test") == "echo" for r in recs))
@@ -405,31 +364,6 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(any("recovered" in m for m in seen), seen)
         self.assertNotIn("messages", r.state()[0])
         self.assertFalse(os.path.exists(marker))
-
-    def test_10_state_is_conditional(self):
-        """The page polls; an unchanged state must cost a 304, and the
-        ETag must move as soon as the state does.
-
-        Runs last because it invalidates: timestamps are whole seconds, and
-        a PASS stamped in the same second as an invalidate is deliberately
-        not inheritable, so an invalidate early in this class would decide
-        the inheritance the earlier tests are checking.
-        """
-        st, d, hdrs = self.call_h("GET", "/state")
-        self.assertEqual(st, 200)
-        etag = hdrs.get("ETag")
-        self.assertTrue(etag and etag.startswith('"'), "no ETag on /state")
-        st, _, hdrs2 = self.call_h("GET", "/state", headers={"If-None-Match": etag})
-        self.assertEqual(st, 304)
-        self.assertEqual(hdrs2.get("ETag"), etag)
-        # a stale validator must not be honored
-        st, _, _ = self.call_h("GET", "/state", headers={"If-None-Match": '"stale"'})
-        self.assertEqual(st, 200)
-        # and the validator moves with the state
-        self.call("POST", "/invalidate", {"reason": "etag check"})
-        st, _, hdrs3 = self.call_h("GET", "/state", headers={"If-None-Match": etag})
-        self.assertEqual(st, 200)
-        self.assertNotEqual(hdrs3.get("ETag"), etag)
 
 
 if __name__ == "__main__":

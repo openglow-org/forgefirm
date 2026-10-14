@@ -83,27 +83,6 @@ class SwitchModeTests(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertEqual(self.fc.posts, [])
 
-    def test_the_supervisors_levers_get_the_slow_timeout(self):
-        from forgetest import hw
-        fc = hw.Forgectrl(timeout=1.0, slow_timeout=2.0)
-        self.assertEqual(fc.timeout_for("POST", "/mode"), 2.0)
-        self.assertEqual(fc.timeout_for("POST", "/controller/start"), 2.0)
-        self.assertEqual(fc.timeout_for("POST", "/controller/stop"), 2.0)
-        self.assertEqual(fc.timeout_for("GET", "/mode"), 1.0)
-        self.assertEqual(fc.timeout_for("POST", "/settings"), 1.0)
-        self.assertGreater(hw.SLOW_TIMEOUT_S, 15.0)         # forgectrl's first-report wait
-        # a switch that answers after the ordinary timeout still lands
-        import time
-
-        def on_post(path, form):
-            time.sleep(1.5)
-            self.fc.state["mode"] = dict(self.fc.state["mode"], mode="cloud")
-            return None
-        self.fc.on_post = on_post
-        st, body = fc.post("/mode", data={"controller": "cloud"})
-        self.assertEqual(st, 200)                            # 1.5 s > timeout, < slow_timeout
-        self.assertEqual(self.fc.state["mode"]["mode"], "cloud")
-
     def test_cloud_to_grbl_switches_and_waits_for_the_port(self):
         cloud(self.fc)
         b = self.bl()

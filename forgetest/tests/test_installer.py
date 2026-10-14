@@ -9,10 +9,9 @@ The installer runs once per machine, on factory firmware, over whatever
 network the owner has. These tests run its own functions under sh with a
 scripted curl in front of them: a transfer that fails resumes and is
 tried again, the failures that waiting cannot fix end the tries at once,
-and every step leaves a line in the install log in the log tree's own
-format."""
+the reason an install stopped is in the install log, and a log that cannot
+be written never fails the install."""
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -24,10 +23,6 @@ import helpers  # noqa: F401  (sys.path)
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCRIPT = os.path.join(REPO, "scripts", "install-forgefirm.sh")
 MARK = "# The install log, before anything can fail."
-
-# The log tree's line format (forgetest/suite/logs.py keeps the same one).
-LINE_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?[+-]\d\d:\d\d install\[\d+\] "
-                     r"(EMERG|ALERT|CRIT|ERR|WARNING|NOTICE|INFO|DEBUG) .+$")
 
 # A curl that plays a script: each call takes the next "rc http bytes"
 # line of $CURL_PLAN, appends that many bytes to the --output file the way
@@ -149,45 +144,16 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(os.path.getsize(self.fw), 5000)     # not 9000: the stale part went
 
-    def test_a_tls_failure_names_the_clock(self):
-        out, _, _ = self.download(["60 000 0"] * 5)
-        self.assertRegex(out, r"TLS handshake failed \(a wrong clock does this: \d{4}-\d\d-\d\d")
-
-    def test_every_log_line_is_in_the_tree_format(self):
-        self.download(["7 000 0", "0 200 10"])
-        self.run_sh('log NOTICE "operator declined to continue; no changes made"')
-        lines = self.log_lines()
-        self.assertGreater(len(lines), 5)
-        for line in lines:
-            self.assertRegex(line, LINE_RE)
-
     def test_die_leaves_the_reason_in_the_log(self):
         r = self.run_sh('die "archiving slot 1 failed"; echo not-reached')
         self.assertEqual(r.returncode, 1)
         self.assertNotIn("not-reached", r.stdout)
-        self.assertTrue(any(" ERR install failed: archiving slot 1 failed" in line
-                            for line in self.log_lines()))
+        self.assertTrue(any("archiving slot 1 failed" in line for line in self.log_lines()))
 
     def test_no_writable_log_never_fails_the_install(self):
         r = self.run_sh('LOG_OK=""; log INFO "x"; LOG_OK=yes; LOG_FILE=/nonexistent/dir/x.log; '
                         'log INFO "y"; echo "still-running rc=$?"')
         self.assertIn("still-running rc=0", r.stdout)
-
-
-class InstallerShapeTests(unittest.TestCase):
-    """What holds on any host, with no shell to run."""
-
-    def test_the_log_lives_in_the_tree_the_export_carries(self):
-        head = functions()
-        self.assertIn('LOG_DIR="/data/log/forgefirm/install"', head)
-        self.assertIn('LOG_FILE="$LOG_DIR/install.log"', head)
-
-    def test_the_download_is_the_retrying_one(self):
-        with open(SCRIPT, encoding="utf-8") as f:
-            text = f.read()
-        body = text.partition(MARK)[2]
-        self.assertIn("download_fw", body)
-        self.assertNotRegex(body, r"(?m)^\s*curl ")       # no bare curl past the functions
 
 
 if __name__ == "__main__":

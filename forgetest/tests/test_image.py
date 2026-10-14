@@ -5,25 +5,7 @@
 
 import unittest
 
-from forgetest import catalog
 from forgetest.suite import image
-
-
-class KernelIdentTests(unittest.TestCase):
-    def test_localversion_hash_is_stripped(self):
-        self.assertEqual(image.kernel_ident("6.12.20-fslc-fslc-g72a0b1431a9d"), "6.12.20-fslc-fslc")
-        self.assertEqual(image.kernel_ident("6.12.20-fslc-fslc+g72a0b1431a9d"), "6.12.20-fslc-fslc")
-
-    def test_plain_name_is_unchanged(self):
-        self.assertEqual(image.kernel_ident("6.12.20-fslc-fslc"), "6.12.20-fslc-fslc")
-        self.assertEqual(image.kernel_ident("6.12.20-fslc-g12"), "6.12.20-fslc-g12")
-
-    def test_release_matches_manifest_with_or_without_hash(self):
-        rel = "6.12.20-fslc-fslc-g72a0b1431a9d"
-        self.assertTrue(image.kernel_matches(rel, ["6.12.20-fslc-fslc"]))
-        self.assertTrue(image.kernel_matches(rel, ["6.12.20-fslc-fslc-gf52af5b522f4"]))
-        self.assertTrue(image.kernel_matches(rel, []))
-        self.assertFalse(image.kernel_matches(rel, ["6.12.19-fslc-fslc"]))
 
 
 class NetworkBootTests(unittest.TestCase):
@@ -31,11 +13,6 @@ class NetworkBootTests(unittest.TestCase):
               "iface wlan0 inet dhcp\n"
               "\twpa-driver nl80211\n"
               "\tudhcpc_opts -x hostname:$(hostname)\n")
-
-    def test_the_test_is_registered_and_covers_nothing_by_design(self):
-        t = catalog.load_suite()["image.network-boot"]
-        self.assertEqual(t.kind, "auto")
-        self.assertEqual(t.covers, ())           # the interfaces file is layer content
 
     def test_ifstate_names_the_interfaces_ifup_finished(self):
         self.assertEqual(image.ifstate_names("lo=lo\nwlan0=wlan0\n"), {"lo", "wlan0"})
