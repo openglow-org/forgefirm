@@ -19,7 +19,7 @@ from forgetest.suite import setup
 
 IDS = ("setup.account-login", "setup.https-only-writes",
        "setup.ssh-until-reboot", "setup.machine-name", "setup.first-run-flow",
-       "setup.first-run-page", "setup.record-export",
+       "setup.first-run-page",
        "setup.mirror")
 OPERATOR = ("setup.first-run-flow", "setup.first-run-page")
 
@@ -44,13 +44,9 @@ class RegistrationTests(unittest.TestCase):
     def test_the_record_swapping_tests_are_takeovers(self):
         for tid in ("setup.first-run-flow", "setup.first-run-page", "setup.mirror"):
             self.assertEqual(self.reg[tid].hardware, "takeover", tid)
-        self.assertEqual(self.reg["setup.record-export"].hardware, "api")
 
     def test_the_lifecycle_tests_cover_their_files(self):
-        export = set(self.reg["setup.record-export"].covers)
         mirror = set(self.reg["setup.mirror"].covers)
-        self.assertIn(("forgectrl", "src/recordhtml.*"), export)
-        self.assertIn(("forgectrl", "src/logs.*"), export)
         self.assertIn(("forgectrl", "src/wizdark.*"), mirror)
         self.assertIn("setup.check-sensors", self.reg["setup.mirror"].requires)
 

@@ -137,6 +137,9 @@ HOST_TESTED = [
     # The built-in extensions' table: the cloud entry, its refusals while it
     # is off, the sweep when it goes off, the list.
     ("forgectrl", "src/builtin.*", "forgectrl:tests/builtin_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The setup record as a printable page: no script, the sheet id, a
+    # heading for each completed step, everything escaped.
+    ("forgectrl", "src/recordhtml.*", "forgectrl:tests/recordhtml_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a
