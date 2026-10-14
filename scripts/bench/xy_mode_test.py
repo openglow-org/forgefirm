@@ -11,14 +11,14 @@ never takes them typed: $100/$101, the machine tick, and the kernel stop
 ramp. This harness drives the native grblHAL_glowforge binary in
 null-sink mode (no hardware, no root) over TCP, one process per config:
 
-  1. no key: x32, $100/$101 = 213.333, the 112640 Hz tick
-  2. xy_microsteps = 16: 106.667, the 56320 Hz tick; a typed $100 is
-     overwritten on the spot; $110 is left alone under a tick that
-     carries it
-  3. xy_microsteps = 32: 213.333, the 112640 Hz tick
-  4. a value that is not a mode: x32 with a warning in the log
-  5. GFSINK_RATE lowered under the mode's tick: $110/$111 are held at
+  1. no key: x32, $100/$101 = 213.333, and $110 stands
+  2. xy_microsteps = 16: 106.667; a typed $100 is overwritten on the
+     spot; $110 is left alone under a tick that carries it
+  3. GFSINK_RATE lowered under the mode's tick: $110/$111 are held at
      the feed the tick carries, one step per tick per axis
+
+Each mode's derivations, and a value that is not a mode, are the host
+unit test's (xy_scale_test.c in grblHAL-glowforge).
 
 The binary keeps its settings in EEPROM.DAT in the working directory, so
 each run starts from defaults in a temporary directory and leaves
@@ -142,10 +142,6 @@ def expect_scale(s, mode, spm):
               "%s is %.3f at x%d, want %.3f" % (key, got, mode, spm))
 
 
-def expect_log(log, needle, what):
-    check(needle in log, what, "the log does not say %r:\n%s" % (needle, log))
-
-
 def case_default():
     s = Session()
     try:
@@ -154,8 +150,7 @@ def case_default():
         check(near(rate, 12000.0), "$110=%.0f stands at x32" % rate,
               "$110 is %.3f at x32, want 12000" % rate)
     finally:
-        log = s.close()
-    expect_log(log, "x32 microsteps, 112640 Hz machine tick", "no key: x32, the 112640 Hz tick")
+        s.close()
 
 
 def case_x16():
@@ -172,27 +167,7 @@ def case_x16():
         check(near(rate, 12000.0), "$110=%.0f stands under a tick that carries it" % rate,
               "$110 is %.3f under x16, want 12000" % rate)
     finally:
-        log = s.close()
-    expect_log(log, "x16 microsteps, 56320 Hz machine tick", "x16: the 56320 Hz tick")
-
-
-def case_x32():
-    s = Session("xy_microsteps = 32\n")
-    try:
-        expect_scale(s, 32, 213.333)
-    finally:
-        log = s.close()
-    expect_log(log, "x32 microsteps, 112640 Hz machine tick", "x32: the 112640 Hz tick")
-
-
-def case_invalid():
-    s = Session("xy_microsteps = 24\n")
-    try:
-        expect_scale(s, 32, 213.333)
-    finally:
-        log = s.close()
-    expect_log(log, "xy_microsteps '24' is not 8, 16 or 32", "a value that is not a mode is refused with a warning")
-    expect_log(log, "x32 microsteps, 112640 Hz machine tick", "and the machine runs at x32")
+        s.close()
 
 
 def case_low_tick():
@@ -211,9 +186,7 @@ def case_low_tick():
         check(near(got, 562.5, 0.05), "a typed $110=6000 comes back held at %.3f" % got,
               "a typed $110=6000 stuck at %.3f under a 1000 Hz tick" % got)
     finally:
-        log = s.close()
-    expect_log(log, "1000 Hz machine tick", "GFSINK_RATE took the tick to 1000 Hz")
-    expect_log(log, "held at the ceiling", "the hold is logged")
+        s.close()
 
 
 def main():
@@ -221,8 +194,6 @@ def main():
         fail("no controller binary at %s" % BIN)
     case_default()
     case_x16()
-    case_x32()
-    case_invalid()
     case_low_tick()
     print("PASS xy_mode_test")
 

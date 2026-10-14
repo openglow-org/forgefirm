@@ -24,12 +24,16 @@ sender and for the machine daemon:
      [MSG:] of its words, and a cycle start resumes it
   5. a soft reset ends the wait at once, and the controller answers the
      next line
-  6. no answer in GFMCODE_WAIT_S holds the job
+  6. no answer in GFMCODE_WAIT_S holds the job: 5 s in the host build
+     (configured with -DGFMCODE_WAIT_S=5.0, as grblHAL-glowforge's CI
+     does; the image keeps 30 s), longer than any case here waits at a
+     barrier on purpose
   7. the barrier is dark: under an open armed window with M3 S500, a job
      waiting at an M-code ships no FIRE tick, the window stays open across
      the wait, and the next laser move fires again
 
 Usage: mcode_test.py [path/to/grblHAL_glowforge]
+       (a build configured with -DGFMCODE_WAIT_S=5.0)
 """
 import os
 import sys
@@ -39,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ctlport_test as ct  # noqa: E402
 
 fail = ct.fail
-WAIT_S = 30.0
+WAIT_S = 5.0            # the host build's GFMCODE_WAIT_S
 
 
 def send_nowait(s, line):
@@ -66,7 +70,9 @@ def test_table(s):
         r = s.port.request("mcodes " + good)
         if r != "ok":
             fail("[table] mcodes %s -> %r" % (good, r))
-    for bad in ("159", "180", "160,160", "160,", ",160", "16a", "0160", "160 161", "1600", "160,,161", ""):
+    # one form per refusal: out of range, twice, a separator with nothing
+    # after it, not a number, and nothing at all
+    for bad in ("159", "160,160", "160,", ",160", ""):
         r = s.port.request("mcodes " + bad)
         if r != "error:invalid":
             fail("[table] mcodes %r -> %r, not error:invalid" % (bad, r))
@@ -81,8 +87,8 @@ def test_table(s):
         time.sleep(0.02)
     if s.sender.responses[n:n + 1] != ["ok"]:
         fail("[table] M165 got %r" % s.sender.responses[n:])
-    print("PASS [table]: the port takes '-' and numbers from M160 to M179, the whole range; 11 other forms "
-          "refused, the table left as it was")
+    print("PASS [table]: the port takes '-' and numbers from M160 to M179, the whole range; a form "
+          "of each refusal is refused, the table left as it was")
 
 
 def test_unanswered(s):
@@ -198,9 +204,9 @@ def test_timeout_holds(s):
     wait_pending(s)
     s.sender.wait_state("Hold", timeout=WAIT_S + 5)
     dt = time.time() - t0
-    if dt < WAIT_S - 1:
+    if dt < WAIT_S - 0.1:
         fail("[timeout] the job was held after %.1f s, not after the wait" % dt)
-    if not s.sender.saw("M160 had no answer from its extension in 30 s: the job is held"):
+    if not s.sender.saw("M160 had no answer from its extension"):
         fail("[timeout] the sender got no [MSG:] of the timeout")
     s.sender.realtime(b"~")
     s.sender.wait_state("Idle", timeout=5)

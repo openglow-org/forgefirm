@@ -29,8 +29,9 @@ operator's own $ME or a manual $H energizes it:
      the origin lies, never negative. With an offset the head at the stops
      is declared at minus it and jogs to the origin, dark, before $H
      answers, through the sender and through the port; the envelope starts
-     at the origin, and an out-of-range offset is clamped; a jog cancel
-     ends the move short of the origin and $H says where it stopped
+     at the origin (an out-of-range offset clamped is lens_home_test.c's,
+     gfhome_clamp_home_mm); a jog cancel ends the move short of the origin
+     and $H says where it stopped
   9. a controller that starts over a released gantry (the marker in the
      state directory) comes up locked and writes no current until $ME
   8. each provider reads its own offsets and no other's: with both pairs set,
@@ -426,15 +427,6 @@ def test_stop_block_offsets(s):
         r = refused(s, line)
         if r != "error:15":
             fail("[offsets] %s, behind the origin, got %r, not error:15" % (line, r))
-    s.set_mode("manual", "manual_home_x = -10.3\nmanual_home_y = 1e9\n")
-    if s.sender.send("$H", timeout=30.0) != "ok":
-        fail("[offsets] $H with out-of-range offsets was refused")
-    st = s.port.state()
-    if st["mpos"][0] != 0 or st["mpos"][1] != 0:
-        fail("[offsets] the head did not end at the origin: %r" % st["mpos"][:2])
-    d = declared(s)
-    if d is None or d[0] != 0 or abs(d[1] + 279.0) > 0.01:
-        fail("[offsets] a negative offset and an oversized one declared %r, not (0, -279)" % (d,))
     # The panel's Set home here: the port answers once the head has stopped,
     # and the sender's count stays exact.
     s.set_mode("manual", "manual_home_x = 12.5\nmanual_home_y = 8\n")
@@ -449,8 +441,8 @@ def test_stop_block_offsets(s):
         fail("[offsets] the sender got %d responses for the port's home" % (s.sender.count() - before))
     s.set_mode("manual")
     print("PASS [offsets]: a manual home declared (-12.5, -8) and jogged to the origin before $H "
-          "answered, dark under a modal M3; the envelope started at the origin; a negative offset "
-          "became 0 and an oversized one the axis travel; the port's home answered at the origin")
+          "answered, dark under a modal M3; the envelope started at the origin; the port's home "
+          "answered at the origin")
 
 
 def test_origin_jog_cancel(s):

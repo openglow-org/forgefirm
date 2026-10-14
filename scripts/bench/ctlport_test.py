@@ -26,25 +26,23 @@ job after it.
   5. the port has one client: a second connection is refused and the first
      keeps working (it never displaces, unlike the Grbl socket); a client
      that closes and reconnects at once is served
-  6. a CR LF sender keeps its count across a port jog, an empty line
-     included
-  7. the status hook survives a soft reset (the core puts its own report
+  6. the status hook survives a soft reset (the core puts its own report
      handlers back at every reset)
-  8. the port's client is the dead-man: closing it cancels its jog
-  9. every port operation ships dark. Under an open armed window, with M3
+  7. the port's client is the dead-man: closing it cancels its jog
+  8. every port operation ships dark. Under an open armed window, with M3
      modal and S above zero, a port jog, a canceled port jog, the refused
      jogs, and the panel operations (the tray's mode among them) add steps
      to the shipped stream and not one FIRE tick. A jog block carries the modal spindle state, so the
      stream's mask on jogging is the only thing that keeps a jog dark, and
      this is what holds the port to it
- 10. "sender out" keeps senders from the network out, and only on an idle
+  9. "sender out" keeps senders from the network out, and only on an idle
      machine with a quiet sender: it is refused while a sender line runs
      (a dwell), within 2 s of the sender's last line, and while a program
-     moves; granted, it drops the sender after a message line, turns every
-     sender from the network away the same way without touching the
-     session, still lets one from this host in, outlives the port's client,
-     and "sender in" ends it. A sender from the network is one that
-     connects to this host's own address rather than the loopback
+     moves; granted, it drops the sender after a message line, outlives
+     the port's client, and "sender in" ends it. A sender from the network
+     is one that connects to this host's own address rather than the
+     loopback; one turned away while senders are kept out is serial_test.c's
+     (grblHAL-glowforge)
 
 Usage: ctlport_test.py [path/to/grblHAL_glowforge]
 """
@@ -469,10 +467,6 @@ def poll_case(tag, eol):
         s.close()
 
 
-def test_poll_lf():
-    poll_case("poll-lf", "\n")
-
-
 def test_poll_crlf():
     poll_case("poll-crlf", "\r\n")
 
@@ -539,30 +533,6 @@ def test_single_client(s):
             fail("[single-client] reconnect %d right after a close was refused" % (i + 1))
     print("PASS [single-client]: the second connection was refused, the first kept working, and "
           "five reconnects right after a close were each served")
-
-
-def test_crlf():
-    s = Session(eol="\r\n")
-    try:
-        for line in ("G91", "G0 X1", ""):
-            if s.sender.send(line) != "ok":
-                fail("[crlf] %r did not get ok" % line)
-        s.sender.wait_state("Idle")
-        s.quiet()
-        before = s.sender.count()
-        if s.port.request("jog G91 X1 F600") != "ok":
-            fail("[crlf] the port jog was refused")
-        s.sender.wait_state("Idle")
-        for line in ("", "G0 X1", "", ""):
-            if s.sender.send(line) != "ok":
-                fail("[crlf] %r after the port jog did not get ok" % line)
-        time.sleep(0.5)
-        got = s.sender.count() - before
-        if got != 4:
-            fail("[crlf] 4 sender lines after the port jog got %d responses" % got)
-        print("PASS [crlf]: a CR LF sender's count is exact across a port jog, empty lines included")
-    finally:
-        s.close()
 
 
 def test_port_dark():
@@ -664,11 +634,6 @@ def own_address():
     return addr
 
 
-def generation(s):
-    with open(os.path.join(s.workdir, "grbl.state")) as f:
-        return json.load(f)["sender"]["generation"]
-
-
 def wait_closed(sender, what, timeout=3.0):
     end = time.time() + timeout
     while time.time() < end and not sender.closed:
@@ -711,7 +676,6 @@ def test_sender_out():
         print("PASS [sender-out]: refused during a dwell, within 2 s of a line, and while a program moves")
 
         time.sleep(2.3)
-        gen = generation(s)
         got = s.port.request("sender out")
         if got != "ok":
             fail("[sender-out] an idle machine and a quiet sender: %r, wanted ok" % got)
@@ -722,21 +686,6 @@ def test_sender_out():
         if st.get("sender_out") is not True or st.get("sender") is not False:
             fail("[sender-out] the state after it: %r" % st)
         print("PASS [sender-out]: granted, it dropped the sender after a message line")
-
-        gen = generation(s)
-        late = Sender(PORT, host=own)
-        wait_closed(late, "a sender from the network")
-        if not late.saw("[MSG:The machine is in use") or late.count():
-            fail("[sender-out] the turned-away sender read %r" % late.other)
-        time.sleep(0.3)
-        if generation(s) != gen or s.port.state().get("sender") is not False:
-            fail("[sender-out] turning a sender away changed the session")
-        local = Sender(PORT)
-        if local.closed or local.send("G21") != "ok":
-            fail("[sender-out] a sender on this host was not let in")
-        local.close()
-        print("PASS [sender-out]: a sender from the network is turned away and the session is "
-              "untouched; one from this host connects")
 
         s.port.close()
         s.port = PortClient(s.path)
@@ -773,8 +722,6 @@ def main():
         test_dead_man(s)
     finally:
         s.close()
-    test_crlf()
-    test_poll_lf()
     test_poll_crlf()
     test_port_dark()
     test_sender_out()

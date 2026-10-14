@@ -9,21 +9,20 @@ Runs the native grblHAL_glowforge binary in null-sink mode, with the
 scripted sender and the port client of ctlport_test.py, homing manually
 (nothing moves; X and Y become homed and the envelope is set):
 
-  1. unset keys: X's and Y's far edges are the travel ($130, $131)
-  2. envelope_x_mm and _y set the far edges at a home, and a jog past one
-     is the core's error:15
-  3. a key below GFHOME_ENVELOPE_MIN_MM is held to it, and one past the
-     travel plus GFHOME_ENVELOPE_EXTRA_MM is held to that
-  4. the port's envelope open: refused before a home (error:homed); after
+  1. envelope_x_mm and _y set the far edges at a home, and a jog past one
+     is the core's error:15 (an unset key being the travel, and a key held
+     to GFHOME_ENVELOPE_MIN_MM and to the travel plus
+     GFHOME_ENVELOPE_EXTRA_MM, are lens_home_test.c's in grblHAL-glowforge)
+  2. the port's envelope open: refused before a home (error:homed); after
      one, the port's jogs reach the travel plus 30 mm for X and Y, and the
      port's state says the envelope is open; envelope apply puts the keys'
      edges back without a home
-  5. an open envelope is the port's jogs' alone: a status poll and an
+  3. an open envelope is the port's jogs' alone: a status poll and an
      empty line leave it open, and the sender's first line closes it before
      the core reads the line (the line then answered ok, and the keys'
      edges in force), a port jog it meets canceled
-  6. a soft reset and the port client going away each close it
-  7. envelope open is refused under an open armed window (busy:state)
+  4. a soft reset and the port client going away each close it
+  5. envelope open is refused under an open armed window (busy:state)
 
 Usage: envelope_test.py [path/to/grblHAL_glowforge]
 """
@@ -111,28 +110,12 @@ def saw_within(s, needle, seconds=2.0):
     return s.sender.saw(needle)
 
 
-def test_unset(s):
-    conf(s)
-    home(s)
-    edge(s, "X", TRAVEL_X - 1, TRAVEL_X + 1, "unset")
-    edge(s, "Y", TRAVEL_Y - 1, TRAVEL_Y + 1, "unset")
-    print("PASS [unset]: with no key the far edges are the travel, %.0f and %.0f" % (TRAVEL_X, TRAVEL_Y))
-
-
 def test_measured(s):
     conf(s, envelope_x_mm=480, envelope_y_mm=284.5)
     home(s)
     edge(s, "X", 479, 481, "measured")
     edge(s, "Y", 284, 285, "measured")
     print("PASS [measured]: envelope_x_mm 480 and envelope_y_mm 284.5 (past the travel) are the far edges at a home")
-
-
-def test_bounds(s):
-    conf(s, envelope_x_mm=10, envelope_y_mm=900)
-    home(s)
-    edge(s, "X", 49, 51, "bounds")
-    edge(s, "Y", TRAVEL_Y + EXTRA - 1, TRAVEL_Y + EXTRA + 1, "bounds")
-    print("PASS [bounds]: a key below 50 mm is held to 50, one past the travel plus 30 mm to that")
 
 
 def test_open_apply(s):
@@ -249,9 +232,7 @@ def main():
         fail("no controller binary at %s" % ct.BIN)
     s = ct.Session()
     try:
-        test_unset(s)
         test_measured(s)
-        test_bounds(s)
         test_open_apply(s)
         test_sender_closes(s)
         test_reset_closes(s)

@@ -22,7 +22,7 @@ reported messages:
   5. arming refused while the cooling verdict blocks fire, or before
      the engine acknowledges the session: laser_arm_test.c cases C, A2
      and A3, and cooling_test.c's arm-time gate; the wait for the fans
-     is this harness's
+     is laser_arm_test.c case A4
   6. with a switch source present (GF_SWITCH_FILE), the arm blocks on the
      button: a press with the lid closed arms, and the lid or the
      interlock loop opening during the wait cancels the job (a clean
@@ -558,32 +558,6 @@ def test_rx_overrun_aborts():
         s.close()
 
 
-def test_arm_waits_for_the_fans():
-    """Rule 5: the acknowledgment budget follows the fan grace. The
-    engine acknowledges once the fans are at their floors, seconds after
-    the arm; with cool_fan_grace_s at 8 the controller waits up to 13 s
-    for it, and an acknowledgment at 9 s arms the job rather than
-    refusing it at the old 5 s budget."""
-    ack_s = 9.0
-    s = Session("arm-fans", fire_ok=True, ack_after_s=ack_s,
-                conf_extra="cool_fan_grace_s = 8\n")
-    try:
-        t0 = time.time()
-        s.send_raw("M4 S100")
-        s.send_raw("G1 X1 F600")
-        if not wait_for(s.log, ARMED, 20, s.sock):
-            fail("[arm-fans] the arm never completed with the acknowledgment at %.0f s "
-                 "(the budget did not follow cool_fan_grace_s)" % ack_s)
-        dt = time.time() - t0
-        if dt < ack_s - 0.5:
-            fail("[arm-fans] armed after %.1f s, before the fans were up at %.1f s" % (dt, ack_s))
-        if BLOCKED in "".join(s.log):
-            fail("[arm-fans] the wait for the fans was reported as a refusal")
-        print("PASS [arm-fans]: the arm waited %.1f s for the fans, then armed" % dt)
-    finally:
-        s.close()
-
-
 def test_sigterm_mid_job():
     """Rule 5: a termination signal during an armed job is a STOP, not a
     "finish the job first". The supervisor's expected-stop path (mode
@@ -980,7 +954,6 @@ def main():
     test_lid_cancels_and_returns()
     test_pause_then_lid_cancel_returns_to_the_job_start()
     test_lid_policy_hold()
-    test_arm_waits_for_the_fans()
     test_sigterm_mid_job()
     print("PASS: the armed-window lifecycle holds")
 

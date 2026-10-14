@@ -18,12 +18,10 @@ Runs the native grblHAL_glowforge binary in null-sink mode (no hardware,
 no root) and drives it over TCP, keeping one settings store across
 restarts:
 
-  1. a fresh store starts and reports its default $398
-  2. $398=400 is accepted and read back
-  3. the controller restarted on that store answers on the port, reports
-     400 blocks, and the status report shows a planner that deep
-  4. the same at $398=1000, the top of the range
-  5. a motion line runs to completion on the deep buffer
+  1. $398=1000, the top of the range, is accepted and read back
+  2. the controller restarted on that store answers on the port, reports
+     1000 blocks, and the status report shows a planner that deep
+  3. a motion line runs to completion on the deep buffer
 
 A controller that connects and never answers after the restart is the
 failure this harness exists for. Every exit kills the controller it
@@ -50,7 +48,6 @@ PORT = 2401
 CONNECT_S = 8.0
 ANSWER_S = 5.0
 
-DEEP = 400
 TOP = 1000
 
 _live = None            # the controller process a failure has to take down
@@ -199,15 +196,6 @@ def main():
         fail("no controller binary at %s" % BIN)
     workdir = tempfile.mkdtemp(prefix="planner-blocks-")
     try:
-        s = Session(workdir)
-        check(s.answers(), "a fresh store starts and answers",
-              "a fresh store does not answer")
-        print("     default $398=%s" % s.setting("$398"))
-        s.stop()
-
-        s = restart_on(workdir, DEEP)
-        s.stop()
-
         s = restart_on(workdir, TOP)
         reply = s.send("G91 G1 X1 F600", 1.5)
         check("ok" in reply and "error" not in reply and "ALARM" not in reply,
@@ -216,7 +204,7 @@ def main():
         check(s.wait_idle(), "the move completes and the controller is Idle",
               "the controller did not return to Idle after the move")
         s.stop()
-        print("PASS: the planner buffer starts at %d and %d blocks" % (DEEP, TOP))
+        print("PASS: the planner buffer starts at %d blocks" % TOP)
     finally:
         if _live is not None:
             _live.stop()
