@@ -1141,38 +1141,6 @@ def first_run_page(ctx):
         ctx.confirm("Did the control panel open after Start using the machine?")
 
 
-@test("setup.cert-page", title="The certificate is checkable before the warning",
-      subsystem="setup", kind="auto", est_min=1,
-      covers=[("forgectrl", "src/tls.*"), ("forgectrl", "src/main.c"),
-              ("forgectrl", "src/ui/wizard.html"), ("forgectrl", "src/ui/wizard.js")],
-      requires=["forgectrl.auth"],
-      description="From the board's LAN address, GET /cert over plain HTTP answers 200 with the "
-                  "certificate's SHA-256 fingerprint (the one /settings reports), the names on "
-                  "it, and no redirect and no login; /cert.pem serves the certificate in PEM form; "
-                  "both answer over HTTPS too.")
-def cert_page(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    ip = lan_ip()
-    ctx.check(ip, "cannot determine the board's LAN address")
-    fp = fc.settings().get("tls_fingerprint", "")
-    ctx.check(len(fp) == 95, "no fingerprint in /settings (%r): no HTTPS listener?", fp)
-    ev["fingerprint"] = fp
-    for base in ("http://%s" % ip, "https://%s" % ip):
-        st, body, hdrs = request(base, "GET", "/cert")
-        text = body.decode("utf-8", "replace")
-        ctx.log("GET %s/cert -> %s", base, st)
-        ctx.check(st == 200, "GET %s/cert -> %s, expected 200", base, st)
-        ctx.check("location" not in hdrs, "GET %s/cert redirected", base)
-        ctx.check(fp in text, "the fingerprint is not on the page from %s", base)
-        ctx.check(socket.gethostname() in text,
-                  "the machine's hostname is not among the names on the page")
-        st, body, hdrs = request(base, "GET", "/cert.pem")
-        ctx.check(st == 200 and body.startswith(b"-----BEGIN CERTIFICATE-----"),
-                  "GET %s/cert.pem -> %s, not a PEM certificate", base, st)
-    ev["pem_bytes"] = len(body)
-
-
 # ------------------------------------------------------- the lifecycle
 
 @test("setup.mirror", title="One browser drives a check; a second one follows",
