@@ -14,6 +14,10 @@
 #  - the extension key: the public key the image installs for the official
 #    tier is byte-identical to the one the extension catalog publishes
 #    (keys/forgefirm-ext.pub on its main branch)
+#  - the catalog's address: EXTPKG_INDEX_URL in the pinned forgectrl's
+#    src/extpkg.h is the catalog's latest-release download of the file its
+#    tools/publish.py passes to gh release create; read, never requested
+#    (every request of it is counted as a download)
 #  - coverage lint: every source path of every component pinned by the
 #    recipes must be selected by some catalog test's coverage globs or by a
 #    host-tested row naming the host test that proves it (the tree manifest
@@ -60,6 +64,15 @@ jobs:
           ref: main
           path: forgefirm-extensions-catalog
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Tree manifest from the recipe pins (also fetches the pinned app sources the needle check reads)
+        working-directory: forgefirm
+        run: python scripts/manifest-from-tree.py --out tree-manifest.json
+
       - name: The image's extension key is the catalog's published key
         run: |
           image=forgefirm/meta-forgefirm/recipes-forgefirm/forgefirm-keys/files/ext/forgefirm-ext.pub
@@ -69,14 +82,58 @@ jobs:
           done
           cmp -s "$image" "$published" || { echo "$image is not $published"; exit 1; }
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      - name: The catalog's address in the pinned forgectrl is the file the catalog publishes (read, never requested)
+        run: |
+          python3 - <<'EOF'
+          import ast, glob, os, re, subprocess, sys
 
-      - name: Tree manifest from the recipe pins (also fetches the pinned app sources the needle check reads)
-        working-directory: forgefirm
-        run: python scripts/manifest-from-tree.py --out tree-manifest.json
+          PREFIX = "https://github.com/openglow-org/forgefirm-extensions-catalog/releases/latest/download/"
+
+          def fail(why):
+              print(why)
+              sys.exit(1)
+
+          # forgectrl's pin, and its src/extpkg.h from the tree manifest's cache
+          pin = open("forgefirm/meta-forgefirm/recipes-forgefirm/forgectrl/forgectrl-pin.inc").read()
+          m = re.search(r'^SRCREV = "([0-9a-f]{40})"$', pin, re.M)
+          if not m:
+              fail("forgectrl-pin.inc names no SRCREV")
+          rev = m.group(1)
+          header = None
+          for repo in sorted(glob.glob("forgefirm/.manifest-cache/*")):
+              p = subprocess.run(["git", "-C", repo, "show", rev + ":src/extpkg.h"], capture_output=True, text=True)
+              if p.returncode == 0:
+                  header = p.stdout
+                  break
+          if header is None:
+              fail("forgectrl %s is not in forgefirm/.manifest-cache" % rev)
+          m = re.search(r'#define\s+EXTPKG_INDEX_URL\s*(?:\\\n\s*)?"([^"]*)"', header)
+          if not m:
+              fail("forgectrl %s's src/extpkg.h defines no EXTPKG_INDEX_URL" % rev[:7])
+          url = m.group(1)
+
+          # the file the catalog's publish tool passes to gh release create
+          tree = ast.parse(open("forgefirm-extensions-catalog/tools/publish.py").read())
+          assigned = {n.targets[0].id: n.value for n in ast.walk(tree)
+                      if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+
+          def file_name(v):
+              if isinstance(v, ast.Name):
+                  v = assigned.get(v.id)
+              if isinstance(v, ast.Call) and v.args:
+                  v = v.args[-1]
+              return os.path.basename(v.value) if isinstance(v, ast.Constant) and isinstance(v.value, str) else None
+
+          names = [file_name(n.args[3]) if len(n.args) > 3 else None for n in ast.walk(tree)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "gh"
+                   and [a.value for a in n.args[:2] if isinstance(a, ast.Constant)] == ["release", "create"]]
+          if len(names) != 1 or not names[0]:
+              fail("tools/publish.py passes no one file to gh release create: %s" % names)
+
+          print("forgectrl %s: %s; the catalog publishes %s" % (rev[:7], url, names[0]))
+          if url != PREFIX + names[0]:
+              fail("the address is not %s" % (PREFIX + names[0]))
+          EOF
 
       - name: Unit tests
         working-directory: forgefirm/forgetest

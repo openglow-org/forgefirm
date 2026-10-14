@@ -3,13 +3,10 @@
 # https://community.openglow.org
 # SPDX-License-Identifier:    MIT
 
-"""logs.* - unified logging: the log tree, tail, and the sanitized export;
-the routing path (emitters, relays, rendered rules); the level settings."""
-import gzip
-import io
+"""logs.* - unified logging: the routing path (emitters, relays, rendered
+rules); the level settings."""
 import os
 import re
-import tarfile
 import time
 
 from ..catalog import test
@@ -24,137 +21,7 @@ def _read(path, default=None):
         return default
 
 
-_LOG_COVERS = [("forgectrl", "src/logs.*"), ("forgectrl", "src/fflog.*"), ("forgectrl", "src/sanitize.*"),
-               ("forgectrl", "src/extpkg.*"), ("forgectrl", "src/main.c")]
-
 LOGS_ROOT = "/data/log/forgefirm"
-# What the export test plants in the installer's directory: a line to find
-# again, and two addresses (documentation ranges) the sanitizer must take.
-_PROBE_MARK = "forgetest export probe"
-_PROBE_MAC = "02:00:5e:10:20:30"
-_PROBE_IP = "192.0.2.77"
-
-
-@test("logs.tree-tail-export", title="Log tree, tail, and sanitized export", subsystem="logs",
-      kind="auto", est_min=1,
-      covers=_LOG_COVERS, requires=["forgectrl.auth"],
-      description="/logs lists the loggers with their levels and files, /logs/tail returns the "
-                  "forgectrl logger's tail, and POST /logs/export streams a sanitized tar.gz "
-                  "bundle that contains neither the panel token nor the camera key. The bundle "
-                  "also carries the installer's directory of the tree (logs/install/), which no "
-                  "logger feeds: a probe file planted there for the export comes back in the "
-                  "bundle with its addresses redacted, and an install log that the installer "
-                  "left is in the bundle too. system/extensions.json is in it as well: what is "
-                  "installed that is not the firmware, with each package's tier, whether it is "
-                  "enabled, and what the operator granted it, which is what a report about a "
-                  "machine running extensions has to be read against.")
-def tree_tail_export(ctx):
-    install_dir = os.path.join(LOGS_ROOT, "install")
-    probe = os.path.join(install_dir, "forgetest-probe.txt")
-    made_dir = not os.path.isdir(install_dir)
-    try:
-        os.makedirs(install_dir, exist_ok=True)
-        with open(probe, "w") as f:
-            f.write("%s from %s at %s\n" % (_PROBE_MARK, _PROBE_MAC, _PROBE_IP))
-        _tree_tail_export(ctx, probe)
-    finally:
-        try:
-            os.unlink(probe)
-        except OSError:
-            pass
-        if made_dir:
-            try:
-                os.rmdir(install_dir)
-            except OSError:
-                pass
-
-
-def _tree_tail_export(ctx, probe):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    st, body = fc.get("/logs")
-    ctx.log("GET /logs -> %s", st)
-    ctx.check(st == 200 and isinstance(body, dict), "GET /logs -> %s", st)
-    loggers = body.get("loggers") or []
-    names = [l.get("name") for l in loggers] if isinstance(loggers, list) else list(loggers)
-    ev["loggers"] = names
-    ctx.log("loggers: %s", names)
-    ctx.check("forgectrl" in names, "/logs lacks the forgectrl logger: %s", names)
-
-    st, tail = fc.get("/logs/tail", params={"name": "forgectrl", "lines": "20"})
-    ctx.log("GET /logs/tail?name=forgectrl -> %s", st)
-    ctx.check(st == 200, "GET /logs/tail -> %s %s", st, tail if isinstance(tail, dict) else "")
-    st, tail = fc.get("/logs/tail", params={"name": "no-such-logger"})
-    ctx.check(st == 404, "unknown logger -> %s, expected 404", st)
-
-    # the sanitizer walks every log file; a full tree takes tens of
-    # seconds on the target, so this call gets its own client timeout
-    slow = hw.Forgectrl(token=fc.token, timeout=300.0)
-    t0 = time.time()
-    st, data = slow.post("/logs/export", raw=True)
-    ev["export_s"] = round(time.time() - t0, 1)
-    ctx.log("POST /logs/export -> %s (%d bytes, %.1f s)", st, len(data) if data else 0, ev["export_s"])
-    ctx.check(st == 200, "POST /logs/export -> %s", st)
-    ev["export_bytes"] = len(data)
-    try:
-        raw = gzip.decompress(data)
-        tf = tarfile.open(fileobj=io.BytesIO(raw))
-        members = tf.getnames()
-    except (OSError, tarfile.TarError, EOFError) as e:
-        ctx.fail("export is not a readable tar.gz: %s", e)
-    ev["members"] = len(members)
-    ctx.log("bundle: %d members, e.g. %s", len(members), members[:5])
-    ctx.check(members, "empty bundle")
-    ctx.check(any(m.endswith("README.txt") for m in members), "sanitized bundle lacks README.txt")
-    # the two secrets the sanitizer knows by value and a bundle could
-    # carry: the panel token and the camera key (a URL parameter that
-    # lands in sender logs)
-    secrets = {}
-    if fc.token:
-        secrets["panel token"] = fc.token
-    st, body = fc.get("/system/camera-key")
-    if st == 200 and isinstance(body, dict) and body.get("key"):
-        secrets["camera key"] = body["key"]
-    ctx.check("camera key" in secrets, "GET /system/camera-key -> %s: no key to check for", st)
-    contents = [(m.name, tf.extractfile(m).read()) for m in tf.getmembers() if m.isfile()]
-    for what, value in secrets.items():
-        leaked = [name for name, content in contents if value.encode() in content]
-        ev[what.replace(" ", "_") + "_leaks"] = leaked
-        ctx.check(not leaked, "the sanitized bundle contains the %s: %s", what, leaked)
-
-    # the installer's directory: no logger feeds it, the export carries it
-    by_name = dict(contents)
-    want = "logs/install/" + os.path.basename(probe)
-    got = [name for name in by_name if name.endswith(want)]
-    ev["install_members"] = sorted(name for name in by_name if "/logs/install/" in name)
-    ctx.check(got, "the bundle lacks %s: %s", want, ev["install_members"])
-    if got:
-        text = by_name[got[0]].decode("utf-8", "replace")
-        ctx.check(_PROBE_MARK in text, "the probe file came back without its line: %r", text)
-        for what, value in (("MAC address", _PROBE_MAC), ("IPv4 address", _PROBE_IP)):
-            ctx.check(value not in text, "the install directory left the sanitizer with its %s", what)
-    if os.path.isfile(os.path.join(os.path.dirname(probe), "install.log")):
-        ctx.check(any(name.endswith("logs/install/install.log") for name in by_name),
-                  "the machine has an install log and the bundle does not")
-
-    # What is installed that is not the firmware. A report that starts "it
-    # stopped working" reads differently with packages on the machine, and
-    # the bundle is where that is read.
-    import json
-
-    ext = [name for name in by_name if name.endswith("system/extensions.json")]
-    ctx.check(ext, "the bundle carries no system/extensions.json")
-    if ext:
-        doc = json.loads(by_name[ext[0]].decode("utf-8", "replace"))
-        ev["extensions"] = {"enabled": doc.get("enabled"), "safe_mode": doc.get("safe_mode"),
-                            "packages": [{k: p.get(k) for k in ("id", "version", "tier", "enabled", "grants")}
-                                         for p in doc.get("packages", [])]}
-        ctx.log("the bundle's extension listing: %s", ev["extensions"])
-        ctx.check(set(doc) >= {"enabled", "safe_mode", "host", "packages"},
-                  "the listing is not the status document: %s", sorted(doc))
-        for p in doc.get("packages", []):
-            ctx.check(set(p) >= {"id", "version", "tier", "enabled", "grants"},
-                      "a listed package does not say what it is: %s", sorted(p))
 
 
 # The routing test proves the whole path every logger takes: emitter (or
@@ -200,7 +67,7 @@ def _wait_line(path, needle, timeout=6.0):
 
 @test("logs.routing", title="Log routing, relays, and the rendered rules", subsystem="logs",
       kind="auto", est_min=1,
-      covers=_ROUTING_COVERS, requires=["logs.tree-tail-export"],
+      covers=_ROUTING_COVERS,
       description="rsyslog is the only logger (no busybox syslogd/klogd), the rules rendered from "
                   "the settings and the effective-levels record exist and agree with /logs, every "
                   "logger has its directory, the daemon's own emitter and the per-controller "

@@ -151,6 +151,14 @@ HOST_TESTED = [
     # The camera key: made, kept, checked and rotated (the reads it opens
     # from the LAN with the reads closed are tests/host_lan.sh).
     ("forgectrl", "src/camkey.*", "forgectrl:tests/camkey_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The log export's sanitizer: every identifying class taken out, the
+    # ordinary log text left as it was (the export's routes and the
+    # installer's directory on a host are tests/host_guard.sh).
+    ("forgectrl", "src/sanitize.*", "forgectrl:tests/sanitize_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The package routes' relay to the extension host: the argument vector,
+    # the closed list of actions, the host's words, the catalog's fetch (the
+    # routes against a live host's stand-in are tests/host_ext.sh).
+    ("forgectrl", "src/extpkg.*", "forgectrl:tests/extpkg_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a
