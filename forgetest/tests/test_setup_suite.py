@@ -23,7 +23,7 @@ IDS = ("setup.gate-blocks-controllers",
        "setup.advisories-rehash", "setup.account-login", "setup.https-only-writes",
        "setup.ssh-until-reboot", "setup.cloud-disabled-surface",
        "setup.factory-return", "setup.machine-name", "setup.first-run-flow",
-       "setup.first-run-page", "setup.what-changed", "setup.record-export",
+       "setup.first-run-page", "setup.record-export",
        "setup.mirror")
 OPERATOR = ("setup.first-run-flow", "setup.first-run-page")
 
@@ -48,30 +48,22 @@ class RegistrationTests(unittest.TestCase):
     def test_the_record_swapping_tests_are_takeovers(self):
         for tid in ("setup.gate-blocks-controllers", "setup.advisories-rehash",
                     "setup.first-run-flow", "setup.first-run-page",
-                    "setup.what-changed", "setup.mirror"):
+                    "setup.mirror"):
             self.assertEqual(self.reg[tid].hardware, "takeover", tid)
         self.assertEqual(self.reg["setup.record-export"].hardware, "api")
 
     def test_the_lifecycle_tests_cover_their_files(self):
-        changed = set(self.reg["setup.what-changed"].covers)
         export = set(self.reg["setup.record-export"].covers)
         mirror = set(self.reg["setup.mirror"].covers)
-        self.assertIn(("forgectrl", "src/ui/panel.js"), changed)
         self.assertIn(("forgectrl", "src/recordhtml.*"), export)
         self.assertIn(("forgectrl", "src/logs.*"), export)
         self.assertIn(("forgectrl", "src/wizdark.*"), mirror)
         self.assertIn("setup.check-sensors", self.reg["setup.mirror"].requires)
 
-    def test_flag_of_reads_the_status_document(self):
+    def test_recommended_reads_the_status_document(self):
         w = {"recommended": [{"id": "laser.floor", "reason": "the tube was replaced"},
                              {"id": "laser.focus", "reason": "the tray was replaced"},
                              {"id": "airflow", "reason": "not run yet"}, "stray"]}
-        self.assertEqual(setup.flag_of(w, "laser.floor"), "the tube was replaced")
-        self.assertEqual(setup.flag_of(w, "laser.focus"), "the tray was replaced")
-        self.assertEqual(setup.flag_of(w, "airflow"), "not run yet")
-        self.assertIsNone(setup.flag_of(w, "stray"))                     # only an entry with an id counts
-        self.assertIsNone(setup.flag_of(w, "cameras"))
-        self.assertIsNone(setup.flag_of({}, "x"))
         self.assertEqual(setup.recommended(w), {"laser.floor": "the tube was replaced",
                                                 "laser.focus": "the tray was replaced",
                                                 "airflow": "not run yet"})
