@@ -60,6 +60,10 @@ reported messages:
  15. a press counts only after the button has been seen up: a press that
      began before the wait is not consent (the harness's own presses
      follow a fresh prompt for the same reason)
+ 16. a job paused on the button is not resumable past a lid open: the lid
+     cancels it from the hold - reason reported, the reset banner, no
+     alarm, the return to the job start - and a later press resumes
+     nothing
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -864,6 +868,57 @@ def test_pause_then_lid_cancel_returns_to_the_job_start():
         s.close()
 
 
+def test_lid_cancel_from_hold():
+    """Rule 16: a job paused on the button is not resumable past a lid
+    open. The lid cancels it from the hold as it does from Run - the
+    reason reported, the reset banner, no alarm, the head back at the job
+    start - and a press once the lid is closed again resumes nothing."""
+    s = Session("hold-lid-cancel", disarm_s=60, switches=SW_CLOSED)
+    try:
+        x0 = s.mpos_x()
+        if x0 is None:
+            fail("[hold-lid-cancel] no position in the status report")
+        s.send_raw("M5")
+        s.send_raw("G91")
+        s.send_raw("G1 X40 F300")                       # 8 s
+        if not s.wait_state("Run", 5):
+            fail("[hold-lid-cancel] the job never reported Run")
+        time.sleep(1.0)
+        s.press_button()
+        if not s.wait_state("Hold", 3):
+            fail("[hold-lid-cancel] the press did not feed-hold (state %s)" % s.state())
+        x_held = s.mpos_x()
+        s.set_switches(SW_LID_OPEN)
+        if not wait_for(s.log, "lid opened - job canceled", 5, s.sock):
+            fail("[hold-lid-cancel] the lid open did not cancel the held job")
+        if not wait_for(s.log, "for help]", 5, s.sock):
+            fail("[hold-lid-cancel] no reset banner after the cancel")
+        if not wait_for(s.log, "returned to the job start", 15, s.sock):
+            fail("[hold-lid-cancel] the head did not report returning to the job start")
+        if not s.wait_state("Idle", 5):
+            fail("[hold-lid-cancel] not Idle after the return (state %s)" % s.state())
+        if "ALARM" in "".join(s.log):
+            fail("[hold-lid-cancel] an alarm was raised on the cancel (position should be kept)")
+        x_end = s.mpos_x()
+        if x_end is None or abs(x_end - x0) > 0.05:
+            fail("[hold-lid-cancel] head not back at the job start: MPos X=%s (start %.3f, held "
+                 "at %s)" % (x_end, x0, x_held))
+        s.set_switches(SW_CLOSED)
+        time.sleep(0.5)
+        s.press_button()
+        read_avail(s.sock, s.log, 1.0)
+        st = s.state()
+        x_after = s.mpos_x()
+        if not st.startswith("Idle") or x_after is None or abs(x_after - x_end) > 0.05:
+            fail("[hold-lid-cancel] a press after the cancel resumed the job (state %s, X=%s)"
+                 % (st, x_after))
+        print("PASS [hold-lid-cancel]: held at X=%.3f, the lid canceled the held job, reset "
+              "banner, no alarm, returned to X=%.3f; a later press resumed nothing"
+              % (x_held, x_end))
+    finally:
+        s.close()
+
+
 def test_lid_policy_hold():
     """lid_policy = hold keeps stock grblHAL behavior: the lid parks the job
     in Door and a cycle start resumes it once closed."""
@@ -953,6 +1008,7 @@ def main():
     test_button_pause_resume()
     test_lid_cancels_and_returns()
     test_pause_then_lid_cancel_returns_to_the_job_start()
+    test_lid_cancel_from_hold()
     test_lid_policy_hold()
     test_sigterm_mid_job()
     print("PASS: the armed-window lifecycle holds")
