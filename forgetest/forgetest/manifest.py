@@ -140,6 +140,10 @@ HOST_TESTED = [
     # The setup record as a printable page: no script, the sheet id, a
     # heading for each completed step, everything escaped.
     ("forgectrl", "src/recordhtml.*", "forgectrl:tests/recordhtml_test.c", "forgectrl:.github/workflows/build.yml"),
+    # An extension package's claim on the Grbl sender as the machine keeps
+    # it: the claim and its refusals, its end by the package, the operator
+    # or a stale keeper (forgeext's run_test proves the writer's side).
+    ("forgectrl", "src/senderout.*", "forgectrl:tests/senderout_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a
