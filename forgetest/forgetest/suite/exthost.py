@@ -888,8 +888,9 @@ def _as_found(ctx, fc, prior, raw, dir_mode, found_tree):
 
 @test("exthost.service", title="A package's service runs confined under the extension host",
       subsystem="exthost", kind="auto", hardware="takeover", est_min=5,
-      covers=[("forgeext", "**"), ("forgectrl", "src/main.c"), ("forgectrl", "src/logs.*")],
-      requires=["exthost.platform", "setup.extensions-consent"],
+      covers=[("forgeext", "**"), ("forgectrl", "src/main.c"), ("forgectrl", "src/logs.*"),
+              ("forgectrl", "docs/advisories/extensions.md")],
+      requires=["exthost.platform"],
       description="The extension host is one running process (/usr/bin/forgeext run) and the status "
                   "file is its word, and with extensions off it runs nothing and says why. The test builds a reference "
                   "package on the board, signs it with a key it makes there, and adds that key as an owner "

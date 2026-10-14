@@ -5,9 +5,8 @@
 
 """The setup.* suite on the host: the registration (ids, kinds, the
 takeover tests, the operator tests' hands), the record builders, the
-machine's name, the cookie parsing, the LED cue, the settle rule for a
-gated supervisor, and the cloud-off surface test driven end to end
-against the fake daemon."""
+machine's name, the cookie parsing, the LED cue, and the settle rule
+for a gated supervisor."""
 import json
 import os
 import shutil
@@ -16,13 +15,10 @@ import unittest
 
 import helpers
 from forgetest import baseline, catalog
-from forgetest.runner import Context, Failed, Run
 from forgetest.suite import setup
 
-IDS = ("setup.gate-blocks-controllers",
-       "setup.advisories-rehash", "setup.account-login", "setup.https-only-writes",
-       "setup.ssh-until-reboot", "setup.cloud-disabled-surface",
-       "setup.factory-return", "setup.machine-name", "setup.first-run-flow",
+IDS = ("setup.account-login", "setup.https-only-writes",
+       "setup.ssh-until-reboot", "setup.factory-return", "setup.machine-name", "setup.first-run-flow",
        "setup.first-run-page", "setup.record-export",
        "setup.mirror")
 OPERATOR = ("setup.first-run-flow", "setup.first-run-page")
@@ -46,9 +42,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertNotIn("setup.sheet", self.reg)                  # the two burns, each on its own scrap
 
     def test_the_record_swapping_tests_are_takeovers(self):
-        for tid in ("setup.gate-blocks-controllers", "setup.advisories-rehash",
-                    "setup.first-run-flow", "setup.first-run-page",
-                    "setup.mirror"):
+        for tid in ("setup.first-run-flow", "setup.first-run-page", "setup.mirror"):
             self.assertEqual(self.reg[tid].hardware, "takeover", tid)
         self.assertEqual(self.reg["setup.record-export"].hardware, "api")
 
@@ -75,9 +69,8 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(setup.REQUIRED_STEPS, ("preferences", "machine", "cloud", "cooling.flow"))
         self.assertIn("cooling.flow", setup.REQUIRED_STEPS)
 
-    def test_the_gate_test_starts_from_an_open_gate_and_the_intake_tests_from_a_count(self):
+    def test_the_intake_tests_start_from_a_count(self):
         reg = self.reg
-        self.assertIs(reg["setup.gate-blocks-controllers"].precheck, setup.gate_is_open)
         from forgetest.suite import setup_dark
         for tid in ("setup.check-intakes", "setup.check-airflow"):
             self.assertIs(reg[tid].precheck, setup_dark.intakes_counted, tid)
@@ -374,124 +367,6 @@ class SshdPolicyTests(unittest.TestCase):
             self.assertEqual(setup.sshd_policy(), {"error": "sshd: no hostkeys available"})
         finally:
             hw.run = real
-
-
-class CloudDisabledSurfaceTests(unittest.TestCase):
-    """The cloud-off surface test against the fake daemon: cloud_enabled
-    is turned off with one write that sweeps the cloud choices, the three
-    cloud-pointing writes and the phrase-less cloud_enabled=1 are refused,
-    the settings are left alone, and the prior values come back."""
-
-    def setUp(self):
-        self.fake = helpers.FakeForgectrl().start()
-        self.fake.state["settings"].update({"controller_mode": "grbl", "homing_mode": "none",
-                                            "cloud_enabled": "1", "ui_units": "metric"})
-
-        def on_post(path, form):
-            s = self.fake.state["settings"]
-            if path == "/settings":
-                # as the daemon rules it: on from off takes the typed phrase
-                if form.get("cloud_enabled") == "1" and s.get("cloud_enabled") != "1" \
-                        and form.get("phrase") != "I UNDERSTAND":
-                    return 400, "type I UNDERSTAND to turn cloud mode on"
-                # the request's own cloud choices, as main.c checks them
-                enabled = form.get("cloud_enabled", s.get("cloud_enabled")) == "1"
-                if not enabled and form.get("controller_mode") == "cloud":
-                    return 409, "cloud mode is not enabled on this machine"
-                if not enabled and form.get("homing_mode") == "gfcloud":
-                    return 409, "cloud homing needs cloud mode enabled"
-                for k, v in form.items():
-                    if k == "phrase":
-                        continue
-                    if v == "":
-                        s.pop(k, None)
-                    else:
-                        s[k] = v
-                # off sweeps what pointed at the cloud, as the cloud step does
-                if form.get("cloud_enabled") == "0":
-                    if "homing_mode" not in form and s.get("homing_mode") == "gfcloud":
-                        s["homing_mode"] = "none"
-                    if "controller_mode" not in form and s.get("controller_mode") == "cloud":
-                        s["controller_mode"] = "grbl"
-                return 200, dict(s)
-            if path == "/mode" and form.get("controller") == "cloud" and s.get("cloud_enabled") != "1":
-                return 409, "cloud mode is not enabled on this machine"
-            return None
-        self.fake.on_post = on_post
-        self.list_lies = None               # a test sets this to break the list one way
-
-        def on_get(path, query):
-            if path != "/extensions":
-                return None
-            s = self.fake.state["settings"]
-            on = s.get("cloud_enabled") == "1"
-            roles = [{"role": role, "provider": prov, "kind": kind, "select_key": key, "fallback": back,
-                      "active": on and s.get(key) == prov}
-                     for role, prov, kind, key, back in (("homing", "gfcloud", "runner-fd", "homing_mode", "none"),
-                                                         ("controller", "cloud", "supervised", "controller_mode",
-                                                          "grbl"))]
-            if self.list_lies == "stale-active":
-                roles[0]["active"] = True
-            if self.list_lies == "always-on":
-                on = True
-            return 200, {"extensions": [{"id": "cloud", "name": "Glowforge cloud mode", "builtin": True,
-                                         "enabled": on, "enable_key": "cloud_enabled", "setup_step": "cloud",
-                                         "tab": "gfcloud", "roles": roles}]}
-        self.fake.on_get = on_get
-
-    def tearDown(self):
-        self.fake.stop()
-
-    def run_test(self):
-        t = catalog.load_suite()["setup.cloud-disabled-surface"]
-        run = Run("test", t.id, t.title)
-        t.fn(Context(run, None, t))
-        return run
-
-    def test_a_list_that_disagrees_with_the_settings_fails(self):
-        for lie in ("always-on", "stale-active"):
-            self.list_lies = lie
-            self.fake.state["settings"].update({"cloud_enabled": "1", "homing_mode": "gfcloud"})
-            with self.assertRaises(Failed, msg=lie):
-                self.run_test()
-
-    def test_refusals_and_restore(self):
-        run = self.run_test()
-        s = self.fake.state["settings"]
-        self.assertEqual(s["cloud_enabled"], "1")                  # restored, with the phrase
-        self.assertEqual(s["controller_mode"], "grbl")
-        self.assertEqual(s["homing_mode"], "none")
-        self.assertNotIn("phrase", s)
-        posts = [(p, f) for p, f in self.fake.posts]
-        self.assertIn(("/settings", {"cloud_enabled": "0"}), posts)
-        self.assertIn(("/settings", {"cloud_enabled": "1"}), posts)          # refused: no phrase
-        self.assertIn(("/settings", {"cloud_enabled": "1", "phrase": "I UNDERSTAND"}), posts)
-        self.assertIn(("/mode", {"controller": "cloud"}), posts)
-        self.assertEqual(run.evidence["mode_cloud"]["status"], 409)
-        self.assertEqual(run.evidence["settings cloud_enabled=1 no phrase"], 400)
-        self.assertEqual(run.evidence["found"]["cloud_enabled"], "1")
-
-    def test_cloud_homing_and_boot_mode_are_swept_by_the_one_write_and_go_back(self):
-        # As the daemon rules it: cloud_enabled=0 takes the gfcloud homing
-        # and the cloud boot mode down with it, so the test writes the one
-        # key, checks the sweep, and puts the three back, cloud mode first.
-        self.fake.state["settings"].update({"controller_mode": "cloud", "homing_mode": "gfcloud"})
-        run = self.run_test()
-        s = self.fake.state["settings"]
-        self.assertEqual((s["cloud_enabled"], s["homing_mode"], s["controller_mode"]), ("1", "gfcloud", "cloud"))
-        posts = [(p, f) for p, f in self.fake.posts if p == "/settings"]
-        order = [f for _, f in posts]
-        self.assertEqual(order[:1], [{"cloud_enabled": "0"}])
-        self.assertEqual(order[-3:], [{"cloud_enabled": "1", "phrase": "I UNDERSTAND"},
-                                      {"homing_mode": "gfcloud"}, {"controller_mode": "cloud"}])
-        self.assertEqual(run.evidence["found"], {"cloud_enabled": "1", "homing_mode": "gfcloud",
-                                                 "controller_mode": "cloud"})
-
-    def test_an_unset_value_is_cleared_back(self):
-        self.fake.state["settings"].pop("cloud_enabled")
-        self.run_test()
-        self.assertNotIn("cloud_enabled", self.fake.state["settings"])
-        self.assertIn(("/settings", {"cloud_enabled": ""}), self.fake.posts)
 
 
 if __name__ == "__main__":

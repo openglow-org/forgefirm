@@ -131,6 +131,12 @@ HOST_TESTED = [
     # The M-code relay to the package that answers (the controller's side is
     # the null-sink mcode_test harness, under grblhal-glowforge's src/**).
     ("forgectrl", "src/mcode.*", "forgectrl:tests/mcode_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The digest primitives (SHA-256, HMAC, the constant-time compare) that
+    # the advisories' hashes, the tokens and the camera key are made with.
+    ("forgectrl", "src/sha256.*", "forgectrl:tests/sha256_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The built-in extensions' table: the cloud entry, its refusals while it
+    # is off, the sweep when it goes off, the list.
+    ("forgectrl", "src/builtin.*", "forgectrl:tests/builtin_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a
