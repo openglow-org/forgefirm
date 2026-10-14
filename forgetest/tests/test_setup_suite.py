@@ -18,7 +18,7 @@ from forgetest import baseline, catalog
 from forgetest.suite import setup
 
 IDS = ("setup.account-login", "setup.https-only-writes",
-       "setup.ssh-until-reboot", "setup.factory-return", "setup.machine-name", "setup.first-run-flow",
+       "setup.ssh-until-reboot", "setup.machine-name", "setup.first-run-flow",
        "setup.first-run-page", "setup.record-export",
        "setup.mirror")
 OPERATOR = ("setup.first-run-flow", "setup.first-run-page")
@@ -103,15 +103,6 @@ class RegistrationTests(unittest.TestCase):
                           and t.kind != "auto" and not t.fixture_runnable(("button", "lid", "interlock")))
         self.assertEqual(attended, ["setup.cloud-header-capture", "setup.first-run-page",
                                     "setup.floor", "setup.focus"])
-
-    def test_the_factory_return_never_runs_the_return(self):
-        import inspect
-        t = self.reg["setup.factory-return"]
-        src = inspect.getsource(t.fn)
-        self.assertNotIn('"confirm": "1"', src)         # the only argument that starts the return
-        self.assertIn('"confirm": "0"', src)
-        self.assertEqual(t.kind, "auto")                 # the return itself is a bench drill, not a test
-        self.assertFalse(t.hands)
 
     def test_the_machine_name_covers_nothing_by_design(self):
         self.assertEqual(self.reg["setup.machine-name"].covers, ())

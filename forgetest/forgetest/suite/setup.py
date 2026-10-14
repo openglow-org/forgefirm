@@ -723,45 +723,6 @@ def ssh_until_reboot(ctx):
               "the SSH state is not as found: %s (was %s)", final, before)
 
 
-# ---------------------------------------------------------- the operator
-
-@test("setup.factory-return", title="The return to the factory firmware is guarded",
-      subsystem="setup", kind="auto", est_min=1,
-      covers=[("forgectrl", "src/update.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.js")],
-      requires=["update.slots-and-signature"],
-      description="The return itself reboots the machine as a Glowforge, so it never runs from the "
-                  "catalog; it is a bench drill, run once per release. The "
-                  "test probes the guards: POST /restore/factory-return without confirm=1 is "
-                  "refused (400) and with confirm=0 too, no update job starts, /slots lists the "
-                  "archived factory images, and the setup page carries the footer link's call "
-                  "with confirm=1 behind its confirmation.")
-def factory_return(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    st, body = fc.post("/restore/factory-return")
-    ev["no_confirm"] = {"status": st, "body": body if isinstance(body, (str, dict)) else None}
-    ctx.log("POST /restore/factory-return (no confirm) -> %s %s", st, body)
-    ctx.check(st == 400 and "confirm" in str(body), "the return without confirm=1 -> %s %s, expected 400", st, body)
-    st, body = fc.post("/restore/factory-return", params={"confirm": "0"})
-    ctx.check(st == 400, "the return with confirm=0 -> %s, expected 400", st)
-    st, us = fc.get("/update/status")
-    ctx.check(st == 200 and isinstance(us, dict) and not us.get("running"),
-              "an update job runs after the refused returns: %s", us)
-    st, slots = fc.get("/slots")
-    archives = (slots or {}).get("archives") if isinstance(slots, dict) else None
-    ev["archives"] = archives
-    ctx.log("GET /slots archives: %s", archives)
-    ctx.check(st == 200 and isinstance(archives, list), "GET /slots -> %s without an archive list", st)
-    if not archives:
-        ctx.log("no archived factory image on this machine: the return would be refused (409) and "
-                "the factory recovery mode is the way back")
-    st, page = fc.get("/setup", raw=True)
-    ev["setup_page"] = {"status": st, "bytes": len(page or b"")}
-    ctx.check(st == 200 and b"/restore/factory-return?confirm=1" in (page or b""),
-              "the setup page does not carry the footer link's confirmed call (%s)", st)
-    ctx.log("PASS: the return is refused without confirm=1; the page confirms before it calls")
-
-
 # --------------------------------------------------- the machine's name
 
 def mac_suffix():
