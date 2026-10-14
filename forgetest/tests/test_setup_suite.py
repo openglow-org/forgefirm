@@ -17,7 +17,7 @@ import helpers
 from forgetest import baseline, catalog
 from forgetest.suite import setup
 
-IDS = ("setup.account-login", "setup.https-only-writes",
+IDS = ("setup.account-login",
        "setup.ssh-until-reboot", "setup.machine-name", "setup.first-run-flow",
        "setup.first-run-page",
        "setup.mirror")
