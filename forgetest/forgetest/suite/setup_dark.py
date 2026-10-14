@@ -210,7 +210,7 @@ def check_sensors(ctx):
       subsystem="setup", kind="auto", hardware="takeover", est_min=3,
       covers=DARK_COVERS + [("forgectrl", "src/cool.c"), ("forgectrl", "src/airflow.*"),
                             ("forgectrl", "src/gates.c"), ("forgectrl", "src/super.c")],
-      requires=["forgectrl.auth", "cooling.fan-gate-trips"], precheck=intakes_counted,
+      requires=["forgectrl.auth"], precheck=intakes_counted,
       description="POST /wiz/airflow/start: the controller stops, the fans run at the cut profile "
                   "for 35 s, the purge is measured on and off, and the five floors are written: the "
                   "four at 55 percent of steady and the grace from the slowest spin-up. The intake "
@@ -296,7 +296,7 @@ def check_airflow(ctx):
 @test("setup.check-intakes", title="The intake fans step counts the machine's intake fans",
       subsystem="setup", kind="auto", hardware="takeover", est_min=2,
       covers=DARK_COVERS + [("forgectrl", "src/cool.c"), ("forgectrl", "src/airflow.*")],
-      requires=["forgectrl.auth", "cooling.fan-gate-trips"], precheck=intakes_counted,
+      requires=["forgectrl.auth"], precheck=intakes_counted,
       description="POST /wiz/airflow.intakes/start with the intake fan count set (the precheck "
                   "refuses the start without it: the gate would hold every test after this one). "
                   "The controller stops, the fans run at the run profile for 20 s, and the tachs "

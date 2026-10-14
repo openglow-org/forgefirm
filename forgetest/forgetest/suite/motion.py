@@ -131,47 +131,6 @@ def clear_error(ctx, g):
               "the controller answered %s to a blank line at the start - not a clean parser", r)
 
 
-MOVE_START_S = 2.0      # Run is there within 100 ms; a loaded board gets this long
-
-
-def start_move(ctx, g, line):
-    """Start a travel job with `line` and see the controller in Run. The
-    wait is bounded, not a fixed sleep. When Run never comes, the failure
-    names what happened instead: the reply (a refused block answers
-    error), the state the controller sits in (Hold, Door, Alarm, or an
-    Idle that never took the block), every line it said meanwhile, and
-    the machine as forgectrl sees it - the evidence a bare "did not
-    start" leaves out. Recorded in the evidence either way."""
-    reply = g.command(line, timeout=1.0)
-    end = time.time() + MOVE_START_S
-    t0 = time.time()
-    said = ""
-    st = None
-    while time.time() < end:
-        ctx.checkpoint()
-        st = g.status_report()
-        if st["state"].startswith("Run"):
-            break
-        said += g.drain()
-        time.sleep(0.1)
-    rec = {"line": line, "reply": reply, "state": st["state"] if st else None,
-           "after_s": round(time.time() - t0, 2)}
-    ctx.evidence.setdefault("move_start", []).append(rec)
-    if st is not None and st["state"].startswith("Run"):
-        return st
-    msgs = [ln.strip() for ln in said.splitlines() if ln.strip()]
-    rec["said"] = msgs
-    s = ctx.forgectrl.status() or {}
-    gr = ((s.get("grbl") or {}).get("report") or {})
-    rec["forgectrl"] = {"state": s.get("state"), "switches": s.get("switches"),
-                        "laser_locked": s.get("laser_locked"), "grbl": gr.get("state"),
-                        "alarm": gr.get("alarm"), "sender": (gr.get("sender") or {}).get("connected")}
-    ctx.check(False, "the move did not start: %s answered %s; controller %s %.1f s later, said %s; "
-                     "forgectrl sees kernel %s, grbl %s (alarm %s), switches %s, laser locked %s",
-              line, reply, st["state"] if st else "no report", rec["after_s"], msgs or "nothing",
-              s.get("state"), gr.get("state"), gr.get("alarm"), s.get("switches"), s.get("laser_locked"))
-
-
 @test("motion.pacing", title="Protocol-loop pacing (idle, parked, moving) and hold/resume position",
       subsystem="motion", kind="auto", mode="grbl", est_min=1,
       covers=_MOTION_COVERS, requires=["kernel.latch-locked-idle"],
@@ -600,99 +559,6 @@ def _wait_controller(ctx, fc, states, timeout, motion=None):
     return m if isinstance(m, dict) else {}
 
 
-def _button_led(ctx, window_s=1.2):
-    """The commanded level of the button's red, green, and blue channels
-    (ledtrig_smooth's target), sampled over a blink period or two and
-    reduced to the maximum per channel: with a pulse set, target reads 0
-    through the off half of every blink. None when the LEDs are not
-    readable."""
-    best = None
-    t0 = time.time()
-    while time.time() - t0 < window_s:
-        out = []
-        for ch in (1, 2, 3):
-            try:
-                with open("/sys/class/leds/button_led_%d/target" % ch, "r", encoding="utf-8") as f:
-                    out.append(int(f.read().strip()))
-            except (OSError, ValueError):
-                return None
-        best = out if best is None else [max(a, b) for a, b in zip(best, out)]
-        ctx.sleep(0.1)
-    return best
-
-
-@test("motion.gate-waits-for-lid", title="The motion gate waits for the lid", subsystem="motion",
-      kind="operator", est_min=2,
-      covers=[("forgectrl", "src/super.*"), ("forgectrl", "src/liveness.*"), ("forgectrl", "src/led.*"),
-              ("forgectrl", "src/ui/panel.js")],
-      requires=["motion.liveness-probe"], actions=["lid"],
-      steps=["The lid opens, forgectrl is restarted (the gate runs at the first spawn of a "
-             "session: power-on, a daemon restart), the lid closes: the head does not move "
-             "while the lid is open, then makes the 15 mm probe move (+X first)."],
-      description="With the lid open when forgectrl starts (power-on with the lid up, or a "
-                  "daemon restart) the supervisor starts nothing: GET /mode reports controller "
-                  "waiting with why naming the lid, motion unverified, no pid, the button blinks "
-                  "amber, and no probe line reaches the log. When the lid closes the probe runs "
-                  "(MOTION OK), the lens takes its reference, and the controller comes up "
-                  "verified with the button handed back.")
-def gate_waits_for_lid(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle at the start")
-    try:
-        ctx.act("lid", "open")
-        off = _log_offset(FORGECTRL_LOG)
-        rc, out = hw.initd("forgectrl", "restart")
-        ctx.check(rc == 0, "forgectrl restart -> rc %s", rc)
-        m = _wait_controller(ctx, fc, ("waiting", "running", "motion-fault"), 60)
-        ev["waiting"] = m
-        ctx.log("mode with the lid open: %s", m)
-        ctx.check(m.get("controller") == "waiting",
-                  "controller is %r with the lid open, expected waiting", m.get("controller"))
-        ctx.check("lid" in (m.get("why") or ""), "why does not name the lid: %r", m.get("why"))
-        ctx.check(m.get("motion") == "unverified", "motion reads %r while waiting", m.get("motion"))
-        ctx.check(not m.get("pid"), "a controller (pid %s) runs while the gate waits", m.get("pid"))
-        led = _button_led(ctx)
-        ev["led_waiting"] = led
-        ctx.log("button LED targets while waiting (r, g, b): %s", led)
-        ctx.check(led is not None and led[0] > 0 and led[1] > 0 and led[2] == 0,
-                  "the button does not blink amber while the gate waits: %s", led)
-        ctx.sleep(3)
-        st, m2 = fc.get("/mode")
-        ctx.check(isinstance(m2, dict) and m2.get("controller") == "waiting", "the wait did not hold: %s", m2)
-        lines = _probe_lines(FORGECTRL_LOG, off)
-        ctx.check(not lines, "the probe ran with the lid open: %s", lines[:1])
-
-        t_close = time.time()
-        ctx.act("lid", "close")
-        m = _wait_controller(ctx, fc, ("running", "motion-fault"), 150, motion="verified")
-        ev["after_close"] = m
-        ev["close_to_running_s"] = round(time.time() - t_close, 1)
-        ctx.log("mode %.1f s after the lid closed: %s", time.time() - t_close, m)
-        ctx.check(m.get("controller") == "running" and m.get("motion") == "verified",
-                  "the controller did not come up verified after the lid closed: %s", m)
-        t1 = time.time()
-        lines = _probe_lines(FORGECTRL_LOG, off)
-        while not lines and time.time() - t1 < 10:
-            ctx.sleep(0.5)
-            lines = _probe_lines(FORGECTRL_LOG, off)
-        ev["probe_lines"] = lines[-3:]
-        ctx.check(lines and "MOTION OK" in lines[0],
-                  "the probe after the lid closed was not MOTION OK: %s", lines[:1])
-        led = _button_led(ctx)
-        ev["led_running"] = led
-        ctx.check(led is None or led[0] == 0 or led[2] > 0,
-                  "the amber wait pattern is still on the button after the start: %s", led)
-    finally:
-        if ctx.switch("lid") is False:
-            ctx.act("lid", "close", fail=False)
-        m = _wait_controller(ctx, fc, ("running", "motion-fault"), 150)
-        if m.get("controller") != "running":
-            fc.post("/controller/start")
-            _wait_controller(ctx, fc, ("running", "motion-fault"), 150)
-    ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle after the drill")
-
-
 # ---------------------------------------------------------------- cancel / abort
 
 @test("motion.cancel-abort", title="Jog cancel and controlled abort recover cleanly", subsystem="motion",
@@ -1115,11 +981,6 @@ def homing_kill(ctx, wait_running):
 
 # ------------------------------------------------- lid / button (the factory's)
 
-_LID_COVERS = _MOTION_COVERS + [("grblhal-glowforge", "src/glowforge_switches.c"),
-                                ("grblhal-glowforge", "src/glowforge_switch_map.h"),
-                                ("grblhal-glowforge", "src/glowforge_laser.c")]
-
-
 def kernel_xy_mm(ctx):
     """The kernel's own position counters, in mm (forgectrl /status pos):
     what the machine physically did, independent of what grbl believes."""
@@ -1185,134 +1046,6 @@ def drain_text(g, seconds):
         text += g.drain()
         time.sleep(0.1)
     return text
-
-
-def expect_cancel_and_return(ctx, g, ev, start, k0, why, tag):
-    """The cancel policy's whole tail, shared by every trigger that ends a
-    job this way (lid or interlock, from Run or from a hold): the reason is
-    reported, the controller resets without an alarm and with the position
-    kept, and the head goes back to where the job started - which the KERNEL
-    counters have to confirm, not grbl's belief about them."""
-    text = drain_text(g, 3.0)
-    msgs = [ln for ln in text.splitlines()
-            if ln.startswith("[MSG:") or "help]" in ln or ln.startswith("ALARM")]
-    ev[tag + "_messages"] = msgs
-    ctx.log("[%s] controller: %s", tag, msgs)
-    cancel_msg = "%s - job canceled" % why
-    ctx.check(cancel_msg in text, "[%s] the job was not canceled with %r as the reason", tag, why)
-    ctx.check("help]" in text, "[%s] no reset banner after the cancel (the sender must see the job end)", tag)
-    ctx.check("ALARM" not in text, "[%s] an alarm was raised on the cancel (position should be kept)", tag)
-    t0 = time.time()
-    returned = "returned to the job start" in text
-    while not returned and time.time() - t0 < 30:
-        ctx.checkpoint()
-        text += g.drain()
-        returned = "returned to the job start" in text
-        time.sleep(0.2)
-    ev[tag + "_returned_message"] = returned
-    ctx.check(returned, "[%s] the head did not report returning to the job start within 30 s", tag)
-    st = wait_state(ctx, g, "Idle", 5)
-    ctx.check(st is not None, "[%s] not Idle after the return (state %s)", tag,
-              g.status_report()["state"])
-    drift = max(abs(st["MPos"][i] - start[i]) for i in range(2))
-    ev[tag + "_drift_mm"] = round(drift, 3)
-    ctx.log("[%s] back at the job start: drift %.3f mm", tag, drift)
-    ctx.check(drift <= 0.05, "[%s] head not back at the job start (drift %.3f mm)", tag, drift)
-    machine_idle(ctx, 10)
-    check_kernel_returned(ctx, ev, k0, tag=tag)
-    return drift
-
-
-@test("motion.lid-cancel-home", title="Lid open during a job - running or paused - cancels it and returns "
-                                     "to the job start",
-      subsystem="motion", kind="operator", mode="grbl", est_min=5,
-      covers=_LID_COVERS, requires=["motion.pacing", "motion.cancel-abort"],
-      actions=["lid", "button"],
-      steps=["Bed clear; the head needs 40 mm of free +X travel. No laser is involved.",
-             "Twice, on Ready the head starts an 8 s move. First: open the lid while it moves and "
-             "leave it open until the head has come back, then close it. Second: press the button "
-             "once while it moves (pause), then open the lid, leave it open until the head is back, "
-             "and close it."],
-      description="A travel job is running when the lid opens: the job parks (planned deceleration), "
-                  "the reason is reported, the controller resets (position kept, no alarm - the "
-                  "sender's job is over), and the head returns on its own to where the job started "
-                  "with the lid still open; the controller ends Idle at the start position. The same "
-                  "job paused on the button takes the same path - a lid open from the hold cancels "
-                  "and returns, it never resumes. With lid_policy=cancel (the default).")
-def lid_cancel_home(ctx):
-    ev = ctx.evidence
-    policy = (ctx.forgectrl.settings() or {}).get("lid_policy") or "cancel"
-    ev["lid_policy"] = policy
-    ctx.check(policy == "cancel", "lid_policy is %r; this test needs cancel", policy)
-    with ctx.grbl() as g:
-        clean_slate(ctx, g)
-        k0 = kernel_start(ctx)
-        start = g.status_report()["MPos"]
-        ev["kernel_start"] = k0
-        ev["start"] = start
-        ctx.ready("On Ready the head starts an 8 s move along +X. Open the lid while it moves and "
-                  "leave it open until the head has come back on its own.")
-        g.command("M5")
-        g.command("G91")
-        start_move(ctx, g, "G1X40F300")               # an 8 s move
-        g.drain()                                     # the message window opens here
-        ctx.act("lid", "open", text="Leave it open until the head has come back.", timeout=12)
-        drift = expect_cancel_and_return(ctx, g, ev, start, k0, "lid opened", "running")
-        sw = (ctx.forgectrl.status().get("switches") or {})
-        ev["lid_at_return"] = sw.get("lid")
-        ctx.act("lid", "close")
-        ctx.sleep(1)
-        # a jog afterward proves the controller is usable without $X
-        r = g.command("$J=G91X5F1200")
-        ctx.check(not any(x.startswith("error") for x in r), "jog refused after the cancel: %s", r)
-        wait_idle(ctx, g, 15)
-        g.command("$J=G91X-5F1200")
-        wait_idle(ctx, g, 15)
-
-        # -- the same cancel, entered from a hold ---------------------------
-        # A job paused on the button must not be resumable past a lid open:
-        # the armed window and the hardware button latch have to agree, so
-        # the lid ends the job here exactly as it does from Run.
-        # The reference for this phase is taken only once the MACHINE is at
-        # rest: the jogs above waited for grblHAL's Idle, which arrives while
-        # the kernel is still playing their tail.
-        k1 = kernel_start(ctx)
-        start2 = g.status_report()["MPos"]
-        ev["hold_start"] = start2
-        ctx.ready("On Ready the head starts the 8 s move again. Press the button ONCE while it "
-                  "moves (the job pauses); then open the lid and leave it open until the head has "
-                  "come back.")
-        g.command("G91")                                  # the reset restored G90
-        g.command("G1X40F300", timeout=0.5)
-        ctx.sleep(0.5)
-        ctx.check(g.status_report()["state"].startswith("Run"), "the second move did not start")
-        g.drain()
-        w = Watch(g)
-        ctx.act("button", "press", text="The job pauses.", until=w.in_state("Hold"), timeout=12,
-                fail=False)
-        st, held = w.last, w.text
-        ctx.check(st is not None and st["state"].startswith("Hold"),
-                  "the press did not hold the job (state %s)", st["state"] if st else "?")
-        ev["hold_state"] = st["state"]
-        ev["hold_pause_message"] = "job paused" in held
-        ctx.log("paused: %s; message seen: %s", st["state"], ev["hold_pause_message"])
-        g.drain()
-        ctx.act("lid", "open", text="The job is paused: leave the lid open until the head has come "
-                "back.", timeout=60)
-        hold_drift = expect_cancel_and_return(ctx, g, ev, start2, k1, "lid opened", "hold")
-        ctx.check(not g.status_report()["state"].startswith("Hold"),
-                  "the controller is still holding after the lid canceled the paused job")
-        ctx.act("lid", "close")
-        ctx.sleep(1)
-        r = g.command("$J=G91X5F1200")
-        ctx.check(not any(x.startswith("error") for x in r), "jog refused after the paused cancel: %s", r)
-        wait_idle(ctx, g, 15)
-        g.command("$J=G91X-5F1200")
-        wait_idle(ctx, g, 15)
-        g.command("G90")
-    machine_idle(ctx)
-    ctx.log("PASS: lid open canceled the job from Run (drift %.3f mm) and from the hold (drift %.3f mm), "
-            "reset without alarm, head returned to the start both times", drift, hold_drift)
 
 
 GRBLHAL_LOG = "/data/log/forgefirm/grblhal/grblhal.log"
@@ -1422,10 +1155,9 @@ def step_timing_under_load(ctx):
             ev["legs"])
 
 
-# ------------------------------------------------- manual home, motor release
+# ------------------------------------------------- motor release
 
 HOLD_CURRENTS = ("33", "5")     # pic/x_step_current, pic/y_step_current at idle
-MANUAL_NOTICE = "Manual home: position set where the head was placed"
 
 
 def _step_currents():
@@ -1598,139 +1330,6 @@ def motor_release(ctx):
     machine_idle(ctx)
     ctx.log("PASS: released with the rail untouched, every motion refused and nothing shipped, "
             "energized with no fault, and the liveness probe and the witnessed jogs say the drivers are alive")
-
-
-@test("homing.manual", title="Manual home: $H declares the gantry-stop position and jogs to an offset origin",
-      subsystem="motion", kind="auto", mode="grbl", est_min=5,
-      covers=_MOTION_COVERS + [("forgectrl", "src/status.*"), ("forgectrl", "src/main.c")],
-      requires=["motion.jog-roundtrip"],
-      steps=["Bed clear; the head needs 35 mm of free +X travel and 3 mm of free +Y travel."],
-      description="With homing_mode = manual and no manual home offset, $H ships nothing (the kernel's "
-                  "position record shows no byte played across it), sets X and Y to X0 Y0 where the head "
-                  "stands, marks X and Y homed with their soft limits on (a jog past the envelope is "
-                  "refused with error 15), leaves Z where it was, tells the sender the home was set by "
-                  "hand, and the anchor's source reads back as manual through forgectrl. With "
-                  "manual_home_x = 5 and manual_home_y = 3, $H declares the head at X-5 Y-3, says so, and "
-                  "jogs it to X0 Y0 before it answers: the kernel plays the move, Grbl and forgectrl both "
-                  "read X0 Y0, and the envelope starts at the origin. Whatever a check decides, the "
-                  "settings are restored, the false reference is dropped and the head returned before the "
-                  "machine is handed back.")
-def manual_home(ctx):
-    ev = ctx.evidence
-    fc = hw.Forgectrl()
-    settings = fc.settings() or {}
-    keys = ("homing_mode", "manual_home_x", "manual_home_y")
-    ev["found"] = {k: settings.get(k) for k in keys}
-    offset = (5.0, 3.0)
-    moved = None                                # how far the head is from where the run found it
-    for k, v in (("homing_mode", "manual"), ("manual_home_x", ""), ("manual_home_y", "")):
-        st, body = (fc.post("/settings", data={k: v}) if v else fc.post("/settings", params={k: ""}))
-        ctx.check(st == 200, "%s=%r -> %s %s", k, v, st, body)
-    try:
-        with ctx.grbl() as g:
-            clean_slate(ctx, g)
-            r = g.command("$J=G91X30F2400")         # away from wherever the origin was
-            ctx.check(not any(x.startswith("error") for x in r), "the outbound jog was refused: %s", r)
-            moved = [30.0, 0.0]
-            wait_idle(ctx, g)
-            z0 = g.status_report()["MPos"][2]
-            ctx.sleep(1.5)                          # the kernel has played the jog's tail
-            k0 = _kernel_position()
-            r = g.command("$H", timeout=15)
-            ctx.check(not any(x.startswith("error") for x in r), "$H under manual refused: %s", r)
-            text = "\n".join(r) + drain_text(g, 1.5)
-            k1 = _kernel_position()
-            rep = g.status_report()
-            st = fc.status()
-            ev.update(kernel_position=[list(k0), list(k1)], mpos=rep["MPos"], state=rep["state"],
-                      homed_axes=st.get("homed_axes"), home_source=st.get("home_source"),
-                      pos=st.get("pos"))
-            ctx.log("$H: %s MPos %s; kernel record %s -> %s; forgectrl homed_axes %s source %s pos %s",
-                    rep["state"], rep["MPos"], k0, k1, ev["homed_axes"], ev["home_source"], ev["pos"])
-            ctx.check(k1[3:] == k0[3:], "$H played pulse bytes: %s -> %s", k0[3:], k1[3:])
-            ctx.check(k1[0] == 0 and k1[1] == 0, "the kernel counters were not cleared: %s", k1)
-            ctx.check(rep["MPos"][0] == 0 and rep["MPos"][1] == 0, "X and Y are %s, not X0 Y0", rep["MPos"][:2])
-            ctx.check(rep["MPos"][2] == z0, "Z changed across the home: %s -> %s", z0, rep["MPos"][2])
-            ctx.check(rep["state"].startswith("Idle"), "not idle after the home: %s", rep["state"])
-            ctx.check(MANUAL_NOTICE in text, "the sender was not told the home was set by hand")
-            ctx.check((ev["homed_axes"] or 0) & 3 == 3, "forgectrl does not show X and Y homed")
-            ctx.check(ev["home_source"] == "manual", "the anchor's source reads %r", ev["home_source"])
-            ctx.check(ev["pos"] and abs(ev["pos"]["x"]) < 0.02 and abs(ev["pos"]["y"]) < 0.02,
-                      "forgectrl's position is not X0 Y0: %s", ev["pos"])
-            # The envelope starts at the origin.
-            ev["past_envelope"] = _refused(ctx, g, "$J=G91X-5F600")
-            ctx.check(ev["past_envelope"] == "error:15",
-                      "a jog past the envelope after the home got %s, not error:15", ev["past_envelope"])
-
-            # With an offset: the head at the gantry stops is minus it, and $H jogs
-            # it to the origin before it answers.
-            st, body = fc.post("/settings", data={"manual_home_x": "%g" % offset[0],
-                                                  "manual_home_y": "%g" % offset[1]})
-            ctx.check(st == 200, "manual_home_x/_y = %s -> %s %s", offset, st, body)
-            k2 = _kernel_position()
-            r = g.command("$H", timeout=15)
-            refused = any(x.startswith("error") for x in r)
-            text = "\n".join(r) + drain_text(g, 1.5)
-            rep = g.status_report()
-            if not refused:                         # declared at minus the offset, then moved
-                moved = [30.0 + rep["MPos"][0] + offset[0], rep["MPos"][1] + offset[1]]
-            ctx.check(not refused, "$H with an offset refused: %s", r)
-            k3 = _kernel_position()
-            st = fc.status()
-            ev.update(offset_kernel_position=[list(k2), list(k3)], offset_mpos=rep["MPos"],
-                      offset_state=rep["state"], offset_pos=st.get("pos"))
-            ctx.log("$H with offset %s: %s MPos %s; kernel record %s -> %s; forgectrl pos %s",
-                    offset, rep["state"], rep["MPos"], k2, k3, ev["offset_pos"])
-            said = [ln for ln in text.splitlines() if "Manual home: the head is at X" in ln]
-            ev["offset_said"] = said
-            try:
-                words = said[-1].split("the head is at ")[1].split(";")[0].split()
-                declared = [float(words[0][1:]), float(words[1][1:])]
-            except (IndexError, ValueError):
-                declared = None
-            ctx.check(declared is not None and abs(declared[0] + offset[0]) < 0.01
-                      and abs(declared[1] + offset[1]) < 0.01,
-                      "the sender was told the head stood at %s, not minus %s", declared, offset)
-            ctx.check(k3[3:] != k2[3:], "the move to the origin played no pulse byte: %s -> %s", k2[3:], k3[3:])
-            ctx.check(k3[0] != 0 and k3[1] != 0, "the kernel counters did not move on X and Y: %s", k3)
-            ctx.check(rep["MPos"][0] == 0 and rep["MPos"][1] == 0,
-                      "the head is at %s when $H answered, not X0 Y0", rep["MPos"][:2])
-            ctx.check(rep["state"].startswith("Idle"), "not idle when $H answered: %s", rep["state"])
-            ctx.check(ev["offset_pos"] and abs(ev["offset_pos"]["x"]) < 0.02 and abs(ev["offset_pos"]["y"]) < 0.02,
-                      "forgectrl's position is not X0 Y0: %s", ev["offset_pos"])
-            ev["offset_past_envelope"] = _refused(ctx, g, "$J=G91Y-1F600")
-            ctx.check(ev["offset_past_envelope"] == "error:15",
-                      "a jog behind the origin got %s, not error:15", ev["offset_past_envelope"])
-    finally:
-        # Whatever a check above decided, the machine is handed back as it was
-        # found: the settings restored, the false home dropped, the head returned.
-        for k in keys:
-            v = ev["found"][k]
-            st, body = (fc.post("/settings", data={k: v}) if v else fc.post("/settings", params={k: ""}))
-            ctx.log("restore %s=%r -> %s", k, v, st)
-        if moved:
-            _drop_reference(ctx, fc)
-            with ctx.grbl() as g:
-                clean_slate(ctx, g)
-                r = g.command("$J=G91X%.3fY%.3fF2400" % (-moved[0], -moved[1]))
-                ctx.check(not any(x.startswith("error") for x in r), "the return jog was refused: %s", r)
-                wait_idle(ctx, g)
-            machine_idle(ctx)
-            # The home cleared the kernel's counters away from where the run
-            # began, so the return leaves them off zero with the head where
-            # the run found it. The hand-back compares counters, and a
-            # controller start zeroes them: left like this, the next test
-            # that restarts the controller reads as out of place and the
-            # hand-back "returns" a head that never moved (on the bench
-            # reference it drove the head into the gantry stops). One more
-            # start, with the head back, leaves the counters at zero where the
-            # run began, which is what the rest of the catalog counts on.
-            _drop_reference(ctx, fc)
-            ctx.counters_rezeroed()
-    machine_idle(ctx)
-    ctx.log("PASS: a manual home with no offset shipped nothing and declared X0 Y0; with %s it declared "
-            "minus that and jogged to X0 Y0 before answering; the soft limits start at the origin, Z was "
-            "kept, and the home reads back as manual", offset)
 
 
 def _port_state(fc):

@@ -1171,7 +1171,7 @@ def _frozen(id_):
       covers=[("forgeext", "src/super.*"), ("forgeext", "src/run.*"), ("forgeext", "src/machine.*"),
               ("forgeext", "src/cgroup.*"), ("forgectrl", "src/cool.*"), ("forgectrl", "src/cam.*"),
               ("forgectrl", "src/main.c")],
-      requires=["exthost.service", "cooling.floor-and-warm-up"], actions=["button"],
+      requires=["exthost.service"], actions=["button"],
       steps=[OFFLINE_STEP,
              "Bed clear (the job is dark: a 30 s square at S0, nothing fires). Press the button "
              "when it lights."],

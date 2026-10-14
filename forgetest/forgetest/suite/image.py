@@ -112,6 +112,7 @@ def fds_of(pid):
 @test("image.health", title="Post-flash image health", subsystem="image", kind="auto",
       always=True, est_min=1,
       covers=[("forgectrl", "init/**"), ("forgeext", "init/**"), ("forgectrl", "src/main.c"), ("forgectrl", "src/auth.c"),
+              ("forgectrl", "src/status.*"),
               ("forgectrl", "CMakeLists.txt"), ("grblhal-glowforge", "src/boards/**"),
               ("grblhal-glowforge", "CMakeLists.txt"), ("kernel-module-glowforge", "**"),
               ("linux-fslc", "**")],
@@ -119,7 +120,9 @@ def fds_of(pid):
                   "version stamped in /etc/forgefirm-version and under the machine mark in the "
                   "console banner and the motd, "
                   "the kernel options, the module, the pulse ring it maps and the SDMA clocks it holds, "
-                  "the daemon ownership, "
+                  "the daemon ownership, the board temperatures /status reports (the chassis and "
+                  "the SoC die in a plausible range, the supply as a 10-bit count, the CPU "
+                  "unthrottled), "
                   "the init ordering, the extension host as one process that starts after forgectrl and "
                   "stops before it on a machine with no package installed and nothing running under a "
                   "pool account, the data directory open for search on a machine with an account, the file modes the release depends on, and the mounts: the "
@@ -259,6 +262,21 @@ def image_health(ctx):
     ctx.check(mode.get("controller") in ("running", "standby"),
               "controller is %r (expected running or standby)", mode.get("controller"))
     ctx.check(mode.get("motion") != "fault", "supervisor reports a motion fault")
+
+    # 4b. the board temperatures /status carries, watched and not gated:
+    # the chassis and the SoC die in degrees, the supply as its raw count,
+    # and the CPU unthrottled at idle.
+    temps = (ctx.forgectrl.status() or {}).get("temps") or {}
+    ev["temps"] = temps
+    ctx.log("temps: %s", temps)
+    ctx.check(isinstance(temps.get("chassis_c"), (int, float)) and 5.0 <= temps["chassis_c"] <= 80.0,
+              "/status temps.chassis_c is not a plausible chassis temperature: %s", temps)
+    ctx.check(isinstance(temps.get("soc_c"), (int, float)) and 10.0 <= temps["soc_c"] <= 100.0,
+              "/status temps.soc_c is not a plausible die temperature: %s", temps)
+    ctx.check(isinstance(temps.get("supply_raw"), int) and 0 <= temps["supply_raw"] <= 1023,
+              "/status temps.supply_raw is not a 10-bit count: %s", temps)
+    ctx.check(temps.get("soc_throttle") == 0,
+              "the CPU is throttled (or its cooling device is missing) at idle: %s", temps)
 
     # 5. init ordering: controllers stop before the daemon
     k = sorted(os.path.basename(p) for p in glob.glob("/etc/rc6.d/K*"))
