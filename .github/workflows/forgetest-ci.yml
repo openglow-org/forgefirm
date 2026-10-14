@@ -11,6 +11,9 @@
 #    release with source missing
 #  - shared UI files: theme.css and the vendored Bootstrap the page
 #    carries are byte-identical to forgectrl's at its pinned revision
+#  - the extension key: the public key the image installs for the official
+#    tier is byte-identical to the one the extension catalog publishes
+#    (keys/forgefirm-ext.pub on its main branch)
 #  - coverage lint: every source path of every component pinned by the
 #    recipes must be selected by some catalog test's coverage globs or by a
 #    host-tested row naming the host test that proves it (the tree manifest
@@ -49,6 +52,22 @@ jobs:
           repository: openglow-org/meta-openglow
           ref: scarthgap
           path: meta-openglow
+
+      - name: Checkout forgefirm-extensions-catalog (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: openglow-org/forgefirm-extensions-catalog
+          ref: main
+          path: forgefirm-extensions-catalog
+
+      - name: The image's extension key is the catalog's published key
+        run: |
+          image=forgefirm/meta-forgefirm/recipes-forgefirm/forgefirm-keys/files/ext/forgefirm-ext.pub
+          published=forgefirm-extensions-catalog/keys/forgefirm-ext.pub
+          for f in "$image" "$published"; do
+            test -f "$f" || { echo "missing: $f"; exit 1; }
+          done
+          cmp -s "$image" "$published" || { echo "$image is not $published"; exit 1; }
 
       - name: Set up Python
         uses: actions/setup-python@v5

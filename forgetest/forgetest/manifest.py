@@ -144,6 +144,13 @@ HOST_TESTED = [
     # it: the claim and its refusals, its end by the package, the operator
     # or a stale keeper (forgeext's run_test proves the writer's side).
     ("forgectrl", "src/senderout.*", "forgectrl:tests/senderout_test.c", "forgectrl:.github/workflows/build.yml"),
+    # A package's check on the Setup page: each step held to its form, the
+    # check run through the host, the result the package's own (the routes
+    # against a live host's stand-in are tests/host_ext.sh).
+    ("forgectrl", "src/wizpkg.*", "forgectrl:tests/wizpkg_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The camera key: made, kept, checked and rotated (the reads it opens
+    # from the LAN with the reads closed are tests/host_lan.sh).
+    ("forgectrl", "src/camkey.*", "forgectrl:tests/camkey_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a
