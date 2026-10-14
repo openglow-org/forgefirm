@@ -159,6 +159,9 @@ HOST_TESTED = [
     # the closed list of actions, the host's words, the catalog's fetch (the
     # routes against a live host's stand-in are tests/host_ext.sh).
     ("forgectrl", "src/extpkg.*", "forgectrl:tests/extpkg_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The event stream: a button edge, a lease changing hands, telemetry
+    # (the live order, the take before the free, is tests/host_lease.sh).
+    ("forgectrl", "src/events.*", "forgectrl:tests/events_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a
