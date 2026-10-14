@@ -162,6 +162,9 @@ HOST_TESTED = [
     # The event stream: a button edge, a lease changing hands, telemetry
     # (the live order, the take before the free, is tests/host_lease.sh).
     ("forgectrl", "src/events.*", "forgectrl:tests/events_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The crumb tray's mode as the daemon keeps it: its offset and what it
+    # refuses (the route and the panel's switch are tests/host_routes.sh).
+    ("forgectrl", "src/tray.*", "forgectrl:tests/tray_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a

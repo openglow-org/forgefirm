@@ -425,10 +425,6 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(len(t.source_sha), 64)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ImplementationHashTests(unittest.TestCase):
     """A test's implementation hash is its own function plus the code its
     module shares: a body edit moves one test, a helper edit moves them
@@ -530,3 +526,7 @@ def two(ctx):
         for t in catalog.all_tests(reg):
             path = inspect.getsourcefile(t.fn)
             self.assertIn(t.id, catalog.module_parts(path)[1], t.id)
+
+
+if __name__ == "__main__":
+    unittest.main()

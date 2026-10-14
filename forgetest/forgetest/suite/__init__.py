@@ -23,5 +23,4 @@ from . import cloud      # noqa: F401,E402
 from . import exthost    # noqa: F401,E402
 from . import homeoff    # noqa: F401,E402
 from . import bedsize    # noqa: F401,E402
-from . import tray       # noqa: F401,E402
 from . import tlsrec     # noqa: F401,E402

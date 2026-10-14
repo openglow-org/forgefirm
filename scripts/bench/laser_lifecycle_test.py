@@ -629,8 +629,8 @@ def test_button_wait_arms():
 
 def test_lid_open_in_wait():
     """Rule 6b: the lid opening during the button wait cancels the job:
-    the reason is reported, an alarm is raised, the window never opens.
-    A press with the lid still open must not arm either."""
+    the lid-open cancel is reported, no alarm is raised, the window never
+    opens. A press with the lid still open must not arm either."""
     s = Session("lid-in-wait", disarm_s=60, switches=SW_CLOSED)
     try:
         s.send_raw("M4 S100")
