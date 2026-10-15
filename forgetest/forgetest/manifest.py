@@ -199,6 +199,14 @@ HOST_TESTED = [
     # logger in its own file at its level, a stray tag in system/, the kern
     # facility in kernel/.
     ("forgectrl", "src/fflog.*", "forgectrl:tests/fflog_e2e.sh", "forgectrl:.github/workflows/build.yml"),
+    # POST /job's multipart reader: the form's parts reach the runner's
+    # start; a missing name, a $ line and a malformed boundary are refused
+    # with nothing started.
+    ("forgectrl", "src/jobpost.*", "forgectrl:tests/jobpost_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The scoped tokens: the closed capability list, the judgment, the
+    # store that holds only hashes, and the extension host's credential
+    # (mode 0600, exactly the host's capabilities).
+    ("forgectrl", "src/tokens.*", "forgectrl:tests/tokens_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a
