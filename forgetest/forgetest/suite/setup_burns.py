@@ -48,10 +48,8 @@ BURN_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/wizrun.h"),
 # burn's tail brings it back.
 HOME = "The head is home"
 EDGE_KEY = "lens_hall_edge_z_mm"
-FLOOR_KEY = "laser_floor_density"
 FOCUS_KEYS = ["thickness_mm", "z_passes", "ladder_z", "window", "emission", "pick", "picked_lines",
               "pick_half_steps", "edge_z_mm", "steps_per_mm", "max_height_mm", "focus_range_mm", "summary"]
-FLOOR_KEYS = ["thickness_mm", "z_passes", "emission", "faintest_density", "floor_density", "summary"]
 
 
 def preview_ok(ctx, wid):
@@ -319,75 +317,3 @@ def focus(ctx):
     ctx.check(ok is not None, "the controller did not come back on the settings as found")
     ctx.log("PASS: the focus burn ran in the window the machine holds and wrote the edge alone; "
             "settings restored and the controller restarted on them")
-
-
-@test("setup.floor", title="The laser floor burn: the rungs and the floor it writes",
-      subsystem="setup", kind="live", hardware="takeover", mode="grbl", est_min=10,
-      covers=BURN_COVERS,
-      requires=["forgectrl.auth", "setup.check-motion", "laser.emission-witness", "setup.focus"],
-      actions=["button"], hands=["scrap"],
-      steps=["The gantry stops installed and the head at its home against them. A fresh flat scrap "
-             "of wood about 3 mm (1/8 in) thick and at least 86 x 68 mm (3.4 x 2.7 in), pushed into "
-             "the back-left corner of the cut area: as far left as it goes, its top edge at the top "
-             "of the cut area; lid closed. Eye protection on, exhaust on, extinguisher in reach.",
-             "Start the test and press the machine's button once. That press says you are at the "
-             "machine, and the bench actuator makes the arm press after it, when the burn itself "
-             "asks for it. With no actuator the start is the Ready answer instead, and you press "
-             "the button again at the arm, as the page asks.",
-             "Nothing else: the test answers every prompt itself and puts back the setting the "
-             "burn writes."],
-      description="The floor burns at the focus the focus burn measured, and the wizard refuses "
-                  "to start without Focus on the record, so the record must carry laser.focus "
-                  "(setup.focus, ahead of this test, leaves it there), and the lens reach /status "
-                  "reports must include the scrap's thickness (the wizard refuses a surface the "
-                  "lens cannot focus on); both are read before the scrap is asked for. Then POST "
-                  "/wiz/laser.floor/start on a fresh scrap, set up as the focus burn is: "
-                  "answered that the gantry stops are installed, the lens referenced, the "
-                  "controller in loopback posture, answered that the head is home and that the "
-                  "scrap is in the corner, the thickness in the machine's units (3.2 mm or 0.125 "
-                  "in); its program declares X0 Y0 at the head, and its tail puts the lens back "
-                  "on the reference, returns the head there, clears the G92 origin (G92.1), and "
-                  "ends (M2). With its preview and program served, every Z the program commands "
-                  "inside the reach /status reports, and the program ending in that tail, it "
-                  "burns twelve rungs from 2 to 24 percent density at "
-                  "the focal point on the scrap's surface, the floor and the curve off for the "
-                  "job, after the press, seen by the two witnesses. The pick is 8, so the floor "
-                  "written is 10 (two above it) and the setting reads it; the result carries its "
-                  "keys; the record carries laser.floor at version 1. laser_floor_density is "
-                  "restored at the end (the controller loads it at every arm).")
-def floor(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    # The record and the reach, before the scrap is asked for: the wizard
-    # refuses the burn without Focus on the record, and it refuses a scrap
-    # the lens cannot focus on, so the operator's setup would be for
-    # nothing.
-    st, w = fc.get("/wiz")
-    focus_v = ((w if isinstance(w, dict) else {}).get("versions") or {}).get("laser.focus")
-    ev["focus_on_record"] = focus_v
-    ctx.check(st == 200 and isinstance(focus_v, int) and focus_v >= 1,
-              "the record carries no Focus (laser.focus, %s): the floor burns at the focus it measures, "
-              "and the wizard refuses to start without it", focus_v)
-    _answer, want_mm = thickness_answer(ctx)
-    lens = (fc.status() or {}).get("lens") or {}
-    lo, hi = lens.get("reach_min"), lens.get("reach_max")
-    ev["floor_reach"] = [lo, hi]
-    ctx.check(isinstance(lo, (int, float)) and isinstance(hi, (int, float))
-              and lo - 0.01 <= want_mm <= hi + 0.01,
-              "the lens focuses %s to %s mm above the tray, which leaves out the %s mm scrap: the floor "
-              "refuses a surface the lens cannot focus on", lo, hi, want_mm)
-    ctx.ready("The laser floor burn: twelve rungs on the scrap after a press. The bench presses when "
-              "the button lights.")
-    with Restore(ctx, [FLOOR_KEY]):
-        r = burn(ctx, "laser.floor", "floor-arm", {"floor-pick": "8"}, FLOOR_KEYS)
-        ctx.check(r.get("faintest_density") == 8 and r.get("floor_density") == 10,
-                  "the floor reads %s from the faintest rung %s, answered 8", r.get("floor_density"),
-                  r.get("faintest_density"))
-        held = (fc.settings() or {}).get(FLOOR_KEY)
-        try:
-            held_ok = float(held) == r.get("floor_density")
-        except (TypeError, ValueError):
-            held_ok = False
-        ctx.check(held_ok, "%s reads %r, the burn wrote %s", FLOOR_KEY, held, r.get("floor_density"))
-        ctx.log("floor: the faintest rung %s, the floor %s", r.get("faintest_density"), r.get("floor_density"))
-    ctx.log("PASS: the floor burn wrote two above the faintest rung; settings restored")

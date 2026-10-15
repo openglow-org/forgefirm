@@ -165,6 +165,14 @@ HOST_TESTED = [
     # The crumb tray's mode as the daemon keeps it: its offset and what it
     # refuses (the route and the panel's switch are tests/host_routes.sh).
     ("forgectrl", "src/tray.*", "forgectrl:tests/tray_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The product gate on the firmware paths: firmware only, an extension
+    # package refused in words that say what it is (the upload route over
+    # a stand-in fwup is tests/host_update.sh).
+    ("forgectrl", "src/fwproduct.*", "forgectrl:tests/fwproduct_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The controller port's client and its two operation sets (the motion
+    # routes and a package's jog through the host's credential are
+    # tests/host_routes.sh).
+    ("forgectrl", "src/grblport.*", "forgectrl:tests/grblport_test.c", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a

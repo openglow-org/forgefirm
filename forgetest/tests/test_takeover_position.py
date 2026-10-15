@@ -137,7 +137,7 @@ class TakeoverPositionTests(unittest.TestCase):
         self.assertNotIn("restart_positions", cap)
 
     def test_the_post_pass_fails_the_run_and_moves_nothing(self):
-        # setup.check-envelope's case: a declared camera home, the head
+        # a check's case: a declared camera home, the head
         # left out, the record put back under a takeover, whose restart
         # zeroes the counters where the head stands
         cap = self.cap()

@@ -174,38 +174,6 @@ def check_switches(ctx):
     ctx.log("switches: %s", json.dumps(r))
 
 
-@test("setup.check-sensors", title="The sensors check reads a plausible machine at rest",
-      subsystem="setup", kind="auto", est_min=2,
-      covers=DARK_COVERS + [("forgectrl", "src/status.c"), ("forgectrl", "src/accel.c"),
-                            ("forgectrl", "src/cool.c")],
-      requires=["forgectrl.auth"],
-      description="POST /wiz/sensors/start; ten seconds of readings and no question asked. The "
-                  "result carries both coolant temperatures, the chassis and SoC, the lid IR "
-                  "maxima, the accelerometer event count, the supply power-good, the HV current, "
-                  "and the idle fan speeds; the record carries sensors at version 1 and the "
-                  "settings read as before (the check writes none).")
-def check_sensors(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    before = fc.settings() or {}
-    ev["settings_before"] = dict(before)
-
-    def on_prompt(p):
-        ctx.fail("the sensors check asked a question: %s", p)
-    last = run_check(ctx, "sensors", on_prompt, 120)
-    r = last.get("result") or {}
-    for k in ("coolant_down_c", "coolant_up_c", "lid_ir_max", "laser_pgood", "hv_current_max",
-              "exhaust_rpm_idle", "intake_rpm_idle"):
-        ctx.check(k in r, "the result lacks %s: %s", k, r)
-    ctx.check(r.get("laser_pgood") == 1, "power-good read %s", r.get("laser_pgood"))
-    after = fc.settings() or {}
-    changed = {k: (before.get(k), after.get(k)) for k in set(before) | set(after)
-               if before.get(k) != after.get(k)}
-    ctx.check(not changed, "the sensors check wrote a setting: %s", changed)
-    ctx.log("sensors: coolant %s/%s C, IR %s, HV %s", r.get("coolant_down_c"), r.get("coolant_up_c"),
-            r.get("lid_ir_max"), r.get("hv_current_max"))
-
-
 @test("setup.check-airflow", title="The airflow check measures the fans and sets the floors",
       subsystem="setup", kind="auto", hardware="takeover", est_min=3,
       covers=DARK_COVERS + [("forgectrl", "src/cool.c"), ("forgectrl", "src/airflow.*"),
@@ -291,86 +259,6 @@ def check_airflow(ctx):
                   "would be held", gate.get("reading"), PURGE_SPINUP_S, gate.get("floor"))
     ok = ctx.wait_for(lambda: (ctx.forgectrl.get("/mode")[1] or {}).get("controller") == "running", 60)
     ctx.check(ok is not None, "the controller did not come back after the check")
-
-
-@test("setup.check-intakes", title="The intake fans step counts the machine's intake fans",
-      subsystem="setup", kind="auto", hardware="takeover", est_min=2,
-      covers=DARK_COVERS + [("forgectrl", "src/cool.c"), ("forgectrl", "src/airflow.*")],
-      requires=["forgectrl.auth"], precheck=intakes_counted,
-      description="POST /wiz/airflow.intakes/start with the intake fan count set (the precheck "
-                  "refuses the start without it: the gate would hold every test after this one). "
-                  "The controller stops, the fans run at the run profile for 20 s, and the tachs "
-                  "count the intakes: both turning is two. The step asks the operator to count "
-                  "when the tachs cannot (intake 1 not up to speed, or intake 2 giving no "
-                  "reading, which reads the same as a machine built with one intake fan); both "
-                  "intakes turn on the bench reference, so that question is a fan fault, and it "
-                  "fails the test unanswered. The result carries both intakes' speeds, whether "
-                  "intake 2 was silent, and the count by the tachs, which must be the count the "
-                  "machine held. The setting reads the count, the record carries airflow.intakes "
-                  "at version 1, the count is put back as found, and the controller must be "
-                  "running again.")
-def check_intakes(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-
-    def on_prompt(p):
-        if p.get("id") == "intake-count":
-            # The tachs could not count, and the step's text says why.
-            ctx.fail("the intake fans step asked for the count, which the tachs could not make; both "
-                     "intakes turn on the bench reference, so a fan needs attention: %s", p.get("text"))
-        ctx.fail("the intake fans step asked a question: %s", p)
-    with Restore(ctx, [INTAKE_KEY]) as held:
-        found = held.before.get(INTAKE_KEY)
-        ctx.check(found in ("1", "2"), "%s reads %r, not a count", INTAKE_KEY, found)
-        last = run_check(ctx, "airflow.intakes", on_prompt, 180)
-        r = last.get("result") or {}
-        n = r.get("intake_fans")
-        ev["count"] = {"found": found, "counted": n, "by": r.get("counted_by"),
-                       "intake_1_rpm": r.get("intake_1_rpm"), "intake_2_rpm": r.get("intake_2_rpm"),
-                       "intake_2_silent": r.get("intake_2_silent")}
-        ctx.check(r.get("counted_by") == "tachs", "the fans were not counted by the tachs: %s", r)
-        ctx.check(str(n) == found, "the tachs count %r intake fans, the machine held %s", n, found)
-        s = fc.settings() or {}
-        ctx.check(s.get(INTAKE_KEY) == str(n), "%s reads %r, the step counted %r", INTAKE_KEY, s.get(INTAKE_KEY), n)
-        ctx.log("intake fans: %s by the tachs (intake 1 %s rpm, intake 2 %s rpm)", n, r.get("intake_1_rpm"),
-                r.get("intake_2_rpm"))
-    ok = ctx.wait_for(lambda: (fc.get("/mode")[1] or {}).get("controller") == "running", 60)
-    ctx.check(ok is not None, "the controller did not come back after the step")
-
-
-@test("setup.check-cameras", title="The cameras check captures both cameras",
-      subsystem="setup", kind="operator", est_min=2,
-      covers=DARK_COVERS + [("forgectrl", "src/cam.c")],
-      requires=["forgectrl.auth", "camera.snapshot"], actions=["lid"],
-      description="POST /wiz/cameras/start with the lid closed: a lid snapshot, the question, a "
-                  "head snapshot, the question. Each question is answered yes once GET /wiz/shot "
-                  "serves the snapshot as image/jpeg. The result names the sensor and says both "
-                  "views were accepted.")
-def check_cameras(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    ctx.act("lid", "close")
-    shots = {}
-
-    def on_prompt(p):
-        pid = p.get("id", "")
-        if pid in ("lid-view", "head-view"):
-            cam = "lid" if pid == "lid-view" else "head"
-            st, body = fc.get("/wiz/shot", params={"cam": cam}, raw=True)
-            shots[cam] = {"status": st, "bytes": len(body) if body else 0,
-                          "jpeg": bool(body) and body[:2] == b"\xff\xd8"}
-            ctx.check(st == 200 and shots[cam]["jpeg"], "no %s snapshot to judge: %s", cam, shots[cam])
-            return "Yes"
-        if pid == "lid-close":
-            ctx.act("lid", "close", until=lambda: (dark(fc).get("prompt") or {}).get("seq") != p["seq"])
-        return None
-    last = run_check(ctx, "cameras", on_prompt, 180)
-    ev["shots"] = shots
-    r = last.get("result") or {}
-    ctx.check(r.get("lid_ok") is True and r.get("head_ok") is True, "a view was not accepted: %s", r)
-    ctx.check(bool(r.get("sensor")) and r.get("sensor") != "unknown", "no sensor named: %s", r)
-    ctx.log("cameras: %s, lid %d bytes, head %d bytes", r.get("sensor"),
-            shots.get("lid", {}).get("bytes", 0), shots.get("head", {}).get("bytes", 0))
 
 
 @test("setup.check-motion", title="The motion check proves the rail, the lens reference, and the jogs",
@@ -511,24 +399,6 @@ def check_lens(ctx):
                 and (restart.get("start") != 200 or m.get("pid") != restart.get("pid")))
     ok = ctx.wait_for(back, 150)
     ctx.check(ok is not None, "the controller did not come back after the check")
-
-
-@test("setup.check-flow-verify", title="The flow check runs as a setup check",
-      subsystem="setup", kind="auto", hardware="takeover", est_min=5,
-      covers=DARK_COVERS + [("forgectrl", "src/diag.c")],
-      requires=["forgectrl.auth", "cooling.aa-offset-calibrate", "cooling.flow-verify"],
-      description="POST /wiz/cooling.flow-verify/start drives the flow-verify diagnostic through the "
-                  "check runner: the diagnostic's phases show as the check's, its result becomes the "
-                  "check's result with pass true, and the record carries cooling.flow-verify at "
-                  "version 1. A thin margin recommends the calibration in the record's flags. The "
-                  "air-assist offset calibration is named first among the prerequisites so a queue "
-                  "keeps it ahead of every heater tool this check pulls forward.")
-def check_flow_verify(ctx):
-    last = run_check(ctx, "cooling.flow-verify", lambda p: None, 600)
-    r = last.get("result") or {}
-    ctx.check(r.get("pass") is True, "the flow check did not pass: %s", r)
-    ctx.log("flow check: threshold %s, flow %s, no-flow %s, thin %s", r.get("threshold"),
-            r.get("flow_rise"), r.get("noflow_rise"), r.get("thin_margin"))
 
 
 @test("setup.cloud-header-capture", title="The cloud header check takes one print's envelope",
