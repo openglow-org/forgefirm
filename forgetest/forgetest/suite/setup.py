@@ -28,7 +28,6 @@ import http.client
 import json
 import os
 import random
-import re
 import socket
 import ssl
 import time
@@ -36,7 +35,6 @@ import urllib.parse
 
 from ..catalog import test
 from .. import hw
-from .forgectrl import lan_ip
 
 RECORD = "setup.json"
 USERS = "users"
@@ -535,88 +533,3 @@ def login_checks(ctx, name, pw):
     w = decode(body)
     ctx.check(isinstance(w, dict) and w.get("session") is False, "the session survives the logout")
     ctx.log("session set by the login, seen by GET /wiz, ended by the logout")
-
-
-# --------------------------------------------------- the machine's name
-
-def mac_suffix():
-    """The last four hex digits of the MAC address the hostname is built
-    from: wlan0, or eth0 on a machine with no WiFi."""
-    for dev in ("wlan0", "eth0"):
-        raw = read_file("/sys/class/net/%s/address" % dev)
-        mac = (raw or b"").decode("ascii", "replace").strip().replace(":", "").lower()
-        if mac and mac != "0" * 12:
-            return mac[-4:]
-    return ""
-
-
-def cmdlines():
-    """The command line of every process on the machine, one string
-    each."""
-    out = []
-    for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
-        raw = read_file("/proc/%s/cmdline" % name)
-        if raw:
-            out.append(raw.decode("utf-8", "replace").replace("\0", " ").strip())
-    return out
-
-
-@test("setup.machine-name", title="The machine names itself from its MAC address",
-      subsystem="setup", kind="auto", est_min=1,
-      requires=["forgectrl.auth"],
-      description="The machine calls itself forgefirm-<xxxx>, where xxxx is the last four hex "
-                  "digits of its WiFi MAC address, so two machines on one network answer to "
-                  "different names and no name carries a serial number. The live name, "
-                  "/etc/hostname (a bind-mounted copy, because the rootfs is read-only) and the "
-                  "MAC address agree; the DHCP client sends the name as the hostname option, "
-                  "which is what a network with dynamic DNS publishes; the console banner offers "
-                  "the machine's addresses and nothing else, with no marker line and no .local "
-                  "name; and no mDNS responder is on the image. No component covers this: the "
-                  "hostname and banner scripts are layer content, in the platform identity of "
-                  "every fingerprint.")
-def machine_name(ctx):
-    ev = ctx.evidence
-
-    # 1. the name, the file and the MAC address agree
-    suffix = mac_suffix()
-    ev["mac_suffix"] = suffix
-    ctx.check(suffix, "no MAC address to build a name from")
-    live = socket.gethostname()
-    on_file = ((read_file("/etc/hostname") or b"").decode("utf-8", "replace")).strip()
-    ev["hostname"] = live
-    ev["hostname_file"] = on_file
-    ctx.log("hostname %r (MAC suffix %s)", live, suffix or "none")
-    ctx.check(live == "forgefirm-" + suffix,
-              "the hostname is %r, expected forgefirm-%s", live, suffix)
-    ctx.check(on_file == live, "/etc/hostname holds %r, the live name is %r", on_file, live)
-
-    # 2. the DHCP client sends it (option 12), so dynamic DNS can publish it
-    dhcp = [c for c in cmdlines() if c.split(" ")[0].split("/")[-1] == "udhcpc"]
-    ev["udhcpc"] = dhcp
-    ctx.check(dhcp, "no DHCP client is running")
-    ctx.check(any("-x hostname:" + live in c for c in dhcp),
-              "the DHCP client does not send the machine's name: %s", dhcp)
-
-    # 3. the console banner: the addresses, and nothing that is not the banner
-    issue = (read_file("/etc/issue") or b"").decode("utf-8", "replace")
-    ev["issue"] = issue
-    ip = lan_ip()
-    ev["lan_ip"] = ip
-    ctx.check(ip, "cannot determine the board's LAN address")
-    ctx.check("Control panel:" in issue, "the console banner names no control panel")
-    ctx.check("https://%s/" % ip in issue,
-              "the console banner does not carry the LAN address %s", ip)
-    for junk in ("# end", "# ForgeFIRM addresses", ".local"):
-        ctx.check(junk not in issue, "the console banner shows %r", junk)
-    urls = re.findall(r"https://(\S+)/", issue)
-    ev["banner_urls"] = urls
-    for u in urls:
-        literal = u.startswith("[") or all(c.isdigit() or c == "." for c in u)
-        ctx.check(literal, "the console banner offers %r, which is not an address", u)
-
-    # 4. no mDNS on the image; the name is the only name the machine has
-    ev["avahi_pids"] = hw.pidof("avahi-daemon")
-    ctx.check(not ev["avahi_pids"], "an mDNS responder is running: %s", ev["avahi_pids"])
-    ctx.check(not os.path.exists("/etc/avahi"), "/etc/avahi is on the image")

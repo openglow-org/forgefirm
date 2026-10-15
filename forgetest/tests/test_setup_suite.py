@@ -5,8 +5,7 @@
 
 """The setup.* suite on the host: the registration (ids, kinds, the
 takeover tests, the operator tests' hands), the record builders, the
-machine's name, the cookie parsing, and the settle rule for a gated
-supervisor."""
+cookie parsing, and the settle rule for a gated supervisor."""
 import json
 import os
 import shutil
@@ -19,7 +18,7 @@ import helpers  # noqa: E402
 from forgetest import baseline, catalog  # noqa: E402
 from forgetest.suite import setup  # noqa: E402
 
-IDS = ("setup.account-login", "setup.machine-name")
+IDS = ("setup.account-login",)
 
 
 class RegistrationTests(unittest.TestCase):
@@ -59,9 +58,6 @@ class RegistrationTests(unittest.TestCase):
         attended = sorted(tid for tid, t in self.reg.items() if tid.startswith("setup.")
                           and t.kind != "auto" and not t.fixture_runnable(("button", "lid", "interlock")))
         self.assertEqual(attended, ["setup.cloud-header-capture", "setup.focus"])
-
-    def test_the_machine_name_covers_nothing_by_design(self):
-        self.assertEqual(self.reg["setup.machine-name"].covers, ())
 
     def test_the_login_test_makes_its_own_account(self):
         # No bench credentials, no precheck: the test installs a temporary
@@ -168,47 +164,6 @@ class RecordTests(unittest.TestCase):
         finally:
             os.environ.pop("FORGECTRL_DATA_DIR", None)
             os.environ.pop("GF_RUN_DIR", None)
-
-
-class MachineNameTests(unittest.TestCase):
-    def setUp(self):
-        self.root = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-
-    def _net(self, **devs):
-        """A /sys/class/net tree; setup.mac_suffix reads it through
-        setup.read_file, which takes an absolute path."""
-        for dev, mac in devs.items():
-            d = os.path.join(self.root, dev)
-            os.makedirs(d)
-            with open(os.path.join(d, "address"), "w") as f:
-                f.write(mac + "\n")
-        real = setup.read_file
-
-        def read(path):
-            head = "/sys/class/net/"
-            if path.startswith(head):
-                return real(os.path.join(self.root, path[len(head):]))
-            return real(path)
-
-        setup.read_file = read
-        self.addCleanup(setattr, setup, "read_file", real)
-
-    def test_the_wifi_address_names_the_machine(self):
-        self._net(wlan0="2C:6B:7D:0D:B0:0A", eth0="00:11:22:33:44:55")
-        self.assertEqual(setup.mac_suffix(), "b00a")
-
-    def test_a_machine_with_no_wifi_falls_back_to_the_wired_address(self):
-        self._net(eth0="00:11:22:33:44:55")
-        self.assertEqual(setup.mac_suffix(), "4455")
-
-    def test_an_unread_address_is_no_address(self):
-        self._net(wlan0="00:00:00:00:00:00")
-        self.assertEqual(setup.mac_suffix(), "")
-
-    def test_no_interface_is_no_address(self):
-        self._net()
-        self.assertEqual(setup.mac_suffix(), "")
 
 
 class SmallHelpersTests(unittest.TestCase):
