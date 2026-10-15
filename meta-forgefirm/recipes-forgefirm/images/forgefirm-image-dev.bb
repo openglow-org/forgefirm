@@ -36,6 +36,9 @@ IMAGE_FEATURES += " \
   tools-debug \
   debug-tweaks \
 "
+# The rootfs lint holds a dev image to the dev policy: root and an empty
+# password over SSH are what debug-tweaks turns on.
+FORGEFIRM_IMAGE_KIND = "dev"
 
 # Dev images boot from SD, never from a 200 MiB eMMC slot: lift the slot
 # ceiling and give the filesystem generous working space instead.

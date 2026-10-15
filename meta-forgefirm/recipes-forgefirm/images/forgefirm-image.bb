@@ -231,3 +231,19 @@ pack_licenses() {
         || bbfatal "pack_licenses: pack-licenses.sh refused the license tree (its message is above)"
 }
 ROOTFS_POSTPROCESS_COMMAND += "pack_licenses "
+
+# The rootfs lint: the image content fixed at build time, checked on the
+# tree as it is imaged, so a drift fails the build of the release image
+# too, which no campaign runs. rootfs-lint.sh, next to this recipe, holds
+# the rules. It runs after every other rootfs step (an append is applied
+# after every +=, the dev recipe's and debug-tweaks' included), and
+# FORGEFIRM_IMAGE_KIND tells it which image's policy applies.
+ROOTFS_LINT := "${THISDIR}/rootfs-lint.sh"
+do_rootfs[file-checksums] += "${ROOTFS_LINT}:True"
+FORGEFIRM_IMAGE_KIND ?= "release"
+
+rootfs_lint() {
+    sh "${ROOTFS_LINT}" "${IMAGE_ROOTFS}" "${FORGEFIRM_IMAGE_KIND}" \
+        || bbfatal "rootfs_lint: rootfs-lint.sh refused the rootfs (its messages are above)"
+}
+ROOTFS_POSTPROCESS_COMMAND:append = " rootfs_lint"

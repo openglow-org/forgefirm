@@ -233,5 +233,86 @@ class PackLicensesTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.tree))
 
 
+class RootfsLintTests(unittest.TestCase):
+    """rootfs-lint.sh, the image's last rootfs step, on a fixture tree: a
+    tree that holds every rule passes, and a drift fails the lint naming
+    its rule."""
+
+    SSHD = ("Include /etc/ssh/sshd_config.d/*.conf\n"
+            "PermitRootLogin no\n"
+            "PasswordAuthentication yes\n"
+            "PermitEmptyPasswords no\n"
+            "Subsystem\tsftp\t/usr/libexec/sftp-server\n")
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="forgetest-lint.")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.put("usr/sbin/rsyslogd", "", mode=0o755)
+        self.put("etc/init.d/syslog", "#!/bin/sh\nRSYSLOGD=rsyslogd\nRSYSLOGD_BIN=/usr/sbin/rsyslogd\n", mode=0o755)
+        os.makedirs(self.path("etc/rc5.d"))
+        os.symlink("../init.d/syslog", self.path("etc/rc5.d/S20syslog"))
+        self.put("etc/ssh/sshd_config", self.SSHD)
+        self.put("etc/ssh/sshd_config_readonly", self.SSHD)
+        self.put("etc/network/interfaces", "auto lo\niface lo inet loopback\n" + NetworkBootTests.STANZA)
+        self.put("etc/nsswitch.conf", "hosts:          files dns\n")
+
+    def path(self, rel):
+        return os.path.join(self.root, rel)
+
+    def put(self, rel, text, mode=0o644):
+        os.makedirs(os.path.dirname(self.path(rel)), exist_ok=True)
+        with open(self.path(rel), "w") as f:
+            f.write(text)
+        os.chmod(self.path(rel), mode)
+
+    def lint(self, kind="release"):
+        return subprocess.run(["sh", os.path.join(LAYER, "images", "rootfs-lint.sh"), self.root, kind],
+                              capture_output=True, text=True, timeout=60)
+
+    def assertFails(self, rule, kind="release"):
+        p = self.lint(kind)
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("rootfs-lint: %s:" % rule, p.stderr)
+
+    def test_a_tree_that_holds_every_rule_passes(self):
+        for kind in ("release", "dev"):
+            p = self.lint(kind)
+            self.assertEqual(p.returncode, 0, "%s: %s" % (kind, p.stderr))
+
+    def test_the_layer_interfaces_file_sends_the_name(self):
+        with open(BSP_INTERFACES, encoding="utf-8") as f:
+            self.put("etc/network/interfaces", f.read())
+        p = self.lint()
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_busybox_syslogd_beside_rsyslog_fails(self):
+        os.makedirs(self.path("sbin"))
+        os.symlink("/bin/busybox.nosuid", self.path("sbin/syslogd"))
+        self.assertFails("syslog")
+
+    def test_a_pre_authentication_banner_fails_either_image(self):
+        self.put("etc/ssh/sshd_config_readonly", self.SSHD + "Banner /etc/issue.net\n")
+        for kind in ("release", "dev"):
+            self.assertFails("sshd", kind)
+
+    def test_root_and_an_empty_password_over_ssh_fail_a_release_image_only(self):
+        dev = self.SSHD.replace("PermitRootLogin no", "PermitRootLogin yes").replace(
+            "PermitEmptyPasswords no", "PermitEmptyPasswords yes")
+        self.put("etc/ssh/sshd_config", dev)
+        self.put("etc/ssh/sshd_config_readonly", dev)
+        self.assertFails("sshd", "release")
+        p = self.lint("dev")
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_a_dhcp_stanza_that_does_not_send_the_name_fails(self):
+        self.put("etc/network/interfaces", NetworkBootTests.STANZA.replace(
+            "\tudhcpc_opts -x hostname:$(hostname)\n", ""))
+        self.assertFails("dhcp-name")
+
+    def test_an_mdns_responder_fails(self):
+        os.makedirs(self.path("etc/avahi"))
+        self.assertFails("mdns")
+
+
 if __name__ == "__main__":
     unittest.main()
