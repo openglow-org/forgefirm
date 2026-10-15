@@ -5,8 +5,8 @@
 
 """The setup.* suite on the host: the registration (ids, kinds, the
 takeover tests, the operator tests' hands), the record builders, the
-machine's name, the cookie parsing, the LED cue, and the settle rule
-for a gated supervisor."""
+machine's name, the cookie parsing, and the settle rule for a gated
+supervisor."""
 import json
 import os
 import shutil
@@ -19,9 +19,7 @@ import helpers  # noqa: E402
 from forgetest import baseline, catalog  # noqa: E402
 from forgetest.suite import setup  # noqa: E402
 
-IDS = ("setup.account-login",
-       "setup.ssh-until-reboot", "setup.machine-name", "setup.first-run-flow")
-OPERATOR = ("setup.first-run-flow",)
+IDS = ("setup.account-login", "setup.machine-name")
 
 
 class RegistrationTests(unittest.TestCase):
@@ -31,14 +29,8 @@ class RegistrationTests(unittest.TestCase):
     def test_every_test_is_registered_with_its_kind(self):
         kinds = {tid: self.reg[tid].kind for tid in IDS if tid in self.reg}
         self.assertEqual(sorted(kinds), sorted(IDS))
-        for tid in OPERATOR:
-            self.assertEqual(kinds[tid], "operator", tid)
         for tid in IDS:
-            if tid not in OPERATOR:
-                self.assertEqual(kinds[tid], "auto", tid)
-
-    def test_the_record_swapping_tests_are_takeovers(self):
-        self.assertEqual(self.reg["setup.first-run-flow"].hardware, "takeover")
+            self.assertEqual(kinds[tid], "auto", tid)
 
     def test_recommended_reads_the_status_document(self):
         w = {"recommended": [{"id": "laser.floor", "reason": "the tube was replaced"},
@@ -59,18 +51,6 @@ class RegistrationTests(unittest.TestCase):
         reg = self.reg
         from forgetest.suite import setup_dark
         self.assertIs(reg["setup.check-airflow"].precheck, setup_dark.intakes_counted)
-
-    def test_the_first_run_flow_runs_unattended_with_the_fixture(self):
-        flow = self.reg["setup.first-run-flow"]
-        self.assertEqual(list(flow.actions), ["button"])
-        self.assertFalse(flow.hands)
-        self.assertTrue(flow.fixture_runnable(("button", "lid", "interlock")))
-
-    def test_the_first_run_flow_covers_the_backend(self):
-        flow = set(self.reg["setup.first-run-flow"].covers)
-        for want in (("forgectrl", "src/wiz.*"), ("forgectrl", "src/setup.*"), ("forgectrl", "src/users.*"),
-                     ("forgectrl", "src/button.*"), ("forgectrl", "src/led.*"), ("forgectrl", "src/advisories.*")):
-            self.assertIn(want, flow, want)
 
     def test_the_only_attended_tests_need_a_workstation_or_a_scrap(self):
         # With the bench actuator up, two setup tests keep a person: the
@@ -240,16 +220,6 @@ class SmallHelpersTests(unittest.TestCase):
         self.assertIsNone(setup.session_from_cookie("ffsid=; Path=/; Max-Age=0"))
         self.assertIsNone(setup.session_from_cookie(""))
 
-    def test_the_teal_breathe_cue(self):
-        self.assertTrue(setup.breathes_teal({"target": [0, 180, 200], "pulse_on": [0, 1400, 1400],
-                                                  "pulse_off": [0, 1400, 1400]}))
-        self.assertFalse(setup.breathes_teal({"target": [0, 255, 40], "pulse_on": [0, 0, 0],
-                                                   "pulse_off": [0, 0, 0]}))          # solid green
-        self.assertFalse(setup.breathes_teal({"target": [200, 200, 200], "pulse_on": [1800, 1800, 1800],
-                                                   "pulse_off": [1800] * 3}))         # white
-        self.assertFalse(setup.breathes_teal({"target": [None, None, None], "pulse_on": [None] * 3}))
-        self.assertFalse(setup.breathes_teal({}))
-
     def test_decode(self):
         self.assertEqual(setup.decode(b'{"a": 1}'), {"a": 1})
         self.assertEqual(setup.decode(b"cloud mode is not enabled"), "cloud mode is not enabled")
@@ -274,66 +244,6 @@ class GatedSettleTests(unittest.TestCase):
         body = baseline.Baseline(lines.append).wait_settled(timeout=8)
         self.assertEqual(body["controller"], "gated")
         self.assertTrue(any("controller=gated" in ln for ln in lines))
-
-
-class FirstRunSeedTests(unittest.TestCase):
-    """The record the first-run tests install: a first run behind the
-    checks and the burns."""
-
-    STATUS = {"wizards": [{"id": "advisories", "version": 1, "class": "form"},
-                          {"id": "account", "version": 1, "class": "form"},
-                          {"id": "cloud", "version": 1, "class": "form"},
-                          {"id": "switches", "version": 1, "class": "dark"},
-                          {"id": "motion", "version": 2, "class": "dark"},
-                          {"id": "laser.focus", "version": 1, "class": "live"}]}
-
-    def test_no_consent_no_account_not_complete_and_every_check_done(self):
-        base = {"created": "2026-09-01T00:00:00Z", "completed": "2026-09-02T00:00:00Z",
-                "advisories": {"safety-and-risk": {"hash": "x"}}, "acceptance": {"pressed_at": "t"},
-                "account": {"name": "scott", "uid": 1000}, "flags": {"flow_thin": True},
-                "wizards": {"advisories": {"version": 1}, "switches": {"version": 1, "result": {"lid": True}}}}
-        rec = setup.first_run_record(self.STATUS, base)
-        self.assertNotIn("completed", rec)
-        self.assertNotIn("acceptance", rec)
-        self.assertNotIn("account", rec)
-        self.assertEqual(rec["advisories"], {})
-        self.assertEqual(rec["created"], "2026-09-01T00:00:00Z")
-        self.assertEqual(rec["flags"], {"flow_thin": True})
-        self.assertEqual(sorted(rec["wizards"]), ["laser.focus", "motion", "switches"])
-        self.assertEqual(rec["wizards"]["switches"]["result"], {"lid": True})   # kept from the base
-        self.assertEqual(rec["wizards"]["motion"]["version"], 2)                 # written at the catalog version
-
-    def test_without_a_base_record(self):
-        rec = setup.first_run_record(self.STATUS, None)
-        self.assertEqual(sorted(rec["wizards"]), ["laser.focus", "motion", "switches"])
-        self.assertEqual(rec["wizards"]["laser.focus"]["version"], 1)
-
-
-class SshdPolicyTests(unittest.TestCase):
-    def test_the_three_keys_out_of_sshd_t(self):
-        from forgetest import hw
-        calls = []
-
-        def fake_run(cmd, timeout=60):
-            calls.append(cmd)
-            return 0, "port 22\npermitrootlogin no\npasswordauthentication yes\npermitemptypasswords no\nx11forwarding no\n"
-        real = hw.run
-        hw.run = fake_run
-        try:
-            self.assertEqual(setup.sshd_policy(), {"permitrootlogin": "no", "passwordauthentication": "yes",
-                                                        "permitemptypasswords": "no"})
-        finally:
-            hw.run = real
-        self.assertEqual(calls, [["/usr/sbin/sshd", "-T"]])
-
-    def test_a_failing_sshd_reports_the_error(self):
-        from forgetest import hw
-        real = hw.run
-        hw.run = lambda cmd, timeout=60: (1, "sshd: no hostkeys available")
-        try:
-            self.assertEqual(setup.sshd_policy(), {"error": "sshd: no hostkeys available"})
-        finally:
-            hw.run = real
 
 
 if __name__ == "__main__":

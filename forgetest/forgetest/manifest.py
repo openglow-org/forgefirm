@@ -173,6 +173,32 @@ HOST_TESTED = [
     # routes and a package's jog through the host's credential are
     # tests/host_routes.sh).
     ("forgectrl", "src/grblport.*", "forgectrl:tests/grblport_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The panel page as the daemon serves it: bundled, the theme and the
+    # save bar in it, and its policy frame-src 'none'.
+    ("forgectrl", "src/ui.h", "forgectrl:tests/host_routes.sh", "forgectrl:.github/workflows/build.yml"),
+    # The data and run directories from the environment: the SSH flag in the
+    # run directory, written and removed by POST /system/ssh.
+    ("forgectrl", "src/paths.h", "forgectrl:tests/host_routes.sh", "forgectrl:.github/workflows/build.yml"),
+    # The first run in the page's order: the four documents at their hashes,
+    # the press step breathing teal, the press taken as the acceptance, the
+    # form steps through main.c's hooks (extensions.md stays with
+    # exthost.service, which covers it).
+    ("forgectrl", "src/advisories.*", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "docs/advisories/safety-and-risk.md", "forgectrl:tests/host_setup.sh",
+     "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "docs/advisories/licenses.md", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "docs/advisories/privacy.md", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "docs/advisories/cloud-service.md", "forgectrl:tests/host_setup.sh",
+     "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "src/button.*", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "src/led.*", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "src/hooks.h", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
+    # The setup sheet id from the fuse serial, against golden ids.
+    ("forgectrl", "src/sheetid.*", "forgectrl:tests/sheetid_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The logging path: the image's rsyslog.conf and the rendered rules, each
+    # logger in its own file at its level, a stray tag in system/, the kern
+    # facility in kernel/.
+    ("forgectrl", "src/fflog.*", "forgectrl:tests/fflog_e2e.sh", "forgectrl:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a

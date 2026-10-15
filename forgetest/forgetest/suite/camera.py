@@ -55,7 +55,7 @@ def _jpeg_size(data):
 
 @test("camera.snapshot", title="Lid camera snapshot and stream", subsystem="camera",
       kind="auto", est_min=2,
-      covers=_CAM_COVERS, requires=["forgectrl.panel-serves"],
+      covers=_CAM_COVERS,
       steps=["Setup: lid closed."],
       description="/cam/snapshot returns a JPEG of a plausible size (a black frame compresses "
                   "far smaller), a second snapshot with the lid lamp switched off differs from it "
@@ -169,7 +169,7 @@ def snapshot(ctx):
 
 @test("camera.sensor-profile", title="Camera geometry follows the fitted sensor", subsystem="camera",
       kind="auto", est_min=1,
-      covers=_CAM_COVERS, requires=["forgectrl.panel-serves"],
+      covers=_CAM_COVERS,
       description="/cam/status names the sensor that bound (OV5648 on a 5 MP machine, OV8856 on an "
                   "8 MP 'HD' one) and reports the geometry that sensor implies, and the JPEGs it "
                   "actually returns are that size. A machine that reports 'unknown', or whose frames "
@@ -212,7 +212,7 @@ def sensor_profile(ctx):
 
 @test("camera.h264-stream", title="H.264 live stream", subsystem="camera",
       kind="auto", est_min=2,
-      covers=_CAM_COVERS, requires=["forgectrl.panel-serves"],
+      covers=_CAM_COVERS,
       steps=["Setup: lid closed."],
       description="/cam/h264 answers a fragmented MP4: a codec header naming the SPS profile, an "
                   "init segment (ftyp+moov) followed by media fragments (moof+mdat) within a few "
@@ -274,7 +274,7 @@ def h264_stream(ctx):
 
 @test("camera.frame-health", title="Capture delivers whole frames", subsystem="camera",
       kind="auto", est_min=1,
-      covers=_CAM_COVERS, requires=["forgectrl.panel-serves"],
+      covers=_CAM_COVERS,
       description="The capture queue flags a frame errored when it is short, torn, or arrived "
                   "after the CSI-2 receiver lost sync; forgectrl drops those rather than "
                   "demosaicing them, restarts the stream if they persist, and withholds the "
@@ -362,7 +362,7 @@ def frame_health(ctx):
 
 @test("camera.lid-privacy", title="Cameras see the room only with the lid closed", subsystem="camera",
       kind="operator", est_min=3,
-      covers=_PRIVACY_COVERS + [("forgectrl", "src/auth.*")], requires=["forgectrl.panel-serves"],
+      covers=_PRIVACY_COVERS + [("forgectrl", "src/auth.*")],
       actions=["lid"],
       steps=["Start with the lid closed; you will be told to open it, then close it again.",
              "Nothing moves and the laser is not involved."],

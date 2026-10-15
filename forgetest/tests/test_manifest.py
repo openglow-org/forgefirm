@@ -123,13 +123,14 @@ class CoverageReportTests(unittest.TestCase):
 
     def test_behavioral_paths_are_never_allowed_away(self):
         # An advisory document is behavior (the consent is to its hash): the allowlist's docs/** and
-        # **/*.md do not take it out of the report, as they do not take it out of a fingerprint.
+        # **/*.md do not take it out of the report, as they do not take it out of a fingerprint. No
+        # host-tested rows here: the real table's rows name the first-run documents.
         man = helpers.with_file(helpers.make_manifest(), "forgectrl", "docs/advisories/privacy.md", "text")
         rest = helpers.make_test("a.one", [("forgectrl", "src/**"), ("grblhal-glowforge", "**"),
                                            ("kernel-module-glowforge", "**"), ("linux-fslc", "**")])
-        self.assertEqual(m.coverage_report(man, [rest]), {"forgectrl": ["docs/advisories/privacy.md"]})
+        self.assertEqual(m.coverage_report(man, [rest], host=()), {"forgectrl": ["docs/advisories/privacy.md"]})
         doc = helpers.make_test("a.two", [("forgectrl", "docs/advisories/privacy.md")])
-        self.assertEqual(m.coverage_report(man, [rest, doc]), {})
+        self.assertEqual(m.coverage_report(man, [rest, doc], host=()), {})
         self.assertNotEqual(m.fingerprint(man, doc.covers),
                             m.fingerprint(helpers.with_file(man, "forgectrl", "docs/advisories/privacy.md", "new"),
                                           doc.covers))
