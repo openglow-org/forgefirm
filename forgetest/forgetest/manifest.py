@@ -192,8 +192,6 @@ HOST_TESTED = [
     ("forgectrl", "docs/advisories/privacy.md", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
     ("forgectrl", "docs/advisories/cloud-service.md", "forgectrl:tests/host_setup.sh",
      "forgectrl:.github/workflows/build.yml"),
-    ("forgectrl", "src/button.*", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
-    ("forgectrl", "src/led.*", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
     ("forgectrl", "src/hooks.h", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
     # The setup sheet id from the fuse serial, against golden ids.
     ("forgectrl", "src/sheetid.*", "forgectrl:tests/sheetid_test.c", "forgectrl:.github/workflows/build.yml"),

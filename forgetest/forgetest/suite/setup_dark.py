@@ -26,9 +26,12 @@ PRESS_TEXT = "The button is lit white. Press it now: the laser fires after your 
 # check switches it back on. The bench reference draws its off current
 # (74) for the first seconds and settles near 630.
 PURGE_SPINUP_S = 30
+# The checks' press prompts read the button (button.c) and light it
+# (led.c) on the machine; the switches check reads both back.
 DARK_COVERS = [("forgectrl", "src/wizdark.*"), ("forgectrl", "src/wizcalc.*"),
                ("forgectrl", "src/wiz.*"), ("forgectrl", "src/setup.*"),
-               ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.*")]
+               ("forgectrl", "src/main.c"), ("forgectrl", "src/ui/wizard.*"),
+               ("forgectrl", "src/button.*"), ("forgectrl", "src/led.*")]
 # The lens window: the free half-steps below and above the hall edge the
 # Lens travel check writes, and the fallback the lens frame holds while
 # they are unset (lens.h).

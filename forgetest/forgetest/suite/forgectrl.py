@@ -10,9 +10,10 @@ from ..catalog import test
 
 # The write guard reads the account and the session store (a machine with
 # an account needs a session from the LAN; this host and the dev image
-# write with the token), so both are the guard's domain.
+# write with the token), so both are the guard's domain. The fuse view
+# is two-factor: the token and the physical button, read by button.c.
 _COVERS_AUTH = [("forgectrl", "src/auth.*"), ("forgectrl", "src/peer.*"), ("forgectrl", "src/main.c"),
-                ("forgectrl", "src/session.*"), ("forgectrl", "src/users.*"),
+                ("forgectrl", "src/session.*"), ("forgectrl", "src/users.*"), ("forgectrl", "src/button.*"),
                 ("forgectrl", "src/ui/login.*"), ("forgectrl", "src/ui/wizard.js")]
 
 
