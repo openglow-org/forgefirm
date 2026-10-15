@@ -216,18 +216,18 @@ ROOTFS_POSTPROCESS_COMMAND += "write_forgefirm_version "
 # control panel serves the bundle and its manifest (GET /system/licenses,
 # GET /system/licenses/manifest). The license class runs first
 # (license_create_manifest is prepended to this list); this step is
-# appended, so it runs after.
+# appended, so it runs after. pack-licenses.sh, next to this recipe, is
+# the step: it refuses a tree with no manifest, and a manifest that does
+# not name forgectrl, grblhal-glowforge and kernel-module-glowforge.
 COPY_LIC_MANIFEST = "1"
 COPY_LIC_DIRS = "1"
 
+PACK_LICENSES := "${THISDIR}/pack-licenses.sh"
+do_rootfs[file-checksums] += "${PACK_LICENSES}:True"
+
 pack_licenses() {
-    d="${IMAGE_ROOTFS}${datadir}/common-licenses"
-    [ -d "$d" ] || bbfatal "pack_licenses: $d is missing (COPY_LIC_DIRS off?)"
-    [ -f "$d/license.manifest" ] || bbfatal "pack_licenses: no license.manifest in $d"
-    install -d "${IMAGE_ROOTFS}${datadir}/forgefirm"
-    tar -C "${IMAGE_ROOTFS}${datadir}" --sort=name --mtime=@0 --owner=0 --group=0 \
-        --numeric-owner -cf - common-licenses | gzip -9 -n \
-        > "${IMAGE_ROOTFS}${datadir}/forgefirm/licenses.tar.gz"
-    rm -rf "$d"
+    sh "${PACK_LICENSES}" "${IMAGE_ROOTFS}${datadir}/common-licenses" \
+        "${IMAGE_ROOTFS}${datadir}/forgefirm/licenses.tar.gz" \
+        || bbfatal "pack_licenses: pack-licenses.sh refused the license tree (its message is above)"
 }
 ROOTFS_POSTPROCESS_COMMAND += "pack_licenses "

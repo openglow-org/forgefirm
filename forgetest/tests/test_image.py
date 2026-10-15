@@ -6,6 +6,7 @@
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -14,6 +15,11 @@ from forgetest.suite import image
 # The layer's scripts, when the tests run from a checkout of forgefirm.
 LAYER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                      "meta-forgefirm", "recipes-forgefirm")
+# The BSP layer's interfaces file, from the meta-openglow checkout beside
+# forgefirm's (forgetest-ci checks out its scarthgap branch there).
+BSP_INTERFACES = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+    "meta-openglow", "meta-openglow-core", "recipes-core", "init-ifupdown", "init-ifupdown", "interfaces")
 
 # A layer script run as the image runs it, in private mount, UTS and
 # network namespaces: /run a fresh tmpfs, the scratch tree's net directory
@@ -148,6 +154,12 @@ class NetworkBootTests(unittest.TestCase):
         text = self.STANZA + "# No DHCPv6 client runs; udhcpc6 is not on the image.\n"
         self.assertEqual(image.dhcp6_in_interfaces(text), [])
 
+    def test_the_layer_interfaces_file_starts_no_dhcpv6_client(self):
+        self.assertTrue(os.path.isfile(BSP_INTERFACES),
+                        "%s is missing: meta-openglow is checked out beside forgefirm" % BSP_INTERFACES)
+        with open(BSP_INTERFACES, encoding="utf-8") as f:
+            self.assertEqual(image.dhcp6_in_interfaces(f.read()), [])
+
     def test_parse_stat_reads_the_parent_past_an_awkward_comm(self):
         self.assertEqual(image.parse_stat("371 (udhcpc) S 1 371 371 0 -1 4194624"),
                          (371, "udhcpc", 1))
@@ -163,6 +175,62 @@ class NetworkBootTests(unittest.TestCase):
         self.assertEqual(local, ["fe800000000000002e6b7dfffe0db00a"])
         self.assertEqual(world, ["26001700000000000000000000001234"])
         self.assertEqual(image.link_addrs(text, "eth0"), ([], []))
+
+
+class PackLicensesTests(unittest.TestCase):
+    """pack-licenses.sh, the image's license step, on a fixture tree."""
+
+    RECIPES = ("forgectrl", "grblhal-glowforge", "kernel-module-glowforge")
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="forgetest-lic.")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.tree = os.path.join(self.root, "common-licenses")
+        self.manifest = os.path.join(self.tree, "license.manifest")
+        self.out = os.path.join(self.root, "forgefirm", "licenses.tar.gz")
+
+    def make_tree(self, recipes=None):
+        """The tree, with a manifest naming `recipes` (None: no manifest)."""
+        os.makedirs(os.path.join(self.tree, "generic_MIT"))
+        with open(os.path.join(self.tree, "generic_MIT", "generic_MIT"), "w") as f:
+            f.write("MIT License\n")
+        if recipes is not None:
+            with open(self.manifest, "w") as f:
+                for r in recipes:
+                    f.write("PACKAGE NAME: %s\nPACKAGE VERSION: 1.0\nRECIPE NAME: %s\nLICENSE: MIT\n\n" % (r, r))
+
+    def pack(self):
+        return subprocess.run(["sh", os.path.join(LAYER, "images", "pack-licenses.sh"), self.tree, self.out],
+                              capture_output=True, text=True, timeout=60)
+
+    def assertRefused(self, p):
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertTrue(p.stderr.strip(), "a refusal with no message on stderr")
+        self.assertFalse(os.path.exists(self.out), "a refusal wrote the tar")
+
+    def test_a_missing_tree_is_refused(self):
+        self.assertRefused(self.pack())
+
+    def test_a_tree_with_no_manifest_is_refused_and_left(self):
+        self.make_tree()
+        self.assertRefused(self.pack())
+        self.assertTrue(os.path.isdir(self.tree))
+
+    def test_a_manifest_that_leaves_out_a_recipe_is_refused_and_left(self):
+        for left_out in self.RECIPES:
+            with self.subTest(left_out=left_out):
+                shutil.rmtree(self.tree, ignore_errors=True)
+                self.make_tree([r for r in self.RECIPES if r != left_out])
+                self.assertRefused(self.pack())
+                self.assertTrue(os.path.isfile(self.manifest))
+
+    def test_a_manifest_that_names_all_three_is_packed_and_the_tree_removed(self):
+        self.make_tree(self.RECIPES)
+        p = self.pack()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with tarfile.open(self.out, "r:gz") as t:
+            self.assertIn("common-licenses/license.manifest", t.getnames())
+        self.assertFalse(os.path.exists(self.tree))
 
 
 if __name__ == "__main__":
