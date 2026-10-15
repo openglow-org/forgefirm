@@ -3,23 +3,21 @@
 # https://community.openglow.org
 # SPDX-License-Identifier:    MIT
 
-"""setup.focus, setup.floor - the setup's two burns (the live wizards),
-driven the way the page drives them: POST /wiz/<id>/start, GET /wiz/dark
-polled, the prompts answered from here, the burn armed by a press, the
-result judged, and the setting the burn wrote put back as found. Each
-burn stands alone on its own scrap of wood in the back-left corner,
-drawn from the head's home against the gantry stops, and re-runs on the
-real record, so a completed burn completes again at the same version.
-The floor burns at the focus the focus burn measured, so it needs Focus
-on the record.
+"""setup.focus - the setup's focus burn (a live wizard), driven the way
+the page drives it: POST /wiz/<id>/start, GET /wiz/dark polled, the
+prompts answered from here, the burn armed by a press, the result
+judged, and the setting the burn wrote put back as found. The burn
+stands alone on its own scrap of wood in the back-left corner, drawn
+from the head's home against the gantry stops, and re-runs on the real
+record, so a completed burn completes again at the same version.
 
 The operator's part is the scrap and one press on the machine at the
 start (the presence check of the ready gate; with the bench actuator up
 it then makes the arm press). The judgment a person makes by eye on the
-scrap (the narrowest line, the faintest rung) is answered here with a
-fixed pick: the test proves each wizard's mechanics and the emission
-witnesses, not the operator's eye, and the setting it writes is
-restored. The page is where the real numbers go in.
+scrap (the narrowest line) is answered here with a fixed pick: the test
+proves the wizard's mechanics and the emission witnesses, not the
+operator's eye, and the setting it writes is restored. The page is where
+the real numbers go in.
 """
 import re
 import time
