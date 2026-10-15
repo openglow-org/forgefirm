@@ -479,6 +479,27 @@ class CatalogTests(unittest.TestCase):
         for t in catalog.all_tests(reg):
             self.assertEqual(len(t.source_sha), 64)
 
+    def test_the_shared_judges_exist_and_take_every_package_import_of_the_suite(self):
+        # The list is kept by hand: the Context reaches runner.py, hw.py
+        # and baseline.py with no import to find. So every package module
+        # a suite module does import has to be on it (or be the registry,
+        # which judges nothing), or that judge would be in no fingerprint.
+        import ast
+        import glob
+        paths = catalog.shared_judge_paths()
+        self.assertEqual([os.path.basename(p) for p in paths], list(catalog.SHARED_JUDGES))
+        for p in paths:
+            self.assertTrue(os.path.isfile(p), p)
+        allowed = set(catalog.SHARED_JUDGES) | {"catalog.py"}
+        for mod in sorted(glob.glob(os.path.join(catalog.suite_dir(), "*.py"))):
+            with open(mod, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            for node in tree.body:
+                if isinstance(node, ast.ImportFrom) and node.level == 2:
+                    for name in ([node.module] if node.module else [a.name for a in node.names]):
+                        self.assertIn(name + ".py", allowed,
+                                      "%s imports %s, which no fingerprint carries" % (os.path.basename(mod), name))
+
 
 class ImplementationHashTests(unittest.TestCase):
     """A test's implementation hash is its own function plus the code its
@@ -564,6 +585,32 @@ def two(ctx):
         with open(other, "w", newline="\n") as f:
             f.write("def o():\n    return 1\n")
         self.assertEqual((a2, b2), self.shas())
+
+    def test_a_shared_judge_edit_moves_every_test(self):
+        # runner.py, hw.py, baseline.py and puls.py are in every test's
+        # path with no import to follow (the Context, the baseline around
+        # each run), so their text joins every implementation hash.
+        judge = os.path.join(self.tmp, "hwlike.py")
+
+        def write_judge(text):
+            with open(judge, "w", newline="\n") as f:
+                f.write(text)
+            catalog.forget(judge)
+
+        def shas():
+            return tuple(catalog.implementation_sha(self.path, t, judges=[judge]) for t in ("m.one", "m.two"))
+
+        write_judge("def sysfs_int(attr, default=None):\n    return default\n")
+        a1, b1 = shas()
+        write_judge("def sysfs_int(attr, default=None):\n    return 8\n")
+        a2, b2 = shas()
+        self.assertNotEqual(a1, a2)
+        self.assertNotEqual(b1, b2)
+        # a package file outside the list changes nothing
+        other = os.path.join(self.tmp, "server.py")
+        with open(other, "w", newline="\n") as f:
+            f.write("def serve():\n    return 1\n")
+        self.assertEqual((a2, b2), shas())
 
     def test_line_endings_do_not_count(self):
         a1, b1 = self.shas()

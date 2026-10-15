@@ -69,11 +69,13 @@ class Test:
     def source_sha(self):
         """The hash of the test's own implementation: its function (the
         decorator included) together with the code its module shares
-        among its tests - everything outside the @test functions. Part
-        of the fingerprint: a change inside one test's body invalidates
-        that test's earlier passes and no other; a change to a helper
-        invalidates the tests of that module. A test the module does not
-        define in the @test form hashes its whole file."""
+        among its tests - everything outside the @test functions - and
+        the shared judges (SHARED_JUDGES). Part of the fingerprint: a
+        change inside one test's body invalidates that test's earlier
+        passes and no other; a change to a helper invalidates the tests
+        of that module; a change to a shared judge invalidates every
+        test. A test the module does not define in the @test form hashes
+        its whole file."""
         if self._source_sha is None:
             # One filler at a time: a second poll that arrives while the
             # first computes waits for it rather than repeating the work.
@@ -142,6 +144,26 @@ def source_file_sha(path):
     with open(path, "rb") as f:
         data = f.read().replace(b"\r\n", b"\n")
     return hashlib.sha256(data).hexdigest()
+
+
+# The package modules every test runs through without importing them:
+# the Context a test is handed and the takeover (runner.py), the sysfs,
+# LED, switch and HTTP readers behind it (hw.py), the fresh-boot idle
+# state judged around every run (baseline.py), and the dark job the
+# cloud and extension tests print (puls.py). Their text is part of every
+# judge, so it joins every implementation hash: a change to one of them
+# moves every test. The rest of the package (the server, the page, the
+# campaign rules, the artifact, the manifest, this registry, the bench
+# actuator) judges nothing about the machine and stays out.
+SHARED_JUDGES = ("baseline.py", "hw.py", "puls.py", "runner.py")
+
+
+def shared_judge_paths():
+    """The SHARED_JUDGES files, next to this module. Every one has to be
+    there: a judge missing from the package is an error, never a hash
+    computed without it."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [os.path.join(here, name) for name in SHARED_JUDGES]
 
 
 # The files never change under a run, so each is read and parsed once:
@@ -241,15 +263,19 @@ def _direct_siblings(path):
         return hit
 
 
-def implementation_sha(path, test_id):
+def implementation_sha(path, test_id, judges=None):
     """The implementation hash of one test (see Test.source_sha): the
-    test's own text, the shared text of its module, and the shared text
-    of every sibling suite module the module imports."""
+    test's own text, the shared text of its module, the shared text of
+    every sibling suite module the module imports, and the text of the
+    shared judges. `judges` names files to take as the judges in place
+    of SHARED_JUDGES (the unit tests edit their own)."""
     shared, own = module_parts(path)
     if test_id not in own:
         return source_file_sha(path)
     helpers = [module_parts(p)[0] for p in sorted(sibling_imports(path))]
-    return _manifest.sha256_text("%s:%s" % (":".join([shared] + helpers), own[test_id]))
+    paths = shared_judge_paths() if judges is None else list(judges)
+    judged = [module_parts(p)[0] for p in paths]
+    return _manifest.sha256_text("%s:%s" % (":".join([shared] + helpers + judged), own[test_id]))
 
 
 def test(id, *, title, subsystem, kind="auto", hardware="api", mode=None, covers=(),
