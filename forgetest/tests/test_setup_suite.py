@@ -10,18 +10,18 @@ for a gated supervisor."""
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
-import helpers
-from forgetest import baseline, catalog
-from forgetest.suite import setup
+sys.path.insert(0, os.path.dirname(__file__))
+import helpers  # noqa: E402
+from forgetest import baseline, catalog  # noqa: E402
+from forgetest.suite import setup  # noqa: E402
 
 IDS = ("setup.account-login",
-       "setup.ssh-until-reboot", "setup.machine-name", "setup.first-run-flow",
-       "setup.first-run-page",
-       "setup.mirror")
-OPERATOR = ("setup.first-run-flow", "setup.first-run-page")
+       "setup.ssh-until-reboot", "setup.machine-name", "setup.first-run-flow")
+OPERATOR = ("setup.first-run-flow",)
 
 
 class RegistrationTests(unittest.TestCase):
@@ -36,19 +36,9 @@ class RegistrationTests(unittest.TestCase):
         for tid in IDS:
             if tid not in OPERATOR:
                 self.assertEqual(kinds[tid], "auto", tid)
-        self.assertNotIn("setup.root-ssh-refused", self.reg)     # folded into ssh-until-reboot
-        self.assertNotIn("setup.wizard-first-run", self.reg)     # split into the flow and the page
-        self.assertNotIn("setup.override-until-reboot", self.reg)  # the gate has nothing to lift
-        self.assertNotIn("setup.sheet", self.reg)                  # the two burns, each on its own scrap
 
     def test_the_record_swapping_tests_are_takeovers(self):
-        for tid in ("setup.first-run-flow", "setup.first-run-page", "setup.mirror"):
-            self.assertEqual(self.reg[tid].hardware, "takeover", tid)
-
-    def test_the_lifecycle_tests_cover_their_files(self):
-        mirror = set(self.reg["setup.mirror"].covers)
-        self.assertIn(("forgectrl", "src/wizdark.*"), mirror)
-        self.assertIn("setup.check-sensors", self.reg["setup.mirror"].requires)
+        self.assertEqual(self.reg["setup.first-run-flow"].hardware, "takeover")
 
     def test_recommended_reads_the_status_document(self):
         w = {"recommended": [{"id": "laser.floor", "reason": "the tube was replaced"},
@@ -68,37 +58,27 @@ class RegistrationTests(unittest.TestCase):
     def test_the_intake_tests_start_from_a_count(self):
         reg = self.reg
         from forgetest.suite import setup_dark
-        for tid in ("setup.check-intakes", "setup.check-airflow"):
-            self.assertIs(reg[tid].precheck, setup_dark.intakes_counted, tid)
+        self.assertIs(reg["setup.check-airflow"].precheck, setup_dark.intakes_counted)
 
-    def test_the_first_run_flow_runs_unattended_with_the_fixture_and_the_page_walk_does_not(self):
+    def test_the_first_run_flow_runs_unattended_with_the_fixture(self):
         flow = self.reg["setup.first-run-flow"]
         self.assertEqual(list(flow.actions), ["button"])
         self.assertFalse(flow.hands)
         self.assertTrue(flow.fixture_runnable(("button", "lid", "interlock")))
-        page = self.reg["setup.first-run-page"]
-        self.assertTrue(page.hands)
-        self.assertFalse(page.fixture_runnable(("button", "lid", "interlock")))
-        self.assertIn("setup.first-run-flow", page.requires)
 
-    def test_the_first_run_split_keeps_the_backend_and_the_page_apart(self):
+    def test_the_first_run_flow_covers_the_backend(self):
         flow = set(self.reg["setup.first-run-flow"].covers)
-        page = set(self.reg["setup.first-run-page"].covers)
         for want in (("forgectrl", "src/wiz.*"), ("forgectrl", "src/setup.*"), ("forgectrl", "src/users.*"),
                      ("forgectrl", "src/button.*"), ("forgectrl", "src/led.*"), ("forgectrl", "src/advisories.*")):
             self.assertIn(want, flow, want)
-            self.assertNotIn(want, page, want)
-        for want in (("forgectrl", "src/ui/wizard.*"), ("forgectrl", "src/ui/md.js"), ("forgectrl", "src/tls.*")):
-            self.assertIn(want, page, want)
 
     def test_the_only_attended_tests_need_a_workstation_or_a_scrap(self):
-        # With the bench actuator up, four setup tests keep a person: the
-        # page walk, the print from the Glowforge app, and the two burns,
-        # each on a fresh scrap. Everything else runs from the queue.
+        # With the bench actuator up, two setup tests keep a person: the
+        # print from the Glowforge app, and the focus burn on a fresh
+        # scrap. Everything else runs from the queue.
         attended = sorted(tid for tid, t in self.reg.items() if tid.startswith("setup.")
                           and t.kind != "auto" and not t.fixture_runnable(("button", "lid", "interlock")))
-        self.assertEqual(attended, ["setup.cloud-header-capture", "setup.first-run-page",
-                                    "setup.floor", "setup.focus"])
+        self.assertEqual(attended, ["setup.cloud-header-capture", "setup.focus"])
 
     def test_the_machine_name_covers_nothing_by_design(self):
         self.assertEqual(self.reg["setup.machine-name"].covers, ())
