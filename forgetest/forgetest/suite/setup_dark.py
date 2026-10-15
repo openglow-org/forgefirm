@@ -82,11 +82,13 @@ def answer(fc, wid, prompt, value):
     return fc.post("/wiz/%s/answer" % wid, data={"seq": str(prompt["seq"]), "value": value})
 
 
-def run_check(ctx, wid, on_prompt, timeout_s):
+def run_check(ctx, wid, on_prompt, timeout_s, on_poll=None):
     """Start `wid` and follow it to its end. on_prompt(prompt) is called
     once per prompt (by sequence number) and returns the value to answer
     with, or None when it handled the prompt another way (a fixture
-    action). Returns the final status document."""
+    action). on_poll(doc), when given, is called once per poll of
+    /wiz/dark with the status document: a caller's own witness read
+    beside the check's. Returns the final status document."""
     fc = ctx.forgectrl
     ev = ctx.evidence
     start(ctx, fc, wid)
@@ -100,6 +102,8 @@ def run_check(ctx, wid, on_prompt, timeout_s):
             d = dark(fc)
             if d.get("id") != wid:
                 raise hw.HwError("another check took the slot: %s" % d.get("id"))
+            if on_poll is not None:
+                on_poll(d)
             if d.get("phase") and (not phases or phases[-1] != d["phase"]):
                 phases.append(d["phase"])
                 ctx.log("%s: %s", wid, d["phase"])

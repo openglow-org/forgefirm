@@ -48,6 +48,36 @@ HOME = "The head is home"
 EDGE_KEY = "lens_hall_edge_z_mm"
 FOCUS_KEYS = ["thickness_mm", "z_passes", "ladder_z", "window", "emission", "pick", "picked_lines",
               "pick_half_steps", "edge_z_mm", "steps_per_mm", "max_height_mm", "focus_range_mm", "summary"]
+# pic/hv_current above this: the discharge is present (the daemon's own
+# rule for a lit burn, jobstream.h JOBSTREAM_HV_ON).
+HV_ON = 30
+
+
+class Witnesses:
+    """The two emission witnesses read from sysfs by the test itself at
+    every poll of the burn: the kernel's LASER_ON sample count
+    (cnc/laser_on_sampled) and the tube current (pic/hv_current), each
+    at its peak, and how many polls read both. The burn's result reports
+    the daemon's own reading of the same two; this one is taken past the
+    daemon."""
+
+    def __init__(self):
+        self.laser_on_max = None
+        self.hv_max = None
+        self.reads = 0
+
+    def __call__(self, _doc):
+        lon = hw.sysfs_int("cnc/laser_on_sampled")
+        hv = hw.sysfs_int("pic/hv_current")
+        if lon is not None:
+            self.laser_on_max = lon if self.laser_on_max is None else max(self.laser_on_max, lon)
+        if hv is not None:
+            self.hv_max = hv if self.hv_max is None else max(self.hv_max, hv)
+        if lon is not None and hv is not None:
+            self.reads += 1
+
+    def record(self):
+        return {"laser_on_max": self.laser_on_max, "hv_max": self.hv_max, "reads": self.reads}
 
 
 def preview_ok(ctx, wid):
@@ -91,17 +121,29 @@ def preview_ok(ctx, wid):
     ctx.check(tail == want, "the %s program ends %s, not the tail %s", wid, tail, want)
 
 
-def emission_ok(ctx, last):
-    """The two witnesses of the burn, from the wizard's result. The head's
-    beam sensor is recorded, never required: the result reports its rise
-    and whether it read as the beam seen."""
+def emission_ok(ctx, last, seen):
+    """The two witnesses of the burn, from the wizard's result and from
+    the test's own reads of them at every poll (`seen`, a Witnesses).
+    The head's beam sensor is recorded, never required: the result
+    reports its rise and whether it read as the beam seen."""
     e = (last.get("result") or {}).get("emission") or {}
     ctx.evidence["emission"] = e
-    ctx.check(e.get("hv_max", 0) > 30, "the tube current never rose (%s)", e.get("hv_max"))
+    ctx.check(e.get("hv_max", 0) > HV_ON, "the tube current never rose (%s)", e.get("hv_max"))
     ctx.check(e.get("laser_on_samples", 0) > 0, "the kernel never sampled LASER_ON")
     ctx.check(isinstance(e.get("thermopile_delta"), int) and isinstance(e.get("beam_sensor_seen"), bool),
               "the result does not record the beam sensor: %s", e)
     ctx.log("the beam sensor rose %s (seen: %s)", e.get("thermopile_delta"), e.get("beam_sensor_seen"))
+    w = seen.record()
+    ctx.evidence["emission_seen"] = w
+    ctx.log("seen from here: LASER_ON count peak %s, tube current peak %s over %d polls",
+            w["laser_on_max"], w["hv_max"], w["reads"])
+    ctx.check(w["reads"] > 0, "the test could not read the witnesses from sysfs during the burn")
+    ctx.check((w["laser_on_max"] or 0) > 0,
+              "the kernel's LASER_ON count never read nonzero from here during the burn (%d reads); the "
+              "burn reports %s", w["reads"], e.get("laser_on_samples"))
+    ctx.check((w["hv_max"] or 0) > HV_ON,
+              "the tube current never read over %d from here during the burn (peak %s over %d reads); the "
+              "burn reports %s", HV_ON, w["hv_max"], w["reads"], e.get("hv_max"))
 
 
 def thickness_answer(ctx):
@@ -116,7 +158,8 @@ def burn(ctx, wid, arm, pick, want):
     """One burn: the preview, then the burn after the press with every
     prompt answered (the gantry stops installed, the head at home, the
     scrap in the corner, its thickness in the machine's units, the arm,
-    and the pick in `pick`), the witnesses, and the keys of the result in
+    and the pick in `pick`), the witnesses (the burn's own, and the two
+    read from sysfs here at every poll), and the keys of the result in
     `want`. run_check makes the arm press when the burn asks for it. A
     prompt the test does not answer, or one asked again because its
     answer was refused, ends the burn. Returns the result."""
@@ -127,6 +170,7 @@ def burn(ctx, wid, arm, pick, want):
     answers.update(pick)
     preview_ok(ctx, wid)
     asked = set()
+    seen = Witnesses()
 
     def on_prompt(p):
         pid = p.get("id")
@@ -142,10 +186,10 @@ def burn(ctx, wid, arm, pick, want):
         return answers[pid]
 
     try:
-        last = run_check(ctx, wid, on_prompt, 900)
+        last = run_check(ctx, wid, on_prompt, 900, on_poll=seen)
     finally:
         ctx.clear_notice()
-    emission_ok(ctx, last)
+    emission_ok(ctx, last, seen)
     r = last.get("result") or {}
     missing = [k for k in want if k not in r]
     ctx.check(not missing, "the result lacks %s: %s", missing, sorted(r))
@@ -236,7 +280,8 @@ def focus_window_ok(ctx, r, before):
                   "inside the reach /status reports, and the program ending in that tail at the "
                   "edge /status reports, it burns twelve lines after the press, from the top of "
                   "the window to the bottom, seen by the two witnesses (the tube current and the "
-                  "kernel's LASER_ON samples), with the beam sensor's rise recorded and not "
+                  "kernel's LASER_ON samples) as the burn reports them and as the test reads them "
+                  "from sysfs itself at every poll, with the beam sensor's rise recorded and not "
                   "required. The pick is line 11. The "
                   "result carries its keys; the ladder ran in the window the machine held, which "
                   "the burn leaves as found (it writes the edge alone, the one its result "

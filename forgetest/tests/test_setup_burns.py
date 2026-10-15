@@ -9,11 +9,14 @@ sender, the page, and the driver's laser module; and the burn against a
 scripted daemon: the preview and the program read, the start, the
 prompts answered in order (the gantry stops, the head at home, the scrap,
 its thickness in the machine's units, the arm, the machine's own press
-prompt, the pick), the witnesses judged, the record read at version 1,
-the setting the burn wrote put back as found, and the controller started
+prompt, the pick), the witnesses judged (the burn's own, and the two the
+test reads from sysfs at every poll), the record read at version 1, the
+setting the burn wrote put back as found, and the controller started
 again on the edge and the window put back."""
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -279,6 +282,13 @@ class ScriptedDaemon:
 
 class BurnRunTests(unittest.TestCase):
     def setUp(self):
+        # the two witnesses as sysfs serves them through a lit burn (the
+        # shape of a bench record: the LASER_ON count and the tube current)
+        self.sysfs = tempfile.mkdtemp(prefix="forgetest-burn-")
+        self.plant("cnc/laser_on_sampled", "118")
+        self.plant("pic/hv_current", "431")
+        self.saved_root = os.environ.get("GF_SYSFS_ROOT")
+        os.environ["GF_SYSFS_ROOT"] = self.sysfs + "/"
         self.fake = helpers.FakeForgectrl().start()
         self.daemon = ScriptedDaemon(self.fake)
         self.poll = setup_dark.POLL_S
@@ -287,6 +297,17 @@ class BurnRunTests(unittest.TestCase):
     def tearDown(self):
         setup_dark.POLL_S = self.poll
         self.fake.stop()
+        if self.saved_root is None:
+            os.environ.pop("GF_SYSFS_ROOT", None)
+        else:
+            os.environ["GF_SYSFS_ROOT"] = self.saved_root
+        shutil.rmtree(self.sysfs, ignore_errors=True)
+
+    def plant(self, attr, value):
+        path = os.path.join(self.sysfs, *attr.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(value + "\n")
 
     def run_test(self, tid):
         t = catalog.load_suite()[tid]
@@ -312,6 +333,10 @@ class BurnRunTests(unittest.TestCase):
         self.assertNotIn("lens_hall_edge_z_mm", start)
         self.assertEqual((start["lens_stop_below_steps"], start["lens_stop_above_steps"]), ("14", "20"))
         self.assertEqual(run.evidence["result"]["emission"]["hv_max"], 610)
+        # the witnesses read from here at every poll: each at its peak
+        seen = run.evidence["emission_seen"]
+        self.assertEqual((seen["laser_on_max"], seen["hv_max"]), (118, 431))
+        self.assertGreater(seen["reads"], 0)
         fw = run.evidence["focus_window"]
         self.assertEqual(fw["window"]["below"], 14)
         self.assertEqual(fw["window"]["above"], 20)
@@ -403,6 +428,18 @@ class BurnRunTests(unittest.TestCase):
             self.run_test("setup.focus")
         self.assertIn("the tube current never rose", str(cm.exception))
         self.assert_found()
+
+    def test_a_burn_the_test_itself_never_saw_fails_and_still_restores(self):
+        # The burn's result reports a lit burn, and the test's own reads
+        # of the two witnesses never leave zero: the burn is judged on
+        # what was read from here, not on the daemon's word alone.
+        self.plant("cnc/laser_on_sampled", "0")
+        self.plant("pic/hv_current", "0")
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.focus")
+        self.assertIn("LASER_ON count never read nonzero", str(cm.exception))
+        self.assert_found()
+        self.assert_restarted_on_found()
 
     def test_a_burn_with_a_silent_beam_sensor_passes(self):
         # A head whose beam sensor gives no output: the tube current and
