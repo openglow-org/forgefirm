@@ -485,6 +485,7 @@ class Context:
             rec["fixture_error"] = str(e)
             self.log("ARM press: fixture failed (%s) - asking the operator", e)
             self.notice(text)
+            self._clear_when_taken()
             return False
         rec["by"] = "fixture"
         self.log("ARM press by the fixture, at the machine's own press prompt")
@@ -566,6 +567,7 @@ class Context:
             if lit is None:
                 self.log("ARM: the button never lit within %d s - asking the operator", lit_timeout)
                 self.notice(text)
+                self._clear_when_taken()
                 return
             try:
                 fixture.act("button", "press")
@@ -573,6 +575,7 @@ class Context:
                 self.log("ARM press: fixture failed (%s) - asking the operator", e)
                 rec["fixture_error"] = str(e)
                 self.notice(text)
+                self._clear_when_taken()
                 return
             rec["by"] = "fixture"
             rec["took_s"] = round(lit, 2)

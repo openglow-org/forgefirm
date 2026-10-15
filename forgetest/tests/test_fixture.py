@@ -594,6 +594,38 @@ class RoutingTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertFalse(watching())
             self.assertIsNotNone(run.notice)             # the finished run's notice is left as it was
+            # A press the fixture could not make is asked of the operator, and
+            # that notice comes down at the press like any other: press_now and
+            # arm_press with the box refusing, and arm_press with the button
+            # never lit for the box.
+            self.stub.arm_press = True
+            self.stub.fail = True
+            run = Run("test", "r.live", "r.live")
+            ctx = Context(run, self.runner, self.reg["r.live"])
+
+            def settles(up):
+                deadline = time.time() + 2
+                while (run.notice is not None) != up and time.time() < deadline:
+                    time.sleep(0.02)
+                return (run.notice is not None) == up
+            lit["v"] = True                              # the machine waits for the press
+            self.assertFalse(ctx.press_now())            # the box is off: the operator is asked
+            self.assertIsNotNone(run.notice)
+            time.sleep(0.2)                              # lit: the arm waits for the press
+            lit["v"] = False                             # the operator's press is taken
+            self.assertTrue(settles(False))
+            lit["v"] = True
+            self.assertTrue(ctx.arm_press())             # the fixture is asked, and refuses
+            self.assertTrue(settles(True))
+            time.sleep(0.2)
+            lit["v"] = False
+            self.assertTrue(settles(False))
+            self.assertTrue(ctx.arm_press(lit_timeout=0))  # the button never lit for the fixture
+            self.assertTrue(settles(True))
+            lit["v"] = True
+            time.sleep(0.2)
+            lit["v"] = False
+            self.assertTrue(settles(False))
         finally:
             runner_mod.hw.button_lit = saved
 
