@@ -118,12 +118,14 @@ BEHAVIORAL = [
 # the manifest (its tests/ and .github/ files are listed there), or
 # "forgefirm" for this repository (the null-sink harnesses under
 # scripts/bench/, which grblhal-glowforge's workflow runs). The workflow
-# must run the host test: name it, or discover it (a glob, unittest
-# discover, pytest on its directory). A host-tested path counts as covered
-# in the coverage lint, and like every path no test covers it is in no
-# fingerprint: a change there makes no acceptance run necessary. A path a
-# catalog test exercises on the hardware belongs in that test's covers, not
-# here.
+# must run the host test: on push or pull request, in a step that runs on
+# every run of the workflow and whose failure fails it (no `if:` and no
+# `continue-on-error:` on the step or its job), and name it, or discover it
+# (a glob, unittest discover, pytest on its directory). A host-tested path
+# counts as covered in the coverage lint, and like every path no test
+# covers it is in no fingerprint: a change there makes no acceptance run
+# necessary. A path a catalog test exercises on the hardware belongs in
+# that test's covers, not here.
 HOST_TESTED = [
     # An extension package's holds as the engine reads them (forgeext's
     # holdkeep_test and run_test prove the writer's side).
@@ -417,26 +419,97 @@ _STEP_KEYS = ("name", "uses", "run", "id", "if", "with", "env", "working-directo
               "continue-on-error", "timeout-minutes")
 _STEP_RX = re.compile(r"^(\s*)-\s+(%s)\s*:" % "|".join(re.escape(k) for k in _STEP_KEYS))
 _KEY_RX = re.compile(r"^(\s*)([\w-]+)\s*:\s*(.*)$")
+_ON_RX = re.compile(r"""^(?:on|"on"|'on')\s*:\s*(.*)$""")
+# What a job or a step says about whether it runs on every run of the
+# workflow, and whether its failure fails the run.
+_CONDITION_KEYS = ("if", "continue-on-error")
 
 
 def _indent(line):
     return len(line) - len(line.lstrip(" "))
 
 
-def workflow_steps(text):
-    """A workflow's steps, each a dict of its keys: "uses", "run" (the
-    command text, a block's lines joined), "working-directory", and "with"
-    (a dict). YAML read by its indentation, as far as these workflows use
-    it; comments, whole lines and from ' #' to the end of a line, are not
-    read. Anything outside a step (a trigger's paths, a job's name) is not
-    a step."""
-    lines = []
+def _lines(text):
+    """A workflow's lines with the comments dropped: whole comment lines,
+    and from ' #' to the end of a line."""
+    out = []
     for ln in text.splitlines():
         if ln.lstrip().startswith("#"):
             continue
-        lines.append(re.sub(r"\s+#.*$", "", ln).rstrip())
+        out.append(re.sub(r"\s+#.*$", "", ln).rstrip())
+    return out
+
+
+def _scalar(val):
+    """A key's value, a quoted scalar without its quotes (a quote inside a
+    command stays)."""
+    val = val.strip()
+    if len(val) > 1 and val[0] == val[-1] and val[0] in "'\"":
+        return val[1:-1]
+    return val
+
+
+def workflow_triggers(text):
+    """The events a workflow runs on: the keys of its `on:` mapping, the
+    items of its list (`on: [push, pull_request]`, or one per line), or
+    its one scalar (`on: push`). What is under an event (its branches,
+    its paths, a dispatch's inputs) is not an event. A flow mapping
+    (`on: {push: ...}`) is not read, and names no event."""
+    lines = _lines(text)
+    for i, ln in enumerate(lines):
+        m = _ON_RX.match(ln) if not _indent(ln) else None
+        if not m:
+            continue
+        val = m.group(1).strip()
+        if val.startswith("["):
+            return {_scalar(x) for x in val.strip("[]").split(",") if x.strip()}
+        if val:
+            return set() if val.startswith("{") else {_scalar(val)}
+        out, at = set(), None
+        for child in lines[i + 1:]:
+            if not child.strip():
+                continue
+            ind = _indent(child)
+            if ind == 0:
+                break
+            at = ind if at is None else at
+            if ind != at:
+                continue
+            body = child.strip()
+            if body.startswith("- "):
+                out.add(_scalar(body[2:]))
+            else:
+                km = _KEY_RX.match(child)
+                if km:
+                    out.add(km.group(2))
+        return out
+    return set()
+
+
+def workflow_steps(text):
+    """A workflow's steps, each a dict of its keys: "uses", "run" (the
+    command text, a block's lines joined), "working-directory", "with"
+    (a dict), "if" and "continue-on-error" as written, and "job": the
+    "if" and "continue-on-error" of the job the step is in, when it is
+    in one. YAML read by its indentation, as far as these workflows use
+    it; comments, whole lines and from ' #' to the end of a line, are not
+    read. Anything outside a step (a trigger's paths, a job's name) is not
+    a step."""
+    lines = _lines(text)
     steps, i = [], 0
+    in_jobs, job_at, key_at, job = False, None, None, None
     while i < len(lines):
+        km = _KEY_RX.match(lines[i])
+        if km:                      # a mapping key: which job this is, and what the job itself says
+            ind, key = _indent(lines[i]), km.group(2)
+            if ind == 0:
+                in_jobs, job_at, key_at, job = key == "jobs", None, None, None
+            elif in_jobs and (job_at is None or ind == job_at):
+                job_at, key_at, job = ind, None, {}
+            elif in_jobs and job_at is not None and ind > job_at and (key_at is None or ind == key_at):
+                key_at = ind
+                if key in _CONDITION_KEYS:
+                    job[key] = _scalar(km.group(3))
         m = _STEP_RX.match(lines[i])
         if not m:
             i += 1
@@ -454,9 +527,7 @@ def workflow_steps(text):
             if not km or _indent(body[k]) != key_col:
                 k += 1
                 continue
-            key, val = km.group(2), km.group(3).strip()
-            if len(val) > 1 and val[0] == val[-1] and val[0] in "'\"":
-                val = val[1:-1]             # a quoted scalar, not a quote inside a command
+            key, val = km.group(2), _scalar(km.group(3))
             k += 1
             child = []
             while k < len(body) and (not body[k].strip() or _indent(body[k]) > key_col):
@@ -469,8 +540,22 @@ def workflow_steps(text):
                 step["run"] = "\n".join(x.strip() for x in child) if val[:1] in ("|", ">") else val
             else:
                 step[key] = val
+        if job is not None:
+            step["job"] = job       # the job's own dict: a job key written after its steps counts too
         steps.append(step)
     return steps
+
+
+def _on_every_run(step):
+    """Whether a step runs on every run of its workflow and its failure
+    fails the run: neither it nor its job carries an `if:` other than
+    `true`, or a `continue-on-error:` other than `false`. A step that
+    runs only under a condition, or whose failure the run tolerates,
+    proves nothing about what it runs."""
+    for d in (step, step.get("job") or {}):
+        if d.get("if", "true").lower() != "true" or d.get("continue-on-error", "false").lower() != "false":
+            return False
+    return True
 
 
 def checkout_path(steps, name, own):
@@ -479,7 +564,7 @@ def checkout_path(steps, name, own):
     checkout that names no repository, another one the checkout whose
     repository is <owner>/<name>."""
     for s in steps:
-        if not s.get("uses", "").startswith("actions/checkout"):
+        if not _on_every_run(s) or not s.get("uses", "").startswith("actions/checkout"):
             continue
         w = s.get("with", {})
         repo = w.get("repository")
@@ -590,13 +675,16 @@ def workflow_runs(steps, test_path):
     (tests.test_x, tests.test_x.Case.test_one); unittest discover from the
     test's own directory with a pattern its name matches; pytest on the
     test or its own directory. An argument to anything else (echo, a build,
-    an install) does not run the test."""
+    an install) does not run the test. Only a step that runs on every run of
+    the workflow, and that fails the run when it fails, counts: a step under
+    an `if:` other than true, or with a `continue-on-error:` other than
+    false, on the step or on its job, runs nothing."""
     full = posixpath.normpath(test_path)
     stem, ext = posixpath.splitext(posixpath.basename(full))
     compiled = ext in (".c", ".cc", ".cpp")
     for s in steps:
         run = s.get("run")
-        if not run:
+        if not run or not _on_every_run(s):
             continue
         wd = s.get("working-directory") or "."
 
@@ -636,8 +724,10 @@ def host_row_problems(manifest, host=HOST_TESTED, root=REPO_ROOT, sources=SOURCE
     """HOST_TESTED rows that prove nothing: a glob that selects no
     behavioral file of its component (the same defect as an empty covers
     entry), a host test or a workflow that does not exist, a workflow that
-    cannot be read where it should be, one that does not check out the
-    test's repository, or one with no step that runs the test. Whether a
+    cannot be read where it should be, one that runs on no push or pull
+    request (a dispatch, a call or a schedule runs on no change), one that
+    does not check out the test's repository, or one with no step that
+    runs the test on every run (workflow_runs). Whether a
     workflow runs its test is not checked where it cannot be read (see
     read_source). Returns [(component, glob, host test, why)]."""
     out = []
@@ -654,6 +744,9 @@ def host_row_problems(manifest, host=HOST_TESTED, root=REPO_ROOT, sources=SOURCE
             out.append((comp, pat, ref, "%s %s" % (ci, why)))
             continue
         if text is None:
+            continue
+        if not workflow_triggers(text) & {"push", "pull_request"}:
+            out.append((comp, pat, ref, "%s runs on no push or pull request" % ci))
             continue
         steps = workflow_steps(text)
         test_repo, _sep, test_path = ref.partition(":")

@@ -242,6 +242,18 @@ class CoverageReportTests(unittest.TestCase):
         self.assertEqual(m.host_row_problems(man, [runs], root=root, sources=None), [])
         self.assertEqual(m.host_row_problems(man, [idle], root=root, sources=None),
                          [(idle[0], idle[1], idle[2], ci + " does not run it")])
+        # a workflow that runs on no push or pull request runs it on no change, and a step whose
+        # failure the run tolerates does not run it
+        job = "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n      - run: python3 scripts/bench/stream_test.py\n"
+        root = self._root({"scripts/bench/stream_test.py": "",
+                           ".github/workflows/manual.yml": "on:\n  workflow_dispatch:\n" + job,
+                           ".github/workflows/soft.yml": "on: [push]\n" + job.replace(
+                               "      - run:", "      - continue-on-error: true\n        run:")})
+        manual = runs[:3] + ("forgefirm:.github/workflows/manual.yml",)
+        soft = runs[:3] + ("forgefirm:.github/workflows/soft.yml",)
+        self.assertEqual(m.host_row_problems(man, [manual, soft], root=root, sources=None),
+                         [manual[:3] + (manual[3] + " runs on no push or pull request",),
+                          soft[:3] + (soft[3] + " does not run it",)])
 
     def _runs(self, yml, path):
         return m.workflow_runs(m.workflow_steps(yml), path)
@@ -305,6 +317,48 @@ class CoverageReportTests(unittest.TestCase):
         self.assertFalse(self._runs(step % "python -m unittest -k test_feeder tests.test_lens",
                                     "tests/test_feeder.py"))
 
+    def test_a_step_counts_only_when_every_run_of_the_workflow_runs_it_and_its_failure_fails_the_run(self):
+        step = "steps:\n  - name: x\n%s    run: ./build/tray_test\n"
+        test = "tests/tray_test.c"
+        # a step under an if: runs it on some runs, not every run; literally true is no condition
+        self.assertFalse(self._runs(step % "    if: false\n", test))
+        self.assertFalse(self._runs(step % "    if: github.event_name == 'push'\n", test))
+        self.assertFalse(self._runs(step % "    if: ${{ always() }}\n", test))
+        self.assertTrue(self._runs(step % "    if: true\n", test))
+        self.assertTrue(self._runs(step % "    if: 'true'\n", test))
+        # a step whose failure the run tolerates proves nothing; literally false is no tolerance
+        self.assertFalse(self._runs(step % "    continue-on-error: true\n", test))
+        self.assertFalse(self._runs(step % "    continue-on-error: ${{ inputs.soft }}\n", test))
+        self.assertTrue(self._runs(step % "    continue-on-error: false\n", test))
+        # the job's own if: or continue-on-error: holds for each of its steps, wherever it is
+        # written, over a step's own, and not for another job's steps
+        job = "jobs:\n  t:\n%s    steps:\n      - run: ./build/tray_test\n%s"
+        self.assertFalse(self._runs(job % ("    if: github.ref == 'refs/heads/main'\n", ""), test))
+        self.assertFalse(self._runs(job % ("", "    if: false\n"), test))
+        self.assertFalse(self._runs(job % ("    continue-on-error: true\n", ""), test))
+        self.assertFalse(self._runs("jobs:\n  t:\n    continue-on-error: true\n    steps:\n"
+                                    "      - continue-on-error: false\n        run: ./build/tray_test\n", test))
+        self.assertTrue(self._runs(job % ("    if: true\n    runs-on: ubuntu-latest\n", ""), test))
+        self.assertTrue(self._runs(job % ("    permissions:\n      contents: read\n", ""), test))
+        two = "jobs:\n  a:\n    if: false\n    steps:\n      - run: %s\n  b:\n    steps:\n      - run: %s\n"
+        self.assertTrue(self._runs(two % ("make", "./build/tray_test"), test))
+        self.assertFalse(self._runs(two % ("./build/tray_test", "make"), test))
+        # a checkout under a condition is no checkout
+        yml = "steps:\n  - uses: actions/checkout@v4\n%s    with:\n      path: own\n"
+        self.assertEqual(m.checkout_path(m.workflow_steps(yml % ""), "x", True), "own")
+        self.assertIsNone(m.checkout_path(m.workflow_steps(yml % "    if: false\n"), "x", True))
+
+    def test_the_events_a_workflow_runs_on(self):
+        self.assertEqual(m.workflow_triggers("on:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  t:\n"),
+                         {"push", "pull_request"})
+        self.assertEqual(m.workflow_triggers("on: [push, pull_request]\n"), {"push", "pull_request"})
+        self.assertEqual(m.workflow_triggers("on: push\n"), {"push"})
+        self.assertEqual(m.workflow_triggers("on:\n  - push\n  - workflow_dispatch\n"), {"push", "workflow_dispatch"})
+        self.assertEqual(m.workflow_triggers("\"on\":\n  workflow_dispatch:\n    inputs:\n      push:\n"
+                                             "        type: string\n"), {"workflow_dispatch"})
+        self.assertEqual(m.workflow_triggers("on:\n  workflow_call:\n"), {"workflow_call"})
+        self.assertEqual(m.workflow_triggers("name: x\njobs:\n  t:\n    steps: []\n"), set())
+
     def test_the_lint_says_when_it_could_not_read_a_workflow(self):
         import contextlib
         import io
@@ -366,7 +420,7 @@ class CoverageReportTests(unittest.TestCase):
         def blob(text):
             return subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=cache, input=text.encode(),
                                   capture_output=True, check=True).stdout.decode().strip()
-        yml = "steps:\n  - uses: actions/checkout@v4\n  - run: ./build/tray_test\n"
+        yml = "on: [push, pull_request]\nsteps:\n  - uses: actions/checkout@v4\n  - run: ./build/tray_test\n"
         comps = {"forgectrl": {"srcrev": "aaa", "source": url, "files": [
             ["src/tray.c", "1" * 40], ["tests/tray_test.c", "2" * 40], ["tests/lens_test.c", "3" * 40],
             [".github/workflows/build.yml", blob(yml)], [".github/workflows/lost.yml", "4" * 40]]}}
