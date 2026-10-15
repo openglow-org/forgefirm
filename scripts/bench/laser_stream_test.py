@@ -24,7 +24,10 @@ over TCP, then checks the dumps against the kernel feeder contract:
      the stream must never lean on the kernel's end-of-data backstop
   8. no FIRE bit ever rides a zero-step gap: a stepless run of stream
      bytes carrying FIRE longer than any legitimate between-step
-     interval is a stationary dwell burn
+     interval is a stationary dwell burn, and so is a FIRE tick deeper
+     into a stepless run than that interval, however it is spaced (the
+     density dither masks a stale fire state into bursts split by dark
+     ticks, so FIRE continuity says nothing under it; depth does)
   9. rules 7-8 hold across rapid cycle stop/start churn (planner-starve
      shaped jobs), where the FIRE state of the previous cycle must not
      leak into the idle-gap pad bytes
@@ -692,19 +695,47 @@ def tick_bytes(data):
 
 
 def check_fire_gaps(name, data):
-    """Rule 8: no stepless run carrying FIRE longer than the limit."""
-    run = 0
+    """Rule 8, read both ways so it holds under either power model: no
+    stepless run carrying FIRE on every tick for the limit (a stale fire
+    state as the analog model renders it), and no FIRE tick farther than
+    the limit from every step, the one before it and the one after it
+    (the same state as the density model renders it: the dither masks it
+    into bursts shorter than the limit, split by dark ticks, so the first
+    reading never trips). A cut's first FIRE tick leads its first step by
+    the accel-from-rest interval and its last trails its last step by
+    less, both inside the limit; a FIRE tick with no step that near on
+    either side is in a gap, and lit."""
+    ticks = tick_bytes(data)
+    n = len(ticks)
+    # Ticks from each tick to the next step tick at or after it.
+    ahead = [n] * n
+    nxt = None
+    for i in range(n - 1, -1, -1):
+        if ticks[i] & 0x25:                 # an X/Y/Z step
+            nxt = i
+        if nxt is not None:
+            ahead[i] = nxt - i
+    run = 0        # consecutive stepless ticks carrying FIRE
+    since = n      # ticks since the last step
     worst = 0
-    for tick, b in enumerate(tick_bytes(data)):
-        if b & 0x10 and not b & 0x25:       # FIRE, no X/Y/Z step
-            run += 1
-            worst = max(worst, run)
-            if run >= FIRE_GAP_LIMIT_TICKS:
-                fail("[%s] FIRE carried across a %d-tick zero-step gap "
-                     "ending at tick %d (stationary dwell burn)"
-                     % (name, run, tick))
-        else:
+    for tick, b in enumerate(ticks):
+        if b & 0x25:
+            run = since = 0
+            continue
+        since += 1
+        if not b & 0x10:
             run = 0
+            continue
+        run += 1
+        worst = max(worst, run)
+        if run >= FIRE_GAP_LIMIT_TICKS:
+            fail("[%s] FIRE carried across a %d-tick zero-step gap "
+                 "ending at tick %d (stationary dwell burn)"
+                 % (name, run, tick))
+        if since > FIRE_GAP_LIMIT_TICKS and ahead[tick] > FIRE_GAP_LIMIT_TICKS:
+            fail("[%s] FIRE %d ticks after a step and %d before the next, "
+                 "at tick %d (stationary dwell burn, masked by the dither)"
+                 % (name, since, ahead[tick], tick))
     return worst
 
 
