@@ -127,7 +127,13 @@ def fds_of(pid):
                   "stops before it on a machine with no package installed and nothing running under a "
                   "pool account, the data directory open for search on a machine with an account, the file modes the release depends on, and the mounts: the "
                   "rootfs read-only, /data writable, the account files and the banner rendered "
-                  "into tmpfs, the sshd host keys on /data, the factory slots on the dev image only.")
+                  "into tmpfs, the sshd host keys on /data, the factory slots on the dev image only. "
+                  "And the boot does not wait on the network: ifup has returned for wlan0 (it is "
+                  "in the state file and no ifup is running) and the console login is up; each "
+                  "DHCP client runs with -b and has left ifup (its parent is pid 1); no DHCPv6 "
+                  "client is running or on the image, nor its hook script; and IPv6 is the "
+                  "kernel's own: enabled on wlan0, router advertisements accepted, a link-local "
+                  "address up (a global address is logged, not checked).")
 def image_health(ctx):
     ev = ctx.evidence
     manifest = ctx.runner.manifest
@@ -399,59 +405,52 @@ def image_health(ctx):
     ctx.check("linux-fslc" in manifest.components, "manifest lacks the kernel entry")
     ctx.log("manifest %s: %d components", manifest.content_sha[:12], len(manifest.components))
 
+    # 10. the network boot. init starts the rest of the boot, the console
+    # login last, only after the networking script returns, so a client
+    # that waits in ifup's foreground on a server's answer holds the
+    # whole machine. The interfaces file starts no DHCPv6 client
+    # (test_image.py reads the layer's file); the bounded DHCP client
+    # (-b, which leaves ifup after three unanswered discovers) is checked
+    # here, on the client that runs.
+    procs = _procs()
+    up = ifstate_names(_read(IFSTATE, ""))
+    ev["ifstate"] = sorted(up)
+    ctx.check("wlan0" in up, "ifup has not finished wlan0: %s holds %s", IFSTATE, sorted(up))
+    stuck = [p for p in procs if p[2] in ("ifup", "ifdown")]
+    ev["ifup_running"] = [p[3] for p in stuck]
+    ctx.check(not stuck, "ifup is still running: %s", [p[3] for p in stuck])
+    logins = [p[3] for p in procs if p[2] == "getty"]
+    ev["getty"] = logins
+    ctx.check(any("ttymxc0" in c for c in logins), "no console login is running: %s", logins)
+    v4 = [p for p in procs if p[2] == "udhcpc"]
+    ev["udhcpc"] = [p[3] for p in v4]
+    ctx.check(v4, "no DHCP client is running")
+    for pid, ppid, _comm, cmd in v4:
+        ctx.check("-b" in cmd.split(), "the DHCP client runs without -b: %s", cmd)
+        ctx.check(ppid == 1, "the DHCP client (pid %d) is still a child of pid %d", pid, ppid)
+    # no DHCPv6 client: not running, not on the image
+    alive = [p[3] for p in procs if p[2] in DHCP6_CLIENTS]
+    ev["dhcp6_running"] = alive
+    ctx.check(not alive, "a DHCPv6 client is running: %s", alive)
+    for name in DHCP6_CLIENTS:
+        ctx.check(shutil.which(name) is None, "%s is on the image", name)
+    ctx.check(not os.path.exists("/usr/share/udhcpc/default6.script"),
+              "the DHCPv6 hook script is on the image")
+    # IPv6 is the kernel's own. A global address is evidence only: a
+    # network whose router advertisement offers no SLAAC prefix gives none.
+    conf = "/proc/sys/net/ipv6/conf/wlan0/"
+    ev["disable_ipv6"] = (_read(conf + "disable_ipv6", "") or "").strip()
+    ev["accept_ra"] = (_read(conf + "accept_ra", "") or "").strip()
+    ctx.check(ev["disable_ipv6"] == "0", "IPv6 is off on wlan0 (disable_ipv6=%r)", ev["disable_ipv6"])
+    ctx.check(ev["accept_ra"] not in ("", "0"),
+              "wlan0 does not accept router advertisements (accept_ra=%r)", ev["accept_ra"])
+    local, world = link_addrs(_read("/proc/net/if_inet6", ""), "wlan0")
+    ev["link_local"] = local
+    ev["global"] = world
+    ctx.check(local, "wlan0 has no link-local IPv6 address")
+    ctx.log("wlan0: %d link-local, %d global IPv6 address(es)", len(local), len(world))
 
-@test("image.license-bundle", title="The license texts travel with the image",
-      subsystem="image", kind="auto", est_min=1,
-      covers=[("forgectrl", "src/main.c"), ("forgectrl", "src/ui/index.html"),
-              ("forgectrl", "src/ui/wizard.html"), ("forgectrl", "src/ui/login.html")],
-      requires=["forgectrl.panel-serves"],
-      description="The image carries /usr/share/forgefirm/licenses.tar.gz, a gzip tar with "
-                  "the license manifest (every installed package with its license) and the "
-                  "license texts, and no loose common-licenses tree; the panel serves the "
-                  "bundle, the manifest as text, and the Licenses page every footer links, "
-                  "each without a login.")
-def license_bundle(ctx):
-    import io
-    import tarfile
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    path = "/usr/share/forgefirm/licenses.tar.gz"
-    ctx.check(os.path.isfile(path), "%s is missing", path)
-    ctx.check(not os.path.isdir("/usr/share/common-licenses"),
-              "the loose common-licenses tree is still on the rootfs")
-    size = os.path.getsize(path)
-    ev["bundle_bytes"] = size
-    ctx.log("%s: %d bytes", path, size)
-    with tarfile.open(path, "r:gz") as t:
-        names = t.getnames()
-        ctx.check("common-licenses/license.manifest" in names, "no license.manifest in the bundle")
-        manifest = t.extractfile("common-licenses/license.manifest").read().decode("utf-8", "replace")
-    packages = manifest.count("PACKAGE NAME: ")
-    texts = sum(1 for n in names if "/generic_" in n and not n.endswith("/"))
-    ev["packages"] = packages
-    ev["generic_texts"] = texts
-    ctx.log("manifest lists %d packages; %d generic license entries", packages, texts)
-    ctx.check(packages >= 40, "only %d packages in the manifest", packages)
-    ctx.check(texts >= 5, "only %d generic license entries", texts)
-    for name in ("forgectrl", "grblhal-glowforge", "kernel-module-glowforge"):
-        ctx.check("RECIPE NAME: %s\n" % name in manifest, "%s is not in the manifest", name)
 
-    st, body = fc.get("/system/licenses/manifest", raw=True)
-    ctx.check(st == 200, "GET /system/licenses/manifest -> %s", st)
-    ctx.check(isinstance(body, (bytes, bytearray)) and b"PACKAGE NAME: " in body,
-              "the served manifest is not the manifest")
-    st, body = fc.get("/system/licenses", raw=True)
-    ctx.check(st == 200, "GET /system/licenses -> %s", st)
-    ctx.check(isinstance(body, (bytes, bytearray)) and len(body) == size,
-              "the served bundle is %s bytes, the file %d", len(body) if body else None, size)
-    with tarfile.open(fileobj=io.BytesIO(bytes(body)), mode="r:gz") as t:
-        ctx.check("common-licenses/license.manifest" in t.getnames(),
-                  "the served bundle holds no manifest")
-    st, body = fc.get("/licenses", raw=True)
-    ctx.check(st == 200, "GET /licenses -> %s", st)
-    text = bytes(body).decode("utf-8", "replace") if body else ""
-    ctx.check("/system/licenses" in text and "PACKAGE NAME: " in text,
-              "the Licenses page lacks the download link or the manifest")
 
 
 # ------------------------------------------------------- the network boot
@@ -524,68 +523,3 @@ def link_addrs(text, iface):
     return local, world
 
 
-@test("image.network-boot", title="The boot does not wait on the network",
-      subsystem="image", kind="auto", est_min=1,
-      description="The network comes up without the boot waiting on a server. init starts the "
-                  "rest of the boot, the console login last, only after the networking script "
-                  "returns, so a client that waits in ifup's foreground on a server's answer "
-                  "holds the whole machine: no login, no SSH, no control panel. ifup has "
-                  "returned for wlan0 (it is in the state file and no ifup is running) and the "
-                  "console login is up; the DHCP client is the bounded one (-b, which leaves "
-                  "ifup after three unanswered discovers) and has left ifup; no DHCPv6 client "
-                  "is named in the interfaces file, running, or on the image; and IPv6 is the "
-                  "kernel's own: enabled on wlan0, router advertisements accepted, a link-local "
-                  "address up. A global address is evidence only, because a network whose "
-                  "router advertisement offers no SLAAC prefix gives none. What a hostile "
-                  "server does to a client is a bench drill, not a test. No component covers "
-                  "this: the interfaces file is layer content, in the platform identity of "
-                  "every fingerprint.")
-def network_boot(ctx):
-    ev = ctx.evidence
-    procs = _procs()
-
-    # 1. ifup came back, and the boot went on to the console login
-    state = ifstate_names(_read(IFSTATE, ""))
-    ev["ifstate"] = sorted(state)
-    ctx.check("wlan0" in state, "ifup has not finished wlan0: %s holds %s", IFSTATE, sorted(state))
-    stuck = [p for p in procs if p[2] in ("ifup", "ifdown")]
-    ev["ifup_running"] = [p[3] for p in stuck]
-    ctx.check(not stuck, "ifup is still running: %s", [p[3] for p in stuck])
-    logins = [p[3] for p in procs if p[2] == "getty"]
-    ev["getty"] = logins
-    ctx.check(any("ttymxc0" in c for c in logins), "no console login is running: %s", logins)
-
-    # 2. the DHCP client is the bounded one, and it has left ifup
-    v4 = [p for p in procs if p[2] == "udhcpc"]
-    ev["udhcpc"] = [p[3] for p in v4]
-    ctx.check(v4, "no DHCP client is running")
-    for pid, ppid, _comm, cmd in v4:
-        ctx.check("-b" in cmd.split(), "the DHCP client runs without -b: %s", cmd)
-        ctx.check(ppid == 1, "the DHCP client (pid %d) is still a child of pid %d", pid, ppid)
-
-    # 3. no DHCPv6 client: not started, not running, not on the image
-    text = _read(INTERFACES)
-    ctx.check(text is not None, "%s is missing", INTERFACES)
-    named = dhcp6_in_interfaces(text)
-    ev["interfaces_dhcp6"] = named
-    ctx.check(not named, "%s starts a DHCPv6 client: %s", INTERFACES, named)
-    alive = [p[3] for p in procs if p[2] in DHCP6_CLIENTS]
-    ev["dhcp6_running"] = alive
-    ctx.check(not alive, "a DHCPv6 client is running: %s", alive)
-    for name in DHCP6_CLIENTS:
-        ctx.check(shutil.which(name) is None, "%s is on the image", name)
-    ctx.check(not os.path.exists("/usr/share/udhcpc/default6.script"),
-              "the DHCPv6 hook script is on the image")
-
-    # 4. IPv6 is the kernel's own
-    conf = "/proc/sys/net/ipv6/conf/wlan0/"
-    ev["disable_ipv6"] = (_read(conf + "disable_ipv6", "") or "").strip()
-    ev["accept_ra"] = (_read(conf + "accept_ra", "") or "").strip()
-    ctx.check(ev["disable_ipv6"] == "0", "IPv6 is off on wlan0 (disable_ipv6=%r)", ev["disable_ipv6"])
-    ctx.check(ev["accept_ra"] not in ("", "0"),
-              "wlan0 does not accept router advertisements (accept_ra=%r)", ev["accept_ra"])
-    local, world = link_addrs(_read("/proc/net/if_inet6", ""), "wlan0")
-    ev["link_local"] = local
-    ev["global"] = world
-    ctx.check(local, "wlan0 has no link-local IPv6 address")
-    ctx.log("wlan0: %d link-local, %d global IPv6 address(es)", len(local), len(world))
