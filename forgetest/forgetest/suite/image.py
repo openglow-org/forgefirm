@@ -4,11 +4,9 @@
 # SPDX-License-Identifier:    MIT
 
 """image.* - the post-flash health of the running image (always-required)."""
-import glob
 import gzip
 import mmap
 import os
-import shutil
 import struct
 import re
 import stat
@@ -123,15 +121,15 @@ def fds_of(pid):
                   "the daemon ownership, the board temperatures /status reports (the chassis and "
                   "the SoC die in a plausible range, the supply as a 10-bit count, the CPU "
                   "unthrottled), "
-                  "the init ordering, the extension host as one process that starts after forgectrl and "
-                  "stops before it on a machine with no package installed and nothing running under a "
-                  "pool account, the data directory open for search on a machine with an account, the file modes the release depends on, and the mounts: the "
+                  "the extension host as one process on a machine with no package installed and "
+                  "nothing running under a pool account, no userspace watchdog running, "
+                  "the data directory open for search on a machine with an account, the file modes the release depends on, and the mounts: the "
                   "rootfs read-only, /data writable, the account files and the banner rendered "
-                  "into tmpfs, the sshd host keys on /data, the factory slots on the dev image only. "
+                  "into tmpfs, the sshd host keys on /data, the dev image's factory slots read-only. "
                   "And the boot does not wait on the network: ifup has returned for wlan0 (it is "
                   "in the state file and no ifup is running) and the console login is up; each "
                   "DHCP client runs with -b and has left ifup (its parent is pid 1); no DHCPv6 "
-                  "client is running or on the image, nor its hook script; and IPv6 is the "
+                  "client is running; and IPv6 is the "
                   "kernel's own: enabled on wlan0, router advertisements accepted, a link-local "
                   "address up (a global address is logged, not checked).")
 def image_health(ctx):
@@ -284,17 +282,8 @@ def image_health(ctx):
     ctx.check(temps.get("soc_throttle") == 0,
               "the CPU is throttled (or its cooling device is missing) at idle: %s", temps)
 
-    # 5. init ordering: controllers stop before the daemon
-    k = sorted(os.path.basename(p) for p in glob.glob("/etc/rc6.d/K*"))
-    ev["rc6_kill"] = k
-    kg = [x for x in k if "grblhal" in x]
-    kf = [x for x in k if x.endswith("forgectrl")]
-    ctx.log("rc6.d: %s", " ".join(k))
-    ctx.check(kg and kf, "rc6.d lacks the grblhal/forgectrl kill links")
-    ctx.check(kg[0] < kf[0], "controller kill link %s must sort before forgectrl's %s", kg[0], kf[0])
-
-    # 5b. the extension host: one process, up after forgectrl and down
-    # before it, and a campaign's machine is extension-free
+    # 5. the extension host: one process, and a campaign's machine is
+    # extension-free (its init order is the rootfs lint's)
     host = []
     for pid in hw.pidof("forgeext"):
         argv = _read("/proc/%d/cmdline" % pid, "").split("\0")
@@ -302,13 +291,6 @@ def image_health(ctx):
             host.append(pid)
     ev["extension_host_pids"] = host
     ctx.check(len(host) == 1, "the extension host is not one running process: %s", host)
-    s5 = sorted(os.path.basename(x) for x in glob.glob("/etc/rc5.d/S*"))
-    sx = [x for x in s5 if x.endswith("forgeext")]
-    sf = [x for x in s5 if x.endswith("forgectrl")]
-    kx = [x for x in k if x.endswith("forgeext")]
-    ev["forgeext_links"] = {"start": sx, "kill": kx}
-    ctx.check(sx and sf and sf[0] < sx[0], "the extension host must start after forgectrl: %s, %s", sf, sx)
-    ctx.check(kx and kx[0] < kf[0], "the extension host must stop before forgectrl: %s, %s", kx, kf)
     ev["extension_packages"] = hw.ext_packages()
     ev["pool_processes"] = len(hw.pool_pids())
     ctx.log("extension host pid %s, packages %s, pool processes %d", host, ev["extension_packages"], ev["pool_processes"])
@@ -316,12 +298,9 @@ def image_health(ctx):
               ev["extension_packages"])
     ctx.check(not ev["pool_processes"], "%d process(es) run under extension pool accounts", ev["pool_processes"])
 
-    # 6. logging lever present, no userspace watchdog daemon
-    logging = [n for n in ("forgefirm-logging", "forgefirm-logrotate") if os.path.exists("/etc/init.d/" + n)]
-    ev["logging_init"] = logging
-    ctx.check(logging, "no ForgeFIRM logging/logrotate init script")
-    ctx.check(not os.path.exists("/etc/init.d/watchdog"), "a userspace watchdog init script is present")
-    # kernel threads (the imx2_wdt kthread is expected) have an empty cmdline
+    # 6. no userspace watchdog daemon running (the logging init and the
+    # absent watchdog init script are the rootfs lint's); kernel threads
+    # (the imx2_wdt kthread is expected) have an empty cmdline
     user_wd = [p for p in hw.pidof("watchdog") if _read("/proc/%d/cmdline" % p, "")]
     ev["userspace_watchdog_pids"] = user_wd
     ctx.check(not user_wd, "a userspace watchdog daemon is running: %s", user_wd)
@@ -351,8 +330,9 @@ def image_health(ctx):
     # 8. the mounts: the rootfs read-only, /data the writable partition,
     # the state a read-only rootfs hands off (the read-only-rootfs image
     # feature, forgefirm-users, forgefirm-hostname, forgefirm-banner, the
-    # sshd host keys). The
-    # dev image alone mounts the factory slots under /factory.
+    # sshd host keys). The dev image's factory slots under /factory are
+    # read-only; rcS's ROOTFS_READ_ONLY and the release fstab with no
+    # factory slot are the rootfs lint's.
     mounts = {}
     for line in (_read("/proc/mounts", "") or "").splitlines():
         parts = line.split()
@@ -370,8 +350,6 @@ def image_health(ctx):
     ctx.check("rw" in mount_opts("/data"), "/data is not mounted read-write: %s", mounts.get("/data"))
     ctx.check("rw" in mount_opts("/var/lib"),
               "/var/lib is not a writable copy (read-only-rootfs-hook.sh): %s", mounts.get("/var/lib"))
-    rcs = _read("/etc/default/rcS", "") or ""
-    ctx.check("ROOTFS_READ_ONLY=yes" in rcs.splitlines(), "/etc/default/rcS lacks ROOTFS_READ_ONLY=yes")
     factory = sorted(p for p in mounts if p.startswith("/factory/"))
     ev["factory_mounts"] = factory
     dev_image = os.path.exists("/etc/forgefirm-dev")
@@ -382,8 +360,6 @@ def image_health(ctx):
             if os.path.exists("/dev/mmcblk2p%d" % n):
                 p = "/factory/img%d" % n
                 ctx.check("ro" in mount_opts(p), "%s is not mounted read-only on the dev image: %s", p, mounts.get(p))
-    else:
-        ctx.check(not factory, "a release image mounts the factory slots: %s", factory)
     if os.path.isfile("/data/forgefirm/users"):
         names = [l.split(":")[0] for l in (_read("/data/forgefirm/users", "") or "").splitlines()
                  if l.strip() and not l.startswith("#")]
@@ -428,14 +404,10 @@ def image_health(ctx):
     for pid, ppid, _comm, cmd in v4:
         ctx.check("-b" in cmd.split(), "the DHCP client runs without -b: %s", cmd)
         ctx.check(ppid == 1, "the DHCP client (pid %d) is still a child of pid %d", pid, ppid)
-    # no DHCPv6 client: not running, not on the image
+    # no DHCPv6 client running (none on the image is the rootfs lint's)
     alive = [p[3] for p in procs if p[2] in DHCP6_CLIENTS]
     ev["dhcp6_running"] = alive
     ctx.check(not alive, "a DHCPv6 client is running: %s", alive)
-    for name in DHCP6_CLIENTS:
-        ctx.check(shutil.which(name) is None, "%s is on the image", name)
-    ctx.check(not os.path.exists("/usr/share/udhcpc/default6.script"),
-              "the DHCPv6 hook script is on the image")
     # IPv6 is the kernel's own. A global address is evidence only: a
     # network whose router advertisement offers no SLAAC prefix gives none.
     conf = "/proc/sys/net/ipv6/conf/wlan0/"

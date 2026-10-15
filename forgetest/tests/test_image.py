@@ -3,6 +3,7 @@
 # https://community.openglow.org
 # SPDX-License-Identifier:    MIT
 
+import json
 import os
 import shutil
 import subprocess
@@ -118,6 +119,89 @@ class MachineNameTests(unittest.TestCase):
         heading, *urls = issue[len(base) + 1:].strip("\n").split("\n")
         self.assertEqual(urls, ["  https://192.0.2.5/", "  https://[2001:db8::5]/"], issue)
         self.assertFalse(heading.startswith("#") or ".local" in issue, issue)
+
+
+# forgefirm-users rendering a record, as the image runs it, in a private
+# mount namespace as root: /run a fresh tmpfs, /etc read-only with the
+# scratch tree's account files over the host's, and the scratch data
+# directory over /data (made for the run where the host has none, as
+# fflog_e2e.sh does, and removed after). The data directory is root's, as
+# on the machine, whoever made the scratch tree. Then, as the account's
+# own uid, what it can do with its home and with the data directory
+# around it. Exit 97: the namespace could not be set up.
+ACCOUNTS = r"""
+T=$1; SCRIPT=$2
+made=
+[ -d /data ] || { mkdir /data && made=1; } || exit 97
+chown -R 0:0 "$T/data" &&
+    mount --make-rprivate / && mount -t tmpfs tmpfs /run &&
+    mount -t overlay overlay -o "lowerdir=$T/etc:/etc" /etc &&
+    mount --bind "$T/data" /data || { [ -z "$made" ] || rmdir /data; exit 97; }
+sh "$SCRIPT" reload
+echo "rc=$?"
+echo "mode=$(stat -c %a /data/forgefirm)"
+python3 - <<'PY'
+import errno, json, os, pwd
+p = pwd.getpwnam("bench")
+os.setgroups([])
+os.setgid(p.pw_gid)
+os.setuid(p.pw_uid)
+def tried(fn):
+    try:
+        fn()
+        return "ok"
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+def write():
+    path = os.path.join(p.pw_dir, ".reach")
+    with open(path, "w") as f:
+        f.write("x")
+    os.remove(path)
+print("reach=" + json.dumps({"uid": os.getuid(), "home": p.pw_dir, "cd": tried(lambda: os.chdir(p.pw_dir)),
+                             "write": tried(write), "list_data_dir": tried(lambda: os.listdir("/data/forgefirm")),
+                             "read_record": tried(lambda: open("/data/forgefirm/users").read())}))
+PY
+cd /
+umount /data
+[ -z "$made" ] || rmdir /data
+rm -rf "$T/data"
+"""
+
+
+@unittest.skipUnless(os.path.isdir(LAYER) and shutil.which("unshare"), "needs Linux and a forgefirm checkout")
+class AccountRenderTests(unittest.TestCase):
+    """forgefirm-users, the layer's own init script, rendering the record."""
+
+    def test_the_render_opens_the_data_directory_to_its_account_and_no_further(self):
+        tree = tempfile.mkdtemp(prefix="forgetest-users.")
+        self.addCleanup(shutil.rmtree, tree, ignore_errors=True)
+        os.makedirs(os.path.join(tree, "etc"))
+        for name, text in (("passwd", "root:x:0:0:root:/root:/bin/sh\n"), ("shadow", "root::19000:0:99999:7:::\n"),
+                           ("group", "root:x:0:\n"), ("gshadow", "root:*::\n")):
+            with open(os.path.join(tree, "etc", name), "w") as f:
+                f.write(text)
+        data = os.path.join(tree, "data", "forgefirm")
+        os.makedirs(data)
+        os.chmod(data, 0o700)                       # as a strict umask leaves it
+        with open(os.path.join(data, "users"), "w") as f:
+            f.write("bench:$6$salt$hash:1000\n")
+        os.chmod(os.path.join(data, "users"), 0o600)
+        try:
+            p = subprocess.run(["sudo", "-n", "unshare", "-m", "sh", "-c", ACCOUNTS, "sh", tree,
+                                os.path.join(LAYER, "forgefirm-users", "files", "forgefirm-users.init")],
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            p = None
+        if p is None or "rc=" not in p.stdout:
+            if p is not None and p.returncode == 97:
+                raise AssertionError("the namespace was made but not set up: %s" % p.stderr.strip())
+            self.skipTest("no namespace can be made here (root through sudo -n)")
+        self.assertEqual(field(p.stdout, "rc"), "0", p.stdout + p.stderr)
+        self.assertEqual(field(p.stdout, "mode"), "711", p.stdout)
+        reach = json.loads(field(p.stdout, "reach"))
+        self.assertEqual((reach["uid"], reach["home"]), (1000, "/data/forgefirm/home/bench"), reach)
+        self.assertEqual((reach["cd"], reach["write"]), ("ok", "ok"), reach)
+        self.assertEqual((reach["list_data_dir"], reach["read_record"]), ("EACCES", "EACCES"), reach)
 
 
 class NetworkBootTests(unittest.TestCase):
@@ -255,6 +339,14 @@ class RootfsLintTests(unittest.TestCase):
         self.put("etc/ssh/sshd_config_readonly", self.SSHD)
         self.put("etc/network/interfaces", "auto lo\niface lo inet loopback\n" + NetworkBootTests.STANZA)
         self.put("etc/nsswitch.conf", "hosts:          files dns\n")
+        for name in ("forgectrl", "forgeext", "grblhal", "forgefirm-logging"):
+            self.put("etc/init.d/" + name, "#!/bin/sh\n", mode=0o755)
+        os.makedirs(self.path("etc/rc6.d"))
+        for link in ("rc5.d/S90forgectrl", "rc5.d/S91forgeext", "rc6.d/K09forgeext", "rc6.d/K80grblhal",
+                     "rc6.d/K90forgectrl"):
+            os.symlink("../init.d/" + link.split("/")[1][3:], self.path("etc/" + link))
+        self.put("etc/default/rcS", "VERBOSE=no\nROOTFS_READ_ONLY=yes\n")
+        self.put("etc/fstab", "/dev/root  /  auto  ro  1  0\n/dev/mmcblk2p3  /data  auto  defaults  0  0\n")
 
     def path(self, rel):
         return os.path.join(self.root, rel)
@@ -312,6 +404,33 @@ class RootfsLintTests(unittest.TestCase):
     def test_an_mdns_responder_fails(self):
         os.makedirs(self.path("etc/avahi"))
         self.assertFails("mdns")
+
+    def test_the_extension_host_starting_before_forgectrl_fails(self):
+        os.rename(self.path("etc/rc5.d/S91forgeext"), self.path("etc/rc5.d/S89forgeext"))
+        self.assertFails("init-order")
+
+    def test_no_logging_init_script_fails(self):
+        os.remove(self.path("etc/init.d/forgefirm-logging"))
+        self.assertFails("logging")
+
+    def test_a_userspace_watchdog_init_script_fails(self):
+        self.put("etc/init.d/watchdog", "#!/bin/sh\n", mode=0o755)
+        self.assertFails("watchdog")
+
+    def test_rcs_without_the_read_only_rootfs_fails(self):
+        self.put("etc/default/rcS", "VERBOSE=no\n")
+        self.assertFails("read-only")
+
+    def test_a_dhcpv6_client_on_the_image_fails(self):
+        os.makedirs(self.path("sbin"))
+        os.symlink("/bin/busybox.nosuid", self.path("sbin/udhcpc6"))
+        self.assertFails("dhcpv6")
+
+    def test_a_factory_slot_in_fstab_fails_a_release_image_only(self):
+        self.put("etc/fstab", "/dev/root  /  auto  ro  1  0\n/dev/mmcblk2p1  /factory/img1  auto  ro,noatime  0  0\n")
+        self.assertFails("factory", "release")
+        p = self.lint("dev")
+        self.assertEqual(p.returncode, 0, p.stderr)
 
 
 if __name__ == "__main__":

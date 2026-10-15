@@ -64,6 +64,10 @@ reported messages:
      cancels it from the hold - reason reported, the reset banner, no
      alarm, the return to the job start - and a later press resumes
      nothing
+ 17. a jog cancel (0x85) stops a jog short of its target, Idle; a ^X
+     mid-move lands in Alarm with the position kept and no return to the
+     job start; $X recovers to Idle and the next jog ships steps
+     (GFSINK_DUMP)
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -214,9 +218,11 @@ class Session:
     """One controller process with the lifecycle overrides applied."""
 
     def __init__(self, name, fire_ok=True, disarm_s=2, switches=None, conf_extra="",
-                 armed_ack=True, ack_after_s=0.0):
+                 armed_ack=True, ack_after_s=0.0, dump=False):
         self.name = name
         self.workdir = tempfile.mkdtemp(prefix="laser-lifecycle-")
+        # The stream the controller ships, when the case reads it.
+        self.dump = os.path.join(self.workdir, "stream") if dump else None
         conf = os.path.join(self.workdir, "forgefirm.conf")
         with open(conf, "w") as f:
             # The fan grace at 0 keeps the arm's acknowledgment budget at its
@@ -228,6 +234,9 @@ class Session:
                    GF_STATE_DIR=self.workdir, FFLOG_STDERR="1")
         env.pop("GFSINK", None)
         env.pop("GF_SWITCH_FILE", None)
+        env.pop("GFSINK_DUMP", None)
+        if self.dump:
+            env["GFSINK_DUMP"] = self.dump
         self.switch_file = None
         if switches is not None:
             self.switch_file = os.path.join(self.workdir, "switches")
@@ -868,6 +877,64 @@ def test_pause_then_lid_cancel_returns_to_the_job_start():
         s.close()
 
 
+def test_cancel_and_abort():
+    """Rule 17: a jog cancel (0x85) stops a jog short of its target and
+    leaves the controller Idle. A ^X mid-move is a controlled abort: Alarm,
+    the position kept, and no return to the job start (that move is the lid
+    policy's alone). $X recovers to Idle, the head does not move on its
+    own, and the next jog ships steps."""
+    s = Session("cancel-abort", disarm_s=60, dump=True)
+    try:
+        x0 = s.mpos_x()
+        if x0 is None:
+            fail("[cancel-abort] no position in the status report")
+        s.send_raw("$J=G91X40F2400")
+        if not s.wait_state("Jog", 3):
+            fail("[cancel-abort] the jog never reported Jog (state %s)" % s.state())
+        time.sleep(0.3)
+        s.sock.sendall(b"\x85")
+        if not s.wait_state("Idle", 5):
+            fail("[cancel-abort] not Idle after the jog cancel (state %s)" % s.state())
+        x1 = s.mpos_x()
+        if x1 is None or not 0.5 < x1 - x0 < 39.0:
+            fail("[cancel-abort] the jog cancel did not stop short of the target (X %s from %.3f)"
+                 % (x1, x0))
+
+        s.send_raw("M5")
+        s.send_raw("G91")
+        s.send_raw("G1 X30 F600")                       # 3 s
+        if not s.wait_state("Run", 5):
+            fail("[cancel-abort] the move never reported Run (state %s)" % s.state())
+        time.sleep(0.5)
+        s.sock.sendall(b"\x18")
+        if not s.wait_state("Alarm", 5):
+            fail("[cancel-abort] ^X mid-move did not land in Alarm (state %s)" % s.state())
+        x2 = s.mpos_x()
+        if x2 is None or not 0.5 < x2 - x1 < 29.5:
+            fail("[cancel-abort] the abort did not keep a plausible position (X %s from %.3f)" % (x2, x1))
+        send_line(s.sock, "$X", s.log)
+        if not s.wait_state("Idle", 5):
+            fail("[cancel-abort] $X did not recover to Idle (state %s)" % s.state())
+        read_avail(s.sock, s.log, 1.0)
+        if "returned to the job start" in "".join(s.log):
+            fail("[cancel-abort] a sender abort triggered the return to the job start")
+        x3 = s.mpos_x()
+        if x3 is None or abs(x3 - x2) > 0.05:
+            fail("[cancel-abort] the head moved on its own after the abort (X %s, was %.3f)" % (x3, x2))
+        shipped = os.path.getsize(s.dump) if os.path.exists(s.dump) else 0
+        s.send_raw("$J=G91X-5F2400")
+        if not s.wait_state("Jog", 3) or not s.wait_state("Idle", 5):
+            fail("[cancel-abort] the jog after $X did not run (state %s)" % s.state())
+        grew = (os.path.getsize(s.dump) if os.path.exists(s.dump) else 0) - shipped
+        if grew <= 0:
+            fail("[cancel-abort] the jog after $X shipped no steps")
+        print("PASS [cancel-abort]: 0x85 stopped the jog at %.3f mm of 40, Idle; ^X mid-move landed in "
+              "Alarm at %.3f mm with no return; $X recovered to Idle and the next jog shipped %d bytes"
+              % (x1 - x0, x2 - x1, grew))
+    finally:
+        s.close()
+
+
 def test_lid_cancel_from_hold():
     """Rule 16: a job paused on the button is not resumable past a lid
     open. The lid cancels it from the hold as it does from Run - the
@@ -1008,6 +1075,7 @@ def main():
     test_button_pause_resume()
     test_lid_cancels_and_returns()
     test_pause_then_lid_cancel_returns_to_the_job_start()
+    test_cancel_and_abort()
     test_lid_cancel_from_hold()
     test_lid_policy_hold()
     test_sigterm_mid_job()

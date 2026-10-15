@@ -559,78 +559,6 @@ def _wait_controller(ctx, fc, states, timeout, motion=None):
     return m if isinstance(m, dict) else {}
 
 
-# ---------------------------------------------------------------- cancel / abort
-
-@test("motion.cancel-abort", title="Jog cancel and controlled abort recover cleanly", subsystem="motion",
-      kind="auto", mode="grbl", est_min=2,
-      covers=_MOTION_COVERS, requires=["motion.pacing"],
-      steps=["Bed clear; the head needs 40 mm of free +X travel."],
-      description="A jog-cancel (0x85) stops a jog short of its target and returns to Idle with "
-                  "position preserved; a ^X abort mid-move (what the sender's Stop sends) "
-                  "decelerates under control into Alarm with machine position retained, leaves the "
-                  "head where it stopped - no return-to-start, that is the lid policy's move alone - "
-                  "and $X recovers to Idle with a subsequent jog running (no driver wedge: the rail "
-                  "never cycled).")
-def cancel_abort(ctx):
-    ev = ctx.evidence
-    with ctx.grbl() as g:
-        clean_slate(ctx, g)
-        start = g.status_report()["MPos"]
-        # jog cancel
-        g.command("$J=G91X40F2400")
-        ctx.sleep(0.4)
-        g.realtime(0x85)
-        st = wait_state(ctx, g, "Idle", 5)
-        ctx.check(st is not None, "not Idle within 5 s of the jog cancel")
-        p1 = st["MPos"]
-        moved1 = p1[0] - start[0]
-        ev["cancel_moved_mm"] = round(moved1, 3)
-        ctx.log("jog cancel: moved %.3f mm of 40 (state %s)", moved1, st["state"])
-        ctx.check(0.5 < moved1 < 39.0, "jog cancel did not stop short of the target (%.3f mm)", moved1)
-        # ^X abort mid-move
-        g.command("G91")
-        g.command("G1X30F600", timeout=0.5)
-        ctx.sleep(1.0)
-        g.realtime(0x18)
-        st = wait_state(ctx, g, "Alarm", 5)
-        ctx.check(st is not None, "^X did not land in Alarm within 5 s")
-        p2 = st["MPos"]
-        moved2 = p2[0] - p1[0]
-        ev["abort_moved_mm"] = round(moved2, 3)
-        ctx.log("^X abort: state %s, moved %.3f mm of 30, position retained %s", st["state"], moved2, p2)
-        ctx.check(0.5 < moved2 < 29.5, "abort position not retained/plausible (%.3f mm)", moved2)
-        r = g.command("$X")
-        ctx.log("$X -> %s", r)
-        st = wait_state(ctx, g, "Idle", 5)
-        ctx.check(st is not None, "$X did not recover to Idle")
-        # A sender abort is not a lid cancel: it stops where it stopped and
-        # the head stays there. Only the lid/interlock policy returns to the
-        # job start, and an unasked-for return move would be a surprise to
-        # whoever pressed Stop.
-        text = drain_text(g, 2.0)
-        ev["abort_returned_home"] = "returned to the job start" in text
-        p3 = g.status_report()["MPos"]
-        ev["abort_drift_after_recovery_mm"] = round(abs(p3[0] - p2[0]), 3)
-        ctx.log("after $X: %s (moved %.3f mm since the abort)", p3, ev["abort_drift_after_recovery_mm"])
-        ctx.check(not ev["abort_returned_home"], "a sender abort triggered the return-to-start motion")
-        ctx.check(ev["abort_drift_after_recovery_mm"] <= 0.05,
-                  "the head moved %.3f mm on its own after a sender abort",
-                  ev["abort_drift_after_recovery_mm"])
-        # a jog after the abort proves the drivers are alive; return to start
-        back = -(p2[0] - start[0])
-        r = g.command("$J=G91X%.3fF2400" % back)
-        ctx.check(not any(x.startswith("error") for x in r), "return jog refused: %s", r)
-        peak, states, st = wait_idle(ctx, g, 30)
-        ctx.check("TIMEOUT" not in states, "return jog did not complete: %s", states)
-        final = st["MPos"]
-        drift = abs(final[0] - start[0])
-        ev["final_drift_mm"] = round(drift, 3)
-        ctx.log("returned: drift %.3f mm", drift)
-        ctx.check(drift <= 0.05, "position drift %.3f mm after cancel/abort/return", drift)
-        g.command("G90")
-    machine_idle(ctx)
-
-
 # ---------------------------------------------------------------- dead-man
 
 def _kernel_x_mm(ctx):
@@ -656,7 +584,7 @@ def _return_x(ctx, delta_mm):
                              "a kill during the web-service homing",
       subsystem="motion", kind="auto", mode="grbl", est_min=6,
       covers=_MOTION_COVERS + [("forgectrl", "src/main.c"), ("forgectrl", "init/**")],
-      requires=["motion.cancel-abort", "kernel.k1-k2"],
+      requires=["motion.pacing", "kernel.k1-k2"],
       steps=["Bed clear; the head needs 40 mm of free +X travel and must not be at the left rail. "
              "With cloud mode enabled the test also homes through the web service and kills the "
              "controller mid-homing (about a minute); the head ends wherever the homing was."],

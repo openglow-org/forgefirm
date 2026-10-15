@@ -181,9 +181,11 @@ HOST_TESTED = [
     ("forgectrl", "src/paths.h", "forgectrl:tests/host_routes.sh", "forgectrl:.github/workflows/build.yml"),
     # The first run in the page's order: the four documents at their hashes,
     # the press step breathing teal, the press taken as the acceptance, the
-    # form steps through main.c's hooks (extensions.md stays with
-    # exthost.service, which covers it).
+    # form steps through main.c's hooks; and the on-demand Extensions
+    # advisory, accepted at its hash with the typed phrase.
     ("forgectrl", "src/advisories.*", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "docs/advisories/extensions.md", "forgectrl:tests/host_setup.sh",
+     "forgectrl:.github/workflows/build.yml"),
     ("forgectrl", "docs/advisories/safety-and-risk.md", "forgectrl:tests/host_setup.sh",
      "forgectrl:.github/workflows/build.yml"),
     ("forgectrl", "docs/advisories/licenses.md", "forgectrl:tests/host_setup.sh", "forgectrl:.github/workflows/build.yml"),
@@ -207,6 +209,34 @@ HOST_TESTED = [
     # store that holds only hashes, and the extension host's credential
     # (mode 0600, exactly the host's capabilities).
     ("forgectrl", "src/tokens.*", "forgectrl:tests/tokens_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The logging tree's paths, the level and target validators, the
+    # configured levels.
+    ("forgectrl", "src/logs.*", "forgectrl:tests/logs_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The extension host, each part to the test that drives it (the
+    # freeze, the supervisor, the machine client and the groups stay with
+    # exthost.armed-freeze, which covers them).
+    ("forgeext", "src/api.*", "forgeext:tests/api_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/caps.*", "forgeext:tests/caps_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/evfeed.*", "forgeext:tests/evfeed_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/holdkeep.*", "forgeext:tests/holdkeep_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/httpreq.*", "forgeext:tests/httpreq_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/manifest.*", "forgeext:tests/manifest_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/quota.*", "forgeext:tests/quota_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/sandbox.*", "forgeext:tests/sandbox_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/settings.*", "forgeext:tests/settings_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/state.*", "forgeext:tests/state_test.c", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/netrules.*", "forgeext:tests/netrules_test.py", "forgeext:.github/workflows/build.yml"),
+    # A package's page asking its own service (forgeext call).
+    ("forgeext", "src/call.*", "forgeext:tests/sdk_test.py", "forgeext:.github/workflows/build.yml"),
+    # Archives in and refused, and the signed index.
+    ("forgeext", "src/install.*", "forgeext:tests/install_test.py", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/pkg.*", "forgeext:tests/install_test.py", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/index.*", "forgeext:tests/install_test.py", "forgeext:.github/workflows/build.yml"),
+    # The daemon as built, end to end: its command line, its log, the
+    # killed host under the init script's wrapper.
+    ("forgeext", "src/main.c", "forgeext:tests/run_test.py", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "src/fflog.*", "forgeext:tests/run_test.py", "forgeext:.github/workflows/build.yml"),
+    ("forgeext", "CMakeLists.txt", "forgeext:tests/run_test.py", "forgeext:.github/workflows/build.yml"),
 ]
 
 # This repository's root, when the package runs from a checkout of it; a

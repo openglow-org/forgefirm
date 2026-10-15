@@ -241,18 +241,14 @@ else
 fi
 
 # Root policy gate. The release image ships root WITHOUT a password (the
-# serial console is the recovery path) and sshd refuses root and empty
-# passwords: PermitRootLogin no and PermitEmptyPasswords no must be
-# active (uncommented) in the built sshd_config, and root's shadow field
-# must be empty. Read the built files, not the recipes: this catches a
-# drift however it got in (recipe, local.conf, an inherited class).
+# serial console is the recovery path): root's shadow field must be empty.
+# sshd's refusal of root and of empty passwords is the rootfs lint's
+# (meta-forgefirm/recipes-forgefirm/images/rootfs-lint.sh), which fails
+# the build. Read the built file, not the recipes: this catches a drift
+# however it got in (recipe, local.conf, an inherited class).
 SSHD_CONFIG=$(debugfs -R "cat /etc/ssh/sshd_config" "$EXT4" 2>/dev/null)
 [ -n "$SSHD_CONFIG" ] \
   || die "release rootfs carries no /etc/ssh/sshd_config"
-printf '%s\n' "$SSHD_CONFIG" | grep -Eq '^PermitRootLogin[[:space:]]+no[[:space:]]*$' \
-  || die "release sshd_config has no active 'PermitRootLogin no' (recipes-connectivity/openssh drift?)"
-printf '%s\n' "$SSHD_CONFIG" | grep -Eq '^PermitEmptyPasswords[[:space:]]+no[[:space:]]*$' \
-  || die "release sshd_config has no active 'PermitEmptyPasswords no' (recipes-connectivity/openssh drift?)"
 ROOT_SHADOW=$(debugfs -R "cat /etc/shadow" "$EXT4" 2>/dev/null \
               | awk -F: '$1=="root"{print; exit}')
 [ -n "$ROOT_SHADOW" ] \
@@ -260,27 +256,22 @@ ROOT_SHADOW=$(debugfs -R "cat /etc/shadow" "$EXT4" 2>/dev/null \
 ROOT_PW=$(printf '%s\n' "$ROOT_SHADOW" | awk -F: '{print $2}')
 [ -z "$ROOT_PW" ] \
   || die "release rootfs has a non-empty root password field: the policy is an empty field (empty-root-password in forgefirm-image.bb); a build drift"
-echo "root policy gate OK (root field empty; sshd refuses root and empty passwords)"
+echo "root policy gate OK (root field empty)"
 
 # Read-only rootfs gate. The release rootfs mounts read-only: the root
-# line of the built fstab carries ro, the rcS default agrees (the
-# read-only-rootfs image feature), no factory-slot mount is in the
-# release fstab (those belong to the dev image), and sshd keeps its host
-# keys on /data, where the read-only rootfs cannot hold them.
+# line of the built fstab carries ro, and sshd keeps its host keys on
+# /data, where the read-only rootfs cannot hold them. rcS's
+# ROOTFS_READ_ONLY and the fstab with no factory slot are the rootfs
+# lint's.
 FSTAB=$(debugfs -R "cat /etc/fstab" "$EXT4" 2>/dev/null)
 [ -n "$FSTAB" ] \
   || die "release rootfs carries no /etc/fstab"
 printf '%s\n' "$FSTAB" | awk '$1 == "/dev/root" && $2 == "/" { print $4 }' \
   | grep -Eq '(^|,)ro(,|$)' \
   || die "release fstab does not mount / read-only (base-files fstab or read-only-rootfs drift?)"
-printf '%s\n' "$FSTAB" | grep -Eq '^[^#]*[[:space:]]/factory/' \
-  && die "release fstab mounts a factory slot under /factory (dev image only)"
-RCS=$(debugfs -R "cat /etc/default/rcS" "$EXT4" 2>/dev/null)
-printf '%s\n' "$RCS" | grep -q '^ROOTFS_READ_ONLY=yes$' \
-  || die "release rcS has no ROOTFS_READ_ONLY=yes (read-only-rootfs image feature drift?)"
 [ "$(printf '%s\n' "$SSHD_CONFIG" | grep -c '^HostKey /data/forgefirm/ssh/')" = 3 ] \
   || die "release sshd_config does not keep the host keys under /data/forgefirm/ssh (recipes-connectivity/openssh drift?)"
-echo "read-only rootfs gate OK (/ ro, no /factory mounts, host keys on /data)"
+echo "read-only rootfs gate OK (/ ro, host keys on /data)"
 
 # Config-level guard: debug-tweaks must not sit in the shared kas config,
 # where it would apply to every target including the release image.

@@ -3,9 +3,9 @@
 # https://community.openglow.org
 # SPDX-License-Identifier:    MIT
 
-"""The setup.* suite on the host: the registration (ids, kinds, the
-takeover tests, the operator tests' hands), the record builders, the
-cookie parsing, and the settle rule for a gated supervisor."""
+"""The setup.* suite on the host: the registration (the operator tests'
+hands, the intake tests' precheck), the record builders, the cookie
+parsing, and the settle rule for a gated supervisor."""
 import json
 import os
 import shutil
@@ -18,18 +18,10 @@ import helpers  # noqa: E402
 from forgetest import baseline, catalog  # noqa: E402
 from forgetest.suite import setup  # noqa: E402
 
-IDS = ("setup.account-login",)
-
 
 class RegistrationTests(unittest.TestCase):
     def setUp(self):
         self.reg = catalog.load_suite()
-
-    def test_every_test_is_registered_with_its_kind(self):
-        kinds = {tid: self.reg[tid].kind for tid in IDS if tid in self.reg}
-        self.assertEqual(sorted(kinds), sorted(IDS))
-        for tid in IDS:
-            self.assertEqual(kinds[tid], "auto", tid)
 
     def test_recommended_reads_the_status_document(self):
         w = {"recommended": [{"id": "laser.floor", "reason": "the tube was replaced"},
@@ -58,17 +50,6 @@ class RegistrationTests(unittest.TestCase):
         attended = sorted(tid for tid, t in self.reg.items() if tid.startswith("setup.")
                           and t.kind != "auto" and not t.fixture_runnable(("button", "lid", "interlock")))
         self.assertEqual(attended, ["setup.cloud-header-capture", "setup.focus"])
-
-    def test_the_login_test_makes_its_own_account(self):
-        # No bench credentials, no precheck: the test installs a temporary
-        # account under a takeover and restores the real one.
-        t = self.reg["setup.account-login"]
-        self.assertIsNone(getattr(t, "precheck", None))
-        self.assertEqual(t.hardware, "takeover")
-        with open(setup.__file__) as f:
-            src = f.read()
-        for k in ("FORGETEST_LOGIN_NAME", "FORGETEST_LOGIN_PASSWORD"):
-            self.assertNotIn(k, src)
 
 
 class RecordTests(unittest.TestCase):

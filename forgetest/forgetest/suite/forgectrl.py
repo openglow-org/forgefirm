@@ -4,9 +4,7 @@
 # SPDX-License-Identifier:    MIT
 
 """forgectrl.* - the machine-services daemon's API, access control, and panel."""
-import json
 import socket
-import time
 
 from ..catalog import test
 
@@ -15,7 +13,7 @@ from ..catalog import test
 # write with the token), so both are the guard's domain.
 _COVERS_AUTH = [("forgectrl", "src/auth.*"), ("forgectrl", "src/peer.*"), ("forgectrl", "src/main.c"),
                 ("forgectrl", "src/session.*"), ("forgectrl", "src/users.*"),
-                ("forgectrl", "src/ui/login.js"), ("forgectrl", "src/ui/wizard.js")]
+                ("forgectrl", "src/ui/login.*"), ("forgectrl", "src/ui/wizard.js")]
 
 
 def lan_ip():
@@ -210,104 +208,3 @@ def auth(ctx):
     if st == 302:
         ctx.check(loc == "/login?next=/setup%3Fstep%3Dlaser.focus",
                   "the login redirect does not carry the path: %r", loc)
-
-
-@test("forgectrl.settings-bounds", title="Settings validation and restore", subsystem="forgectrl",
-      kind="auto", est_min=1,
-      covers=[("forgectrl", "src/settings.*"), ("forgectrl", "src/main.c"), ("forgectrl", "src/cam.c")],
-      description="An over-length value and an out-of-range value are refused (400) and leave the "
-                  "settings byte-identical; an in-range value is accepted (200). The lid lamp "
-                  "idles at lid_lamp_idle (unset = 236), an out-of-range level is refused, a new "
-                  "level applies to the lamp at once, and clearing it returns the default.")
-def settings_bounds(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    before = fc.settings()
-    ev["keys"] = len(before)
-
-    st, body = fc.post("/settings", data={"gf_serial": "X" * 300})
-    ev["overlong"] = st
-    ctx.log("POST /settings gf_serial=<300 chars> -> %s %s", st, body if isinstance(body, dict) else "")
-    ctx.check(st == 400, "over-length value -> %s, expected 400", st)
-
-    st, body = fc.post("/settings", data={"laser_disarm_s": "99999"})
-    ev["out_of_range"] = st
-    ctx.log("POST /settings laser_disarm_s=99999 -> %s", st)
-    ctx.check(st == 400, "out-of-range value -> %s, expected 400", st)
-
-    # The cloud download guard is bytes, so its range is far wider than the
-    # other numeric keys: check the far end is still a wall.
-    st, body = fc.post("/settings", data={"pulse_reject_threshold_bytes": "2000000000"})
-    ev["pulse_bytes_out_of_range"] = st
-    ctx.log("POST /settings pulse_reject_threshold_bytes=2000000000 -> %s", st)
-    ctx.check(st == 400, "out-of-range byte limit -> %s, expected 400", st)
-
-    st, body = fc.post("/settings", data={"no_such_key_forgetest": "1"})
-    ev["unknown_key"] = st
-    ctx.log("POST /settings no_such_key_forgetest=1 -> %s", st)
-    ctx.check(st in (400, 404), "unknown key -> %s, expected 400", st)
-
-    after = fc.settings()
-    ctx.check(json.dumps(after, sort_keys=True) == json.dumps(before, sort_keys=True),
-              "settings changed after refused writes")
-    ctx.log("settings unchanged after the refused writes")
-
-    # an accepted in-range write: rewrite a present key with its own value
-    key = None
-    for k in ("ui_units", "laser_disarm_s", "cool_flow_rise", "rail_settle_s"):
-        v = before.get(k)
-        if isinstance(v, str) and v != "":
-            key = k
-            break
-    if key is None:
-        key, val = "ui_units", "metric"
-        ctx.log("no settable key is present; writing %s=%s (recorded in evidence)", key, val)
-    else:
-        val = before[key]
-    st, body = fc.post("/settings", data={key: val})
-    ev["accepted"] = {"key": key, "value": val, "status": st}
-    ctx.log("POST /settings %s=%s -> %s", key, val, st)
-    ctx.check(st == 200, "in-range write -> %s, expected 200", st)
-    final = fc.settings()
-    others_before = {k: v for k, v in before.items() if k != key}
-    others_after = {k: v for k, v in final.items() if k != key}
-    ctx.check(others_before == others_after, "other settings changed by the write")
-    ctx.check(final.get(key) == val, "%s reads back %r, wrote %r", key, final.get(key), val)
-
-    # the lid lamp's idle level: resting at the setting, bounded, applied live
-    lamp_was = (before.get("lid_lamp_idle") or "").strip()
-    want = lamp_was or "236"
-    got = ctx.sysfs("pic/lid_led")
-    ev["lid_lamp"] = {"setting": lamp_was, "resting": got}
-    ctx.log("lid lamp: setting %r, pic/lid_led=%s (expected %s)", lamp_was, got, want)
-    ctx.check(got == want, "lid lamp rests at %s, lid_lamp_idle is %s", got, want)
-    for bad in ("256", "-1", "bright"):
-        st, body = fc.post("/settings", data={"lid_lamp_idle": bad})
-        ctx.check(st == 400, "lid_lamp_idle=%s -> %s, expected 400", bad, st)
-    ctx.log("lid_lamp_idle 256 / -1 / bright refused")
-    try_level = "100" if want != "100" else "120"
-    st, body = fc.post("/settings", data={"lid_lamp_idle": try_level})
-    ctx.check(st == 200, "lid_lamp_idle=%s -> %s, expected 200", try_level, st)
-    applied = None
-    t0 = time.time()
-    while time.time() - t0 < 5:
-        applied = ctx.sysfs("pic/lid_led")
-        if applied == try_level:
-            break
-        ctx.sleep(0.2)
-    ctx.log("lid_lamp_idle=%s -> pic/lid_led=%s after %.1f s", try_level, applied, time.time() - t0)
-    # an empty value clears the key: the query-string form carries it
-    st, body = (fc.post("/settings", params={"lid_lamp_idle": ""}) if not lamp_was
-                else fc.post("/settings", data={"lid_lamp_idle": lamp_was}))
-    ctx.check(st == 200, "restoring lid_lamp_idle=%r -> %s", lamp_was, st)
-    t0 = time.time()
-    back = None
-    while time.time() - t0 < 5:
-        back = ctx.sysfs("pic/lid_led")
-        if back == want:
-            break
-        ctx.sleep(0.2)
-    ev["lid_lamp"].update({"applied": applied, "restored": back})
-    ctx.check(applied == try_level, "lamp did not follow lid_lamp_idle=%s (reads %s)", try_level, applied)
-    ctx.check(back == want, "lamp did not return to %s after the restore (reads %s)", want, back)
-    ctx.log("lid lamp follows the setting live and returns to %s", want)

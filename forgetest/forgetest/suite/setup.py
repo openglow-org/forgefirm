@@ -3,10 +3,10 @@
 # https://community.openglow.org
 # SPDX-License-Identifier:    MIT
 
-"""setup.* - the first-run setup: the record and the
-controller gate, the advisories, the account and its login, the HTTPS
-boundary, SSH, the cloud switch, the machine's name, and the factory
-return.
+"""setup.* - what the setup tests share: the setup record and its
+builders, the files of the data directory, a takeover that installs a
+record, and the HTTPS client. The tests are setup_dark's and
+setup_burns'; this module registers none.
 
 The daemon reads the setup record (setup.json in the
 data directory) and the account record (users) once, at its start, and
@@ -27,19 +27,15 @@ import posixpath
 import http.client
 import json
 import os
-import random
-import socket
 import ssl
 import time
 import urllib.parse
 
-from ..catalog import test
 from .. import hw
 
 RECORD = "setup.json"
 USERS = "users"
 SSH_FLAG = "ssh-enabled"
-TLS_BASE = "https://127.0.0.1"          # FORGECTRL_TLS_URL overrides (host tests)
 
 # The first run's form wizards, all at version 1 (wiz.c).
 FORM_WIZARDS = ("advisories", "account", "preferences", "machine", "cloud")
@@ -52,8 +48,6 @@ REQUIRED_STEPS = REQUIRED_FORM_STEPS + ("cooling.flow",)
 # The setting that counts the intake fans: the gate holds without it.
 INTAKE_KEY = "cool_intake_fans"
 SAFETY_PHRASE = "I UNDERSTAND"
-LOGIN_FAILS = 5
-LOGIN_LOCK_S = 30
 
 
 # ----------------------------------------------------------------- files
@@ -284,19 +278,6 @@ def decode(content):
         return text
 
 
-def tls_base():
-    return (os.environ.get("FORGECTRL_TLS_URL") or TLS_BASE).rstrip("/")
-
-
-def tcp_open(host, port, timeout=2.0):
-    try:
-        s = socket.create_connection((host, port), timeout=timeout)
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
 def session_from_cookie(value):
     """The ffsid session id out of a Set-Cookie value, or None."""
     for part in (value or "").split(";"):
@@ -318,218 +299,6 @@ def wiz(fc):
     return body
 
 
-def mode(fc):
-    st, body = fc.get("/mode")
-    return body if (st == 200 and isinstance(body, dict)) else {}
-
-
-def press_status(fc):
-    """GET /wiz/advisories/press, the page's poll at the press step: the
-    daemon takes a pressed button and records the acceptance on this
-    read, so a press nobody polls for stays 'pressed' and unaccepted."""
-    st, body = fc.get("/wiz/advisories/press")
-    return body if (st == 200 and isinstance(body, dict)) else {}
-
-
-def wiz_summary(w):
-    return {k: w.get(k) for k in ("first_run", "gate", "why", "recommended",
-                                  "advisories_complete", "acceptance_done", "account",
-                                  "fans_counted", "completed", "versions")}
-
-
 def recommended(w):
     """The steps a GET /wiz body recommends: {id: reason}."""
     return {x.get("id"): x.get("reason") or "" for x in w.get("recommended") or [] if isinstance(x, dict)}
-
-
-def wait_settled(ctx):
-    """The supervisor settled (the runner's own wait): the /mode body."""
-    return ctx.takeover().wait_settled()
-
-
-# -------------------------------------------------------------- the login
-
-@test("setup.account-login", title="The panel login over HTTPS", subsystem="setup",
-      kind="auto", est_min=2,
-      covers=[("forgectrl", "src/auth.*"), ("forgectrl", "src/session.*"), ("forgectrl", "src/users.*"),
-              ("forgectrl", "src/tls.*"), ("forgectrl", "src/peer.*"), ("forgectrl", "src/main.c"),
-              ("forgectrl", "src/ui/login.*")],
-      requires=["forgectrl.auth"], hardware="takeover",
-      description="The test makes its own account: the account record is moved aside under a "
-                  "forgectrl restart, the account route creates a temporary one with a password "
-                  "only the test knows, and the real record comes back under another restart at "
-                  "the end, the system accounts replayed and the temporary home removed. The data "
-                  "directory is set to 0700 first, as a strict umask leaves it: the render that makes "
-                  "the account opens it for search and nothing else (0711), and tried as the account, "
-                  "its home can be entered and written while the data directory cannot be listed and "
-                  "the account record cannot be read. Over "
-                  "HTTPS (self-signed, so unverified): GET /wiz reports no session and the "
-                  "certificate fingerprint; POST /login with a wrong password is refused (401); "
-                  "five failures lock the address (429, wait at most 30 s) and the right password "
-                  "is refused inside the lock too; after the lock a wrong name is 401 and the "
-                  "right pair sets the ffsid cookie (HttpOnly, Secure, SameSite=Strict); GET /wiz "
-                  "with the cookie reports the session; POST /logout ends it.")
-def account_login(ctx):
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    name = "forgetest"
-    pw = "".join(random.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(16))
-    before = wiz(fc)
-    ev["account_before"] = (before.get("users") or {}).get("name")
-    homes = "/data/forgefirm/home"
-    dir_mode = os.stat(data_dir()).st_mode & 0o7777
-    ev["data_dir_mode_found"] = "%04o" % dir_mode
-    try:
-        with installed(ctx, {users_path(): None}):
-            w = wiz(fc)
-            ctx.check(not (w.get("users") or {}).get("exists"), "an account still exists: %s", w.get("users"))
-            # the data directory as a strict umask leaves it: the account's render has to open it
-            os.chmod(data_dir(), 0o700)
-            st, body = fc.post("/wiz/account", data={"name": name, "password": pw})
-            ctx.log("POST /wiz/account (temporary %r) -> %s %s", name, st, body if isinstance(body, dict) else "")
-            ctx.check(st == 200, "the temporary account was not created: %s %s", st, body)
-            w = wiz(fc)
-            ctx.check((w.get("users") or {}).get("name") == name, "the account reads %s", w.get("users"))
-            reach = home_reach(name)
-            ev["home_reach"] = reach
-            ev["data_dir_mode_after_render"] = "%04o" % (os.stat(data_dir()).st_mode & 0o7777)
-            ctx.log("as %s, from a data directory found 0700 (now %s): %s", name, ev["data_dir_mode_after_render"], reach)
-            ctx.check(reach.get("cd") == "ok" and reach.get("write") == "ok",
-                      "the account cannot use its own home %s: %s", reach.get("home"), reach)
-            ctx.check(ev["data_dir_mode_after_render"] == "0711", "the render left the data directory at %s, expected "
-                      "0711 (the search bit and nothing else)", ev["data_dir_mode_after_render"])
-            ctx.check(reach.get("list_data_dir") == "EACCES" and reach.get("read_record") == "EACCES",
-                      "the account reads what is not its own: %s", reach)
-            login_checks(ctx, name, pw)
-    finally:
-        # as found; the replay below is the product's own say on the mode
-        os.chmod(data_dir(), dir_mode)
-        rc, out = hw.initd("forgefirm-users", "reload")
-        ev["users_reload_rc"] = rc
-        ctx.log("forgefirm-users reload -> rc %s %s", rc, out.strip()[:200])
-        if name != ev["account_before"]:
-            import shutil
-            shutil.rmtree(os.path.join(homes, name), ignore_errors=True)
-    after = wiz(fc)
-    ctx.check((after.get("users") or {}).get("name") == ev["account_before"],
-              "the account reads %r after the restore, was %r", (after.get("users") or {}).get("name"),
-              ev["account_before"])
-
-
-# Run as root: becomes the account and tries its own home, and what is
-# not its own. One JSON line.
-HOME_REACH = r'''
-import errno, json, os, pwd, sys
-p = pwd.getpwnam(sys.argv[1])
-os.setgroups([])
-os.setgid(p.pw_gid)
-os.setuid(p.pw_uid)
-
-
-def tried(fn):
-    try:
-        fn()
-        return "ok"
-    except OSError as e:
-        return errno.errorcode.get(e.errno, str(e.errno))
-
-
-def write():
-    path = os.path.join(p.pw_dir, ".forgetest-reach")
-    with open(path, "w") as f:
-        f.write("x")
-    os.remove(path)
-
-
-print(json.dumps({"uid": os.getuid(), "home": p.pw_dir, "cd": tried(lambda: os.chdir(p.pw_dir)), "write": tried(write),
-                  "list_data_dir": tried(lambda: os.listdir(sys.argv[2])),
-                  "read_record": tried(lambda: open(os.path.join(sys.argv[2], "users")).read())}))
-'''
-
-
-def home_reach(name):
-    """What the account can do with its own home and with the data
-    directory around it, tried as the account."""
-    import subprocess
-    import sys
-    p = subprocess.run([sys.executable, "-c", HOME_REACH, name, data_dir()], capture_output=True, text=True, timeout=30)
-    try:
-        return json.loads(p.stdout)
-    except ValueError:
-        return {"error": (p.stderr or p.stdout).strip()[-200:]}
-
-
-def login_checks(ctx, name, pw):
-    """The login rules against an account whose password the test knows."""
-    ev = ctx.evidence
-    base = tls_base()
-
-    st, body, hdrs = request(base, "GET", "/wiz")
-    w = decode(body)
-    ctx.log("GET %s/wiz -> %s", base, st)
-    ctx.check(st == 200 and isinstance(w, dict), "GET /wiz over HTTPS -> %s", st)
-    ctx.check(w.get("session") is False, "a session is reported without a cookie")
-    ev["tls_fingerprint"] = w.get("tls_fingerprint")
-    ctx.check(w.get("tls_fingerprint"), "GET /wiz carries no certificate fingerprint")
-
-    def attempt(n, p):
-        st, body, hdrs = request(base, "POST", "/login", data={"name": n, "password": p})
-        return st, decode(body), hdrs
-
-    # a lock left by an earlier run: wait it out first
-    st, body, hdrs = attempt(name, "not-" + pw)
-    if st == 429:
-        wait = int((body or {}).get("wait") or LOGIN_LOCK_S) if isinstance(body, dict) else LOGIN_LOCK_S
-        ctx.log("the address is locked from before (%s s): waiting", wait)
-        ctx.sleep(min(wait, LOGIN_LOCK_S) + 1)
-        st, body, hdrs = attempt(name, "not-" + pw)
-    codes = [st]
-    ctx.check(st == 401, "a wrong password -> %s, expected 401", st)
-    for i in range(LOGIN_FAILS + 1):
-        st, body, hdrs = attempt(name, "not-%s-%d" % (pw, i))
-        codes.append(st)
-        if st == 429:
-            break
-    ev["wrong_codes"] = codes
-    ctx.log("wrong password attempts -> %s", codes)
-    ctx.check(codes[-1] == 429 and all(c == 401 for c in codes[:-1]),
-              "the throttle did not lock after wrong attempts: %s", codes)
-    ctx.check(len(codes) - 1 <= LOGIN_FAILS, "the lock came after %d failures, the rule is %d",
-              len(codes) - 1, LOGIN_FAILS)
-    wait = body.get("wait") if isinstance(body, dict) else None
-    ev["wait"] = wait
-    ctx.check(isinstance(wait, int) and 0 < wait <= LOGIN_LOCK_S, "the lock reports wait=%r", wait)
-    st, body, hdrs = attempt(name, pw)
-    ev["right_inside_lock"] = st
-    ctx.check(st == 429, "the right password inside the lock -> %s, expected 429", st)
-    ctx.log("locked for %s s; the right password is refused inside the lock", wait)
-    ctx.sleep(wait + 1)
-
-    st, body, hdrs = attempt("not-" + name, pw)
-    ev["wrong_name"] = st
-    ctx.check(st == 401, "a wrong name with the right password -> %s, expected 401", st)
-    st, body, hdrs = attempt(name, pw)
-    cookie = hdrs.get("set-cookie") or ""
-    sid = session_from_cookie(cookie)
-    ev["login"] = st
-    ev["cookie_flags"] = sorted(cookie_flags(cookie))
-    ctx.log("POST /login (right) -> %s, cookie flags %s", st, ev["cookie_flags"])
-    ctx.check(st == 200, "the right name and password -> %s, expected 200", st)
-    ctx.check(sid and len(sid) == 64 and all(c in "0123456789abcdef" for c in sid),
-              "no ffsid session id in Set-Cookie: %r", cookie)
-    ctx.check({"httponly", "secure", "samesite"} <= cookie_flags(cookie),
-              "the cookie lacks HttpOnly, Secure, or SameSite: %r", cookie)
-    ctx.check("samesite=strict" in cookie.lower(), "the cookie is not SameSite=Strict: %r", cookie)
-    st, body, hdrs = request(base, "GET", "/wiz", headers={"Cookie": "ffsid=" + sid})
-    w = decode(body)
-    ctx.check(st == 200 and isinstance(w, dict) and w.get("session") is True,
-              "GET /wiz with the cookie does not report the session (%s %s)", st,
-              w.get("session") if isinstance(w, dict) else w)
-    st, body, hdrs = request(base, "POST", "/logout", headers={"Cookie": "ffsid=" + sid})
-    ev["logout"] = st
-    ctx.check(st == 200, "POST /logout -> %s", st)
-    ctx.check("max-age=0" in (hdrs.get("set-cookie") or "").lower(), "the logout did not clear the cookie")
-    st, body, hdrs = request(base, "GET", "/wiz", headers={"Cookie": "ffsid=" + sid})
-    w = decode(body)
-    ctx.check(isinstance(w, dict) and w.get("session") is False, "the session survives the logout")
-    ctx.log("session set by the login, seen by GET /wiz, ended by the logout")

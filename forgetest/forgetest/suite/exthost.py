@@ -8,7 +8,6 @@ import json
 import os
 import re
 import signal
-import stat
 import subprocess
 import sys
 import time
@@ -488,8 +487,6 @@ FWUP = "/usr/bin/fwup"
 EXT_ROOT = "/data/forgefirm/ext"
 HOST_STATUS = "/run/forgefirm/ext/status.json"
 SAFE_FILE = "/run/forgefirm/ext-safe"
-HOST_LOG = "/data/log/forgefirm/forgeext/forgeext.log"
-API_DIR = "/run/forgefirm/ext/api"
 REF_ID = "org.forgetest.reference"
 REF_KEY = "forgetest-reference"
 REF_DEST = "192.0.2.1"                      # TEST-NET-1: declared so that port 443 is, and never dialed
@@ -841,323 +838,6 @@ def _as_found(ctx, fc, prior, raw, dir_mode, found_tree):
     ctx.check(len(_host_pids()) == 1, "the extension host is not running at the end")
 
 
-@test("exthost.service", title="A package's service runs confined under the extension host",
-      subsystem="exthost", kind="auto", hardware="takeover", est_min=5,
-      covers=[("forgeext", "**"), ("forgectrl", "src/main.c"), ("forgectrl", "src/logs.*"),
-              ("forgectrl", "docs/advisories/extensions.md")],
-      requires=["exthost.platform"],
-      description="The extension host is one running process (/usr/bin/forgeext run) and the status "
-                  "file is its word, and with extensions off it runs nothing and says why. The test builds a reference "
-                  "package on the board, signs it with a key it makes there, and adds that key as an owner "
-                  "key: an install without the community consent is refused, with it the package is "
-                  "installed at the community tier. It turns extensions on over the advisory. The service "
-                  "then runs as its pool account with no_new_privs and a seccomp filter, in its own group "
-                  "under /sys/fs/cgroup/ffx with the limits of a service (25 percent of the core, 48 MiB, 32 "
-                  "processes), with its chain in the rule table. From the inside it reads /etc and its "
-                  "package, writes its data directory and nothing else, cannot read the settings file, the "
-                  "setup record, or the pulse device, is refused by the machine on loopback and on its LAN "
-                  "address even on the port it declared, cannot connect on a port it did not declare, and "
-                  "cannot open a netlink socket. Its one way to the machine is its API socket (root's and its "
-                  "account's, 0660, refused to another pool account): GET /v0/self names it and what it may use, "
-                  "GET /v0/machine/mode is forgectrl's answer relayed, POST /v0/camera gives it a JPEG from the "
-                  "lid camera it holds (with the camera's lamp at 0 and at 1023 two different pictures, the lit "
-                  "one the larger) and refuses the head camera and a lamp past its range, a hold it was not granted is 403, a path "
-                  "the API does not have 404, a path with .. 400; its output is in the forgeext log under its id. Safe mode "
-                  "stops it and its end starts it again. A host killed outright takes its services with it "
-                  "at once (the init wrapper), comes back, and starts the service again. ext_enabled=0 "
-                  "stops it and leaves no group and no chain. The package, the key, the setting, and the "
-                  "setup record are put back as found, the record under a forgectrl restart. The layer "
-                  "content (the recipe, the init script's install, the image list) is in the platform "
-                  "identity of every fingerprint.")
-def service(ctx):
-    import shutil
-    import tempfile
-    fc = ctx.forgectrl
-    ev = ctx.evidence
-    ctx.check(os.path.isfile(FORGEEXT) and os.access("/etc/init.d/forgeext", os.X_OK),
-              "the image has no forgeext, or no init script for it")
-    hosts = _host_pids()
-    ev["host_pids"] = hosts
-    ctx.check(len(hosts) == 1, "the extension host is not one running process: %s", hosts)
-    ctx.check(_until(ctx, lambda: _host_status().get("pid") == hosts[0], 10),
-              "the status file %s is not the running host's: %s", HOST_STATUS, _host_status().get("pid"))
-    ctx.check(fc.wait_idle(timeout=30, abort=ctx.aborted), "machine not idle: settings are locked")
-    prior = fc.settings().get("ext_enabled") or ""
-    raw = read_file(record_path())
-    ctx.check(raw, "no setup record at %s", record_path())
-    ctx.check(not os.path.exists(SAFE_FILE), "%s exists: the machine is in safe mode", SAFE_FILE)
-    ctx.check(REF_ID not in [x.get("id") for x in _forgeext("list").get("packages", [])],
-              "%s is already installed", REF_ID)
-    found_tree = _tree(EXT_ROOT)
-    data_dir = os.path.dirname(EXT_ROOT)
-    dir_mode = os.stat(data_dir).st_mode & 0o7777
-    ev["data_dir_mode_found"] = "%04o" % dir_mode
-    if prior != "1":
-        st = _host_status()
-        ev["off"] = {k: st.get(k) for k in ("enabled", "off_reason")}
-        ctx.check(st.get("enabled") is False and "ext_enabled" in (st.get("off_reason") or "")
-                  and not [x for x in st.get("services", []) if x.get("state") == "running"],
-                  "with extensions off the host does not say so: %s", ev["off"])
-
-    st, body, hdrs = request(fc.base, "GET", "/advisories/extensions", headers={"Host": fc.host_header()})
-    etag = hdrs.get("etag")
-    ctx.check(st == 200 and etag, "GET /advisories/extensions -> %s", st)
-    work = tempfile.mkdtemp(prefix="forgetest-ffx.")
-    owner_key = os.path.join(EXT_ROOT, "keys", REF_KEY + ".pub")
-    uid = None
-
-    def cg(name):
-        return _read("%s/%s/%s" % (POOL_GROUP, REF_ID, name)).strip()
-
-    def chains():
-        return subprocess.run([NFT, "list", "table", "inet", "ffx"], capture_output=True, text=True, timeout=30).stdout
-
-    def running(other_than=0):
-        # The status file outlives a killed host: a pid that is the old one is no news.
-        x = _svc(REF_ID)
-        return x if x.get("state") == "running" and x.get("pid") and x["pid"] != other_than             and os.path.exists("/proc/%d" % x["pid"]) else None
-
-    try:
-        lan = lan_ip()
-        archive, pub = _pack_reference(work, lan)
-        r = _forgeext("inspect", archive)
-        ev["inspect_without_the_key"] = r.get("tier")
-        ctx.check(r.get("ok") and r.get("tier") == "unverified", "before its key is the owner's the package reads %s", r)
-        shutil.copy(pub, owner_key)
-        os.chmod(owner_key, 0o644)
-        r = _forgeext("inspect", archive)
-        ctx.check(r.get("ok") and r.get("tier") == "community", "with the owner's key the package reads %s", r)
-        r = _forgeext("install", archive)
-        ev["install_without_consent"] = r.get("error")
-        ctx.log("install without the consent -> %s", r.get("error"))
-        ctx.check(r.get("ok") is False, "a community package was installed without the consent")
-        r = _forgeext("install", archive, "--consent-community")
-        ctx.check(r.get("ok") is True, "the install -> %s", r.get("error"))
-        ctx.check(_forgeext("check", REF_ID).get("ok") is True, "the installed tree fails its integrity check")
-
-        st, reply = fc.post("/settings", data={"ext_enabled": "1", "advisory": etag, "phrase": SAFETY_PHRASE})
-        ctx.check(st == 200, "ext_enabled=1 over the advisory -> %s %r", st, reply)
-        x = _until(ctx, running, 90, poll=0.5)
-        ev["status_at_start"] = _host_status()
-        ctx.check(x, "the service is not running: %s", {k: ev["status_at_start"].get(k) for k in ("enabled", "off_reason", "not_ready")}
-                  if not _svc(REF_ID) else _svc(REF_ID))
-        pid = x["pid"]
-        uid = POOL_FIRST + int(x["account"][3:])
-        proc = _read("/proc/%d/status" % pid)
-        ev["service"] = {"pid": pid, "account": x["account"], "cgroup": _read("/proc/%d/cgroup" % pid).strip(),
-                         "cpu.max": cg("cpu.max"), "memory.max": cg("memory.max"), "pids.max": cg("pids.max"),
-                         "memory.current": cg("memory.current")}
-        ctx.log("the service: %s", ev["service"])
-        ctx.check(("Uid:\t%d\t%d\t%d\t%d" % ((uid,) * 4)) in proc and ("Gid:\t%d\t%d\t%d\t%d" % ((uid,) * 4)) in proc,
-                  "the service does not run as %s alone", x["account"])
-        ctx.check("NoNewPrivs:\t1" in proc and "Seccomp:\t2" in proc, "no no_new_privs or no seccomp filter on the service")
-        ctx.check(ev["service"]["cgroup"] == "0::/ffx/" + REF_ID, "the service's group is %s", ev["service"]["cgroup"])
-        ctx.check(cg("cpu.max").split() == ["25000", "100000"] and cg("memory.max") == str(48 << 20) and cg("pids.max") == "32",
-                  "the group's limits are not a service's: %s", ev["service"])
-        table = chains()
-        ctx.check(("chain u%d " % uid) in table and REF_DEST in table, "the service's chain is not in the rule table")
-
-        report_path = os.path.join(EXT_ROOT, "data", REF_ID, "report.json")
-        ctx.check(_until(ctx, lambda: os.path.isfile(report_path), 60, poll=0.5), "the service left no report")
-        rep = json.loads(_read(report_path))
-        ev["from_the_inside"] = rep
-        ctx.log("from the inside: %s", rep)
-        want = {"uid": uid, "gid": uid, "groups": [], "read_etc": "ok", "read_pkg": "ok", "write_data": "ok",
-                "read_settings": "EACCES", "read_setup": "EACCES", "write_pkg": "EACCES", "write_tmp": "EACCES",
-                "pulse_device": "EACCES", "loopback_declared_port": "ECONNREFUSED",
-                "loopback_undeclared_port": "EACCES", "unix_socket": "ok", "netlink_socket": "EPERM"}
-        if lan:
-            want["lan_declared_port"] = "ECONNREFUSED"
-        for k, v in want.items():
-            ctx.check(rep.get(k) == v, "from the inside, %s is %r, expected %r", k, rep.get(k), v)
-        # LC_CTYPE is the interpreter's own doing (it coerces the C locale at its start)
-        fixed = {"PATH", "LANG", "HOME", "TMPDIR", "FFX_ID", "FFX_PKG", "FFX_DATA", "FFX_API", "PYTHONDONTWRITEBYTECODE",
-                 "PYTHONUNBUFFERED"}
-        ctx.check(rep.get("cwd") == os.path.join(EXT_ROOT, "data", REF_ID) and set(rep.get("env") or []) - {"LC_CTYPE"} == fixed,
-                  "its working directory or its environment is not the fixed one: %s %s", rep.get("cwd"), rep.get("env"))
-        # its one way to the machine: the API socket, and the broker behind it
-        me = rep.get("api_self") or [0, {}]
-        ev["api"] = {k: rep.get(k) for k in ("api_self", "api_mode", "api_hold", "api_nowhere", "api_traversal")}
-        ctx.check(me[0] == 200 and me[1].get("id") == REF_ID and me[1].get("version") == "1.0.0"
-                  and sorted(me[1].get("capabilities") or []) == sorted(["net.outbound:%s:443" % REF_DEST, "storage:1",
-                                                                          "machine.read", "settings.own",
-                                                                          "camera.lid"]),
-                  "GET /v0/self from the inside: %s", me)
-
-        # a camera: the one it was granted, and not the one it was not
-        cam = rep.get("api_camera") or [0, "", False, False]
-        ev["api_camera"] = {"status": cam[0], "bytes": cam[1] if cam[0] == 200 else None,
-                            "jpeg": cam[2], "image_type": cam[3],
-                            "why": cam[1] if cam[0] != 200 else None}
-        ctx.log("the lid camera, from inside the sandbox: %s", ev["api_camera"])
-        ctx.check(cam[0] == 200 and cam[2] and cam[3] and isinstance(cam[1], int) and cam[1] > 4096,
-                  "the granted camera did not come back as a JPEG: %s", ev["api_camera"])
-        head_ = rep.get("api_camera_head") or [0, ""]
-        ev["api_camera_head"] = head_[:2]
-        ctx.check(head_[0] == 403, "the head camera, which it was not granted -> %s", head_[:2])
-        badcam = rep.get("api_camera_bad") or [0, ""]
-        ev["api_camera_bad"] = badcam[:2]
-        ctx.check(badcam[0] == 400, "a camera there is none of -> %s", badcam[:2])
-        # The camera's own lamp for one frame: the machine lights it for
-        # the shot and puts its level back, so a frame with the lamp off
-        # and one with it full are two different pictures, the lit one the
-        # larger, and a level past the range is refused before the machine
-        # is asked.
-        dark = rep.get("api_camera_dark") or [0, "", False, False]
-        lit = rep.get("api_camera_lit") or [0, "", False, False]
-        ev["api_camera_lamp"] = {"dark": dark[:3], "lit": lit[:3]}
-        ctx.log("the lid camera with its lamp at 0 and at 1023: %s", ev["api_camera_lamp"])
-        ctx.check(dark[0] == 200 and dark[2] and lit[0] == 200 and lit[2],
-                  "a frame with the lamp named did not come back as a JPEG: %s", ev["api_camera_lamp"])
-        ctx.check(isinstance(lit[1], int) and isinstance(dark[1], int) and lit[1] > dark[1],
-                  "the lamp did not reach the camera: %d bytes at 1023, %d at 0", lit[1] or 0, dark[1] or 0)
-        lampbad = rep.get("api_camera_lamp_bad") or [0, ""]
-        ev["api_camera_lamp_bad"] = lampbad[:2]
-        ctx.check(lampbad[0] == 400 and "lamp" in str(lampbad[1]), "a lamp past its range -> %s", lampbad[:2])
-
-        # A package's capture yields to somebody watching a camera: it is
-        # never the person standing at the machine.
-        import urllib.request
-        shot_file = os.path.join(EXT_ROOT, "data", REF_ID, "shot")
-        if os.path.exists(shot_file):
-            os.remove(shot_file)
-        held = urllib.request.urlopen(
-            urllib.request.Request(fc.base + "/cam/stream", headers={"Host": fc.host_header()}), timeout=15)
-        try:
-            held.read(8192)
-            watching = _until(ctx, lambda: (fc.get("/cam/status")[1] or {}).get("clients"), 15, poll=0.5)
-            ctx.check(watching, "no viewer was counted while the stream was held")
-            _write(os.path.join(EXT_ROOT, "data", REF_ID, "shoot"), "now")
-            yielded = _until(ctx, lambda: json.loads(_read(shot_file)) if os.path.exists(shot_file) else None,
-                             30, poll=0.5)
-            ev["camera_while_watched"] = yielded
-            ctx.log("the package's capture while a viewer watches: %s", yielded)
-            ctx.check(yielded and yielded[0] == 409,
-                      "a package's capture did not yield to a viewer: %s", yielded)
-            ctx.check(yielded and "watching" in str(yielded[1]),
-                      "it yielded without the machine's own words: %s", yielded)
-        finally:
-            held.close()
-        os.remove(shot_file)
-        _until(ctx, lambda: not (fc.get("/cam/status")[1] or {}).get("clients"), 15, poll=0.5)
-        _write(os.path.join(EXT_ROOT, "data", REF_ID, "shoot"), "now")
-        again = _until(ctx, lambda: json.loads(_read(shot_file)) if os.path.exists(shot_file) else None,
-                       40, poll=0.5)
-        ev["camera_after_watching"] = [again[0], again[1]] if again else None
-        ctx.check(again and again[0] == 200 and again[2],
-                  "the package's capture did not come back once the viewer stopped: %s", again)
-
-        # its own settings: read, set, and what the schema will not take
-        got = rep.get("api_settings") or [0, {}]
-        ev["api_settings"] = got
-        ctx.check(got[0] == 200 and (got[1] or {}).get("settings", {}).get("threshold") == 40
-                  and (got[1] or {}).get("settings", {}).get("when") == "end"
-                  and len((got[1] or {}).get("schema") or []) == 3,
-                  "GET /v0/settings before anything is set, with its schema: %s", got)
-        set_ = rep.get("api_settings_set") or [0, {}]
-        ev["api_settings_set"] = set_
-        ctx.check(set_[0] == 200 and (set_[1] or {}).get("settings", {}).get("threshold") == 70
-                  and (set_[1] or {}).get("settings", {}).get("note") == "set from inside"
-                  and (set_[1] or {}).get("settings", {}).get("when") == "end",
-                  "POST /v0/settings sets what it names and leaves the rest: %s", set_)
-        for key, why in (("api_settings_undeclared", "a setting the package does not declare"),
-                         ("api_settings_out_of_bounds", "a value outside its bounds")):
-            bad_ = rep.get(key) or [0, {}]
-            ev[key] = bad_
-            ctx.check(bad_[0] == 400 and (bad_[1] or {}).get("error"), "%s -> %s", why, bad_)
-        store = "%s/settings/%s.json" % (EXT_ROOT, REF_ID)
-        ev["settings_store"] = {"mode": "%04o" % (os.stat(store).st_mode & 0o7777) if os.path.exists(store) else None}
-        ctx.check(os.path.exists(store) and os.stat(store).st_mode & 0o7777 == 0o600,
-                  "the settings store is not root's alone: %s", ev["settings_store"])
-        ctx.check(os.path.exists(store) and json.loads(_read(store)).get("threshold") == 70,
-                  "the store does not hold what the package set")
-        mode_ = rep.get("api_mode") or [0, {}]
-        ctx.check(mode_[0] == 200 and mode_[1].get("mode") in ("grbl", "cloud") and "controller" in mode_[1],
-                  "GET /v0/machine/mode from the inside is not forgectrl's answer: %s", mode_)
-        ctx.check((rep.get("api_hold") or [0])[0] == 403 and (rep.get("api_nowhere") or [0])[0] == 404
-                  and (rep.get("api_traversal") or [0])[0] == 400,
-                  "a hold it was not granted, a path the API does not have, a path with ..: %s %s %s",
-                  rep.get("api_hold"), rep.get("api_nowhere"), rep.get("api_traversal"))
-        # the storage quota: the host measures what it holds and sets it aside
-        big = os.path.join(EXT_ROOT, "data", REF_ID, "toobig")
-        with open(big, "wb") as f:
-            f.write(b"x" * (2 << 20))
-        ctx.log("wrote 2 MiB into its data directory (it declares storage:1)")
-
-        def quarantined():
-            x = _svc(REF_ID)
-            return x if x.get("state") == "quarantined" else None
-
-        q = _until(ctx, quarantined, 90, poll=1.0)
-        ev["quota"] = {"state": (q or _svc(REF_ID)).get("state"), "reason": (q or _svc(REF_ID)).get("reason")}
-        ctx.log("over its quota: %s", ev["quota"])
-        ctx.check(q, "a service 2 MiB over its 1 MiB quota was not set aside: %s", _svc(REF_ID))
-        ctx.check("may hold" in ((q or {}).get("reason") or ""),
-                  "it was set aside without the quota's reason: %s", (q or {}).get("reason"))
-        ctx.check(not os.path.exists("/proc/%d" % pid), "it is still running after being set aside")
-        # The operator's way out: clear the data, enable it again.
-        os.remove(big)
-        r = _forgeext("enable", REF_ID)
-        ctx.check(r.get("ok") is True, "enable after the quota -> %s", r.get("error"))
-        back = _until(ctx, lambda: _svc(REF_ID) if _svc(REF_ID).get("state") == "running" else None, 90, poll=0.5)
-        ctx.check(back, "it did not come back once its data was cleared and it was enabled: %s", _svc(REF_ID))
-        pid = (back or {}).get("pid") or pid
-
-        sock = "%s/%s.sock" % (API_DIR, REF_ID)
-        st_ = os.stat(sock)
-        ctx.check(stat.S_ISSOCK(st_.st_mode) and stat.S_IMODE(st_.st_mode) == 0o660 and (st_.st_uid, st_.st_gid) == (0, uid),
-                  "its API socket is not root's and its account's at 0660: %o %d:%d", stat.S_IMODE(st_.st_mode), st_.st_uid, st_.st_gid)
-        other = POOL_FIRST + POOL_SIZE - 1 if uid != POOL_FIRST + POOL_SIZE - 1 else POOL_FIRST
-        rc, lines, errtext = _probe("-", other, "unix", sock)
-        ev["another_account_at_its_socket"] = lines
-        ctx.check(lines and lines[0].get("result") == "eacces", "another pool account at its socket: %s %s", lines, errtext)
-        ctx.check(_until(ctx, lambda: ("ext %s: reference service up" % REF_ID) in _read(HOST_LOG), 20, poll=1),
-                  "the service's output is not in %s under its id", HOST_LOG)
-
-        _write(SAFE_FILE, "")
-        ctx.check(_until(ctx, lambda: not running() and "safe mode" in (_host_status().get("off_reason") or ""), 15),
-                  "safe mode did not stop the service: %s", _host_status())
-        ctx.check(not os.path.exists("/proc/%d" % pid) and not os.path.isdir("%s/%s" % (POOL_GROUP, REF_ID)),
-                  "safe mode left the process or its group")
-        os.remove(SAFE_FILE)
-        x = _until(ctx, lambda: running(pid), 60, poll=0.5)
-        ctx.check(x, "out of safe mode the service did not start again: %s", _svc(REF_ID))
-        pid = x["pid"]
-        ctx.log("safe mode stopped it and its end started it again (pid %d)", pid)
-
-        host = _host_pids()
-        ctx.check(len(host) == 1, "the extension host is not one process: %s", host)
-        # Only once the service is in its quiet loop: a service still on its way up ends by
-        # itself when its first line meets the dead host's pipe, and that would prove nothing.
-        beat_path = os.path.join(EXT_ROOT, "data", REF_ID, "beat")
-        seen = set()
-        ctx.check(_until(ctx, lambda: seen.add(_read(beat_path)) or len(seen) >= 3, 30, poll=0.2),
-                  "the service's heartbeat does not advance")
-        t0 = time.time()
-        os.kill(host[0], signal.SIGKILL)
-        ctx.check(_until(ctx, lambda: not os.path.exists("/proc/%d" % pid), 2, poll=0.05),
-                  "a killed host left its service running for 2 s: nobody would freeze it in an armed window")
-        ev["service_outlived_a_killed_host_s"] = round(time.time() - t0, 2)
-        x = _until(ctx, lambda: running(pid) if _host_status().get("pid") in _host_pids() else None, 60, poll=0.5)
-        ev["host_back_s"] = round(time.time() - t0, 1)
-        ctx.check(x, "the host did not come back and start the service again: %s", _host_status())
-        pid = x["pid"]
-        ctx.log("a killed host: its service gone in %.2f s, the host back and the service running after %.1f s",
-                ev["service_outlived_a_killed_host_s"], ev["host_back_s"])
-
-        st, reply = fc.post("/settings", data={"ext_enabled": "0"})
-        ctx.check(st == 200, "ext_enabled=0 -> %s %r", st, reply)
-        ctx.check(_until(ctx, lambda: not running() and not os.path.exists("/proc/%d" % pid), 15),
-                  "ext_enabled=0 did not stop the service: %s", _svc(REF_ID))
-        ctx.check(not os.path.isdir("%s/%s" % (POOL_GROUP, REF_ID)) and ("chain u%d " % uid) not in chains(),
-                  "ext_enabled=0 left the service's group or its chain")
-        ctx.check("ext_enabled" in (_host_status().get("off_reason") or ""), "the host does not say why nothing runs: %s",
-                  _host_status().get("off_reason"))
-    finally:
-        _put_back(ctx, fc, work, prior, etag, raw, dir_mode)
-    _as_found(ctx, fc, prior, raw, dir_mode, found_tree)
-
-
 # ------------------------------------------------- the armed window
 
 def _frozen(id_):
@@ -1170,7 +850,7 @@ def _frozen(id_):
       covers=[("forgeext", "src/super.*"), ("forgeext", "src/run.*"), ("forgeext", "src/machine.*"),
               ("forgeext", "src/cgroup.*"), ("forgectrl", "src/cool.*"), ("forgectrl", "src/cam.*"),
               ("forgectrl", "src/main.c")],
-      requires=["exthost.service"], actions=["button"],
+      requires=["exthost.platform"], actions=["button"],
       steps=[OFFLINE_STEP,
              "Bed clear (the job is dark: a 30 s square at S0, nothing fires). Press the button "
              "when it lights."],
@@ -1186,8 +866,8 @@ def _frozen(id_):
                   "service is the same process throughout. A background capture is refused in words "
                   "while the window is open and served again once it closes, which is the other half "
                   "of keeping a package off the step stream: a capture costs kernel-side work that a "
-                  "thread priority does not cover. Everything is put back as exthost.service puts it "
-                  "back.")
+                  "thread priority does not cover. The package, the key, the setting and the setup "
+                  "record are put back as found, the record under a forgectrl restart.")
 def armed_freeze(ctx):
     import tempfile
     import threading

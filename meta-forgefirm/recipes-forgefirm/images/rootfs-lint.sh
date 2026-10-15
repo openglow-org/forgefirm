@@ -29,6 +29,18 @@
 #   mdns       no mDNS responder: no /etc/avahi, no avahi-daemon, no
 #              libnss_mdns, and the hosts line of nsswitch.conf names no
 #              mdns source.
+#   init-order runlevel 5 starts forgectrl before forgeext, and runlevel 6
+#              stops grblhal before forgectrl and forgeext before
+#              forgectrl: the links sort in that order.
+#   logging    a ForgeFIRM logging init script is on the image
+#              (forgefirm-logging or forgefirm-logrotate).
+#   watchdog   no userspace watchdog init script (/etc/init.d/watchdog):
+#              the kernel feeds the hardware watchdog.
+#   read-only  /etc/default/rcS sets ROOTFS_READ_ONLY=yes.
+#   dhcpv6     no DHCPv6 client (udhcpc6, dhcp6c, odhcp6c) in a bin
+#              directory, and no /usr/share/udhcpc/default6.script.
+#   factory    on a release image, no /etc/fstab line mounts anything
+#              under /factory/ (the dev image mounts the factory slots).
 
 root=${1:?rootfs}
 kind=${2:?release or dev}
@@ -139,6 +151,54 @@ for d in lib usr/lib; do
 done
 if active "$root/etc/nsswitch.conf" | grep -E '^[[:space:]]*hosts:' | grep -q 'mdns'; then
     fail mdns "nsswitch.conf resolves hosts through mdns"
+fi
+
+# ------------------------------------------------------------ init-order
+# link <runlevel dir> <S|K> <name>: the first link of that kind whose name
+# ends in name, or nothing
+link() {
+    for l in "$root/etc/$1"/"$2"*"$3"; do
+        [ -L "$l" ] || [ -e "$l" ] || continue
+        echo "${l##*/}"
+        return
+    done
+}
+# before <what> <a> <b>: a and b are both there and a sorts first
+before() {
+    if [ -z "$2" ] || [ -z "$3" ]; then
+        fail init-order "$1: a link is missing (${2:-none}, ${3:-none})"
+    elif [ "$(printf '%s\n%s\n' "$2" "$3" | LC_ALL=C sort | head -n 1)" != "$2" ] || [ "$2" = "$3" ]; then
+        fail init-order "$1: $2 does not sort before $3"
+    fi
+}
+before "rc5.d starts forgectrl before forgeext" "$(link rc5.d S forgectrl)" "$(link rc5.d S forgeext)"
+before "rc6.d stops grblhal before forgectrl" "$(link rc6.d K grblhal)" "$(link rc6.d K forgectrl)"
+before "rc6.d stops forgeext before forgectrl" "$(link rc6.d K forgeext)" "$(link rc6.d K forgectrl)"
+
+# --------------------------------------------------------------- logging
+[ -e "$root/etc/init.d/forgefirm-logging" ] || [ -e "$root/etc/init.d/forgefirm-logrotate" ] \
+    || fail logging "no ForgeFIRM logging init script (forgefirm-logging, forgefirm-logrotate)"
+
+# -------------------------------------------------------------- watchdog
+[ -e "$root/etc/init.d/watchdog" ] && fail watchdog "/etc/init.d/watchdog is on the image"
+
+# ------------------------------------------------------------- read-only
+grep -qx 'ROOTFS_READ_ONLY=yes' "$root/etc/default/rcS" 2>/dev/null \
+    || fail read-only "/etc/default/rcS does not set ROOTFS_READ_ONLY=yes"
+
+# ---------------------------------------------------------------- dhcpv6
+for d in bin sbin usr/bin usr/sbin; do
+    for p in udhcpc6 dhcp6c odhcp6c; do
+        if [ -e "$root/$d/$p" ] || [ -L "$root/$d/$p" ]; then
+            fail dhcpv6 "/$d/$p is on the image"
+        fi
+    done
+done
+[ -e "$root/usr/share/udhcpc/default6.script" ] && fail dhcpv6 "/usr/share/udhcpc/default6.script is on the image"
+
+# --------------------------------------------------------------- factory
+if [ "$kind" = release ] && active "$root/etc/fstab" | awk '$2 ~ /^\/factory\// { f = 1 } END { exit !f }'; then
+    fail factory "/etc/fstab mounts a factory slot under /factory/ on a release image"
 fi
 
 exit $failed
