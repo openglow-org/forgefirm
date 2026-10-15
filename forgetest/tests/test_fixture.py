@@ -576,6 +576,24 @@ class RoutingTests(unittest.TestCase):
             lit["v"] = False
             time.sleep(0.3)
             self.assertEqual((run.notice or {}).get("text"), "Something else.")
+            # The watch ends with the run: a test that ends before the press
+            # (a FAIL on the way to the arm, say) leaves no thread polling the
+            # LEDs for up to the arm's whole timeout.
+            def watching():
+                return [t for t in threading.enumerate() if t.name == "forgetest-arm-notice"]
+            deadline = time.time() + 2
+            while watching() and time.time() < deadline:
+                time.sleep(0.02)                         # the earlier watches are gone
+            self.assertFalse(watching())
+            lit["v"] = False
+            self.assertFalse(ctx.arm_press())
+            self.assertTrue(watching())                  # up while the arm is still dark
+            run.finished = {"result": "FAIL", "message": "", "duration_s": 0}
+            deadline = time.time() + 2
+            while watching() and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(watching())
+            self.assertIsNotNone(run.notice)             # the finished run's notice is left as it was
         finally:
             runner_mod.hw.button_lit = saved
 

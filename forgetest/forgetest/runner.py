@@ -495,26 +495,37 @@ class Context:
         controller lights the button white for its arm wait and puts it out
         at the press. Without this the notice stood until the test's next
         step, and an operator who still saw it pressed again, which pauses
-        the job. A notice replaced meanwhile is left alone."""
-        with self.run._lock:
-            nid = (self.run.notice or {}).get("id")
+        the job. A notice replaced meanwhile is left alone. The watch lives
+        only as long as the notice it guards and the run: a notice cleared
+        or replaced, a run that finished (passed, failed, or errored before
+        the press) or an abort ends it, so no thread is left polling the
+        LEDs behind a test."""
+        run = self.run
+        with run._lock:
+            nid = (run.notice or {}).get("id")
         if nid is None:
             return
+
+        def standing():
+            with run._lock:
+                return run.finished is None and (run.notice or {}).get("id") == nid
 
         def watch():
             t0 = time.time()
             while hw.button_lit() is not True:
-                if time.time() - t0 > lit_timeout:
+                if not standing() or time.time() - t0 > lit_timeout:
                     return
-                time.sleep(0.05)
+                if run.aborted.wait(0.05):
+                    return
             while hw.button_lit() is not False:
-                if time.time() - t0 > lit_timeout + ARM_PRESS_WAIT_S:
+                if not standing() or time.time() - t0 > lit_timeout + ARM_PRESS_WAIT_S:
                     return
-                time.sleep(0.05)
-            with self.run._lock:
-                same = (self.run.notice or {}).get("id") == nid
+                if run.aborted.wait(0.05):
+                    return
+            with run._lock:
+                same = (run.notice or {}).get("id") == nid
                 if same:
-                    self.run.notice = None
+                    run.notice = None
             if same:
                 self.log("ARM: the button went out at the press; the notice is down")
 
