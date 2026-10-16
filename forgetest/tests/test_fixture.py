@@ -626,6 +626,25 @@ class RoutingTests(unittest.TestCase):
             time.sleep(0.2)
             lit["v"] = False
             self.assertTrue(settles(False))
+            # A press the box made and reported failed (its reply lost after
+            # the press): the button is out when the error arrives, so the
+            # press was taken, and no notice asks for a second one.
+            def pressed_then_failed(channel, state, ms=None):
+                lit["v"] = False                         # the controller takes the press
+                raise fx.FixtureError("timed out")
+            self.stub.act = pressed_then_failed
+            lit["v"] = True
+            self.assertTrue(ctx.press_now())
+            self.assertIsNone(run.notice)
+            self.assertEqual(ctx.evidence["actions"][-1]["by"], "fixture")
+            lit["v"] = True
+            self.assertTrue(ctx.arm_press())
+            deadline = time.time() + 2
+            while ctx.evidence["actions"][-1]["by"] != "fixture" and time.time() < deadline:
+                time.sleep(0.02)
+            time.sleep(0.1)
+            self.assertEqual(ctx.evidence["actions"][-1]["by"], "fixture")
+            self.assertIsNone(run.notice)
         finally:
             runner_mod.hw.button_lit = saved
 

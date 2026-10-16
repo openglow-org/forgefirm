@@ -464,8 +464,9 @@ class Context:
 
         The fixture presses where the bench took this test's presses (or
         opted in standing); otherwise the notice goes up for a person,
-        who is looking at the same prompt. Returns True when the fixture
-        pressed."""
+        who is looking at the same prompt. A press the fixture reports
+        failed while the button went out was taken all the same, and no
+        notice goes up for it. Returns True when the fixture pressed."""
         fixture = getattr(self.runner, "fixture", None) if self.runner is not None else None
         rec = {"channel": "button", "state": "arm", "by": "operator", "ts": now_ts()}
         self.evidence.setdefault("actions", []).append(rec)
@@ -483,12 +484,28 @@ class Context:
             fixture.act("button", "press")
         except _fixture.FixtureError as e:
             rec["fixture_error"] = str(e)
+            if self._press_taken(rec, e):
+                return True
             self.log("ARM press: fixture failed (%s) - asking the operator", e)
             self.notice(text)
             self._clear_when_taken()
             return False
         rec["by"] = "fixture"
         self.log("ARM press by the fixture, at the machine's own press prompt")
+        return True
+
+    def _press_taken(self, rec, err):
+        """After the box reported a failed press of a lit button: True when
+        the button is out, so the controller took a press (the box pressed
+        and its reply was lost). The press is recorded as the box's, and
+        no notice goes up, because it would ask for a second press, and a
+        press during the job pauses it. A button still lit, or unreadable,
+        is False: the operator is asked."""
+        if hw.button_lit() is not False:
+            return False
+        rec["by"] = "fixture"
+        self.log("ARM press: the fixture reported a failure (%s), and the button is out: the press "
+                 "was taken; no notice", err)
         return True
 
     def _clear_when_taken(self, lit_timeout=ARM_LIT_WAIT_S):
@@ -541,8 +558,9 @@ class Context:
         seconds for the button to light (the job may still be on its way
         to the arm wait; a card that settles the coolant first takes
         minutes) and presses once, recorded as the fixture's; if the
-        button never lights or the press fails, the notice goes up for a
-        person. Returns True when the fixture has been asked."""
+        button never lights, or the press fails with the button still lit,
+        the notice goes up for a person. Returns True when the fixture has
+        been asked."""
         fixture = getattr(self.runner, "fixture", None) if self.runner is not None else None
         rec = {"channel": "button", "state": "arm", "by": "operator", "ts": now_ts()}
         self.evidence.setdefault("actions", []).append(rec)
@@ -572,8 +590,11 @@ class Context:
             try:
                 fixture.act("button", "press")
             except _fixture.FixtureError as e:
-                self.log("ARM press: fixture failed (%s) - asking the operator", e)
                 rec["fixture_error"] = str(e)
+                if self._press_taken(rec, e):
+                    rec["took_s"] = round(lit, 2)
+                    return
+                self.log("ARM press: fixture failed (%s) - asking the operator", e)
                 self.notice(text)
                 self._clear_when_taken()
                 return
