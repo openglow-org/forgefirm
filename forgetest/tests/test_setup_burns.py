@@ -336,10 +336,10 @@ class BurnRunTests(unittest.TestCase):
         self.assertNotIn("lens_hall_edge_z_mm", start)
         self.assertEqual((start["lens_stop_below_steps"], start["lens_stop_above_steps"]), ("14", "20"))
         self.assertEqual(run.evidence["result"]["emission"]["hv_max"], 610)
-        # the head's place on record before the start, judged at X0 Y0
+        # the head's place on record before the start, judged at the stops: X0 Y0 with no offset
         self.assertEqual(run.evidence["head_at_start"],
                          {"pos": {"x": 0.0, "y": 0.0, "z": 0.0}, "homed_axes": 7, "home_source": "manual",
-                          "judged": True})
+                          "judged": True, "stops": {"x": 0.0, "y": 0.0}})
         # the witnesses read from here at every poll: each at its peak
         seen = run.evidence["emission_seen"]
         self.assertEqual((seen["laser_on_max"], seen["hv_max"]), (118, 431))
@@ -449,6 +449,30 @@ class BurnRunTests(unittest.TestCase):
         self.assertEqual(self.daemon.order, [])
         self.assertEqual(self.daemon.lever_posts(), [])
         self.assert_found()
+
+    def test_a_manual_home_offset_puts_the_stops_off_x0_y0(self):
+        # manual_home_x 5 and manual_home_y 3: a manual home declares the
+        # stops X-5 Y-3 and leaves the head at X0 Y0, in front of them,
+        # where the wizard does not draw from. X0 Y0 fails before any start,
+        # with no controller lever touched; the head at the stops is home.
+        self.fake.state["settings"].update({"manual_home_x": "5", "manual_home_y": "3"})
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.focus")
+        self.assertIn("not at its home", str(cm.exception))
+        self.assertEqual(self.run.evidence["head_at_start"]["stops"], {"x": -5.0, "y": -3.0})
+        self.assertEqual(self.daemon.order, [])
+        self.assertEqual(self.daemon.lever_posts(), [])
+        self.assert_found()
+        self.fake.state["status"]["pos"] = {"x": -5.0, "y": -3.0, "z": 0.0}
+        run = self.run_test("setup.focus")
+        self.assertTrue(run.evidence["head_at_start"]["judged"])
+        self.assertEqual(self.daemon.order, ["laser.focus"])
+        # an offset that does not read as a number places no stops: nothing starts
+        self.fake.state["settings"]["manual_home_x"] = "five"
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.focus")
+        self.assertIn("manual_home_x reads 'five'", str(cm.exception))
+        self.assertEqual(self.daemon.order, ["laser.focus"])
 
     def test_an_unreferenced_head_runs_on_the_operators_word(self):
         # A fresh controller's counters-only position places nothing: the

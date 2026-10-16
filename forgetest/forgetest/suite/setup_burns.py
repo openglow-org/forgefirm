@@ -44,10 +44,12 @@ BURN_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/wizrun.h"),
 # Every burn asks first that the gantry stops are installed and the head
 # is at its home against them; the bench's head stands there, and every
 # burn's tail brings it back. head_at_home reads the head's place from
-# /status before the wizard starts and judges it at X0 Y0, within
-# HOME_TOL_MM, when a manual home references X and Y.
+# /status before the wizard starts and judges it against the stops, within
+# HOME_TOL_MM, when a manual home references X and Y: at X0 Y0 with no
+# manual home offset, at minus manual_home_x and manual_home_y with one.
 HOME = "The head is home"
 HOME_TOL_MM = 0.05
+HOME_OFFSET_KEYS = ("manual_home_x", "manual_home_y")
 EDGE_KEY = "lens_hall_edge_z_mm"
 FOCUS_KEYS = ["thickness_mm", "z_passes", "ladder_z", "window", "emission", "pick", "picked_lines",
               "pick_half_steps", "edge_z_mm", "steps_per_mm", "max_height_mm", "focus_range_mm", "summary"]
@@ -83,15 +85,36 @@ class Witnesses:
         return {"laser_on_max": self.laser_on_max, "hv_max": self.hv_max, "reads": self.reads}
 
 
+def home_offsets(ctx):
+    """manual_home_x and manual_home_y as the settings hold them, in mm:
+    how far in front of the gantry stops a manual home puts X0 Y0 (blank
+    is 0). A value that does not read as a number of 0 or more fails the
+    test: the stops cannot be placed without it."""
+    s = ctx.forgectrl.settings()
+    out = []
+    for key in HOME_OFFSET_KEYS:
+        raw = s.get(key)
+        try:
+            v = float(raw) if raw not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            v = None
+        ctx.check(v is not None and v >= 0, "%s reads %r: the gantry stops cannot be placed from it", key, raw)
+        out.append(v)
+    return tuple(out)
+
+
 def head_at_home(ctx):
     """The head's place on record before the wizard starts, read from
     /status under the campaign's own controller: the wizard restarts the
     controller before its home prompt, and a fresh controller drops the
-    X/Y reference, so a read at that prompt places nothing. Judged at
-    X0 Y0 within HOME_TOL_MM when X and Y are referenced by a manual
-    home, the one provider that declares X0 Y0 at the gantry stops.
-    Unreferenced, the head's place rests on the operator's word at the
-    ready gate, and the record says so."""
+    X/Y reference, so a read at that prompt places nothing. When X and Y
+    are referenced by a manual home, the head is judged against the
+    gantry stops, where the wizard draws from, within HOME_TOL_MM: a
+    manual home declares the head at the stops at minus manual_home_x
+    and manual_home_y, X0 Y0 with no offset, and with an offset it moves
+    the head to X0 Y0, that far in front of them. Unreferenced, the
+    head's place rests on the operator's word at the ready gate, and the
+    record says so."""
     fc = ctx.forgectrl
     read = {}
 
@@ -108,18 +131,27 @@ def head_at_home(ctx):
     axes = read.get("homed_axes")
     source = read.get("home_source")
     referenced = isinstance(axes, int) and (axes & 3) == 3 and source == "manual"
-    ctx.evidence["head_at_start"] = {"pos": pos, "homed_axes": axes, "home_source": source,
-                                     "judged": referenced}
+    rec = ctx.evidence["head_at_start"] = {"pos": pos, "homed_axes": axes, "home_source": source,
+                                           "judged": referenced}
     if not referenced:
         ctx.log("the head's place rests on the operator's word at the ready gate (X and Y unreferenced: "
                 "homed_axes %s, home_source %s, pos %s)", axes, source, pos)
         return
+    ox, oy = home_offsets(ctx)
+    stops = rec["stops"] = {"x": 0.0 - ox, "y": 0.0 - oy}
     x, y = pos.get("x"), pos.get("y")
     at_home = (isinstance(x, (int, float)) and isinstance(y, (int, float))
-               and abs(x) <= HOME_TOL_MM and abs(y) <= HOME_TOL_MM)
+               and abs(x - stops["x"]) <= HOME_TOL_MM and abs(y - stops["y"]) <= HOME_TOL_MM)
+    if ox or oy:
+        remedy = ("manual_home_x %g and manual_home_y %g put the stops at X%.2f Y%.2f, and a manual home "
+                  "leaves the head at X0 Y0, that far in front of them; release the motors and push the "
+                  "head against the stops before the burn" % (ox, oy, stops["x"], stops["y"]))
+    else:
+        remedy = "home it there before the burn"
     ctx.check(at_home, "the head is not at its home against the gantry stops: /status reads pos %s with X "
-              "and Y referenced by a manual home; home it there before the burn", pos)
-    ctx.log("the head is home on record: pos %s, X and Y referenced by a manual home", pos)
+              "and Y referenced by a manual home; %s", pos, remedy)
+    ctx.log("the head is home on record: pos %s, X and Y referenced by a manual home, the stops at X%.2f Y%.2f",
+            pos, stops["x"], stops["y"])
 
 
 def preview_ok(ctx, wid):
@@ -313,8 +345,10 @@ def focus_window_ok(ctx, r, before):
              "Nothing else: the test answers every prompt itself and puts back the setting the "
              "burn writes."],
       description="The focus burn as a fresh head runs it. Before anything starts, the head's "
-                  "place is read from /status and recorded: judged at X0 Y0 when a manual home "
-                  "references X and Y, else left to the operator's word at the ready gate. The "
+                  "place is read from /status and recorded: judged against the gantry stops when "
+                  "a manual home references X and Y (X0 Y0, or minus manual_home_x and "
+                  "manual_home_y when they are set), else left to the operator's word at the "
+                  "ready gate. The "
                   "edge setting is cleared, so the burn starts from the bench reference's edge, "
                   "while the lens window stays the one the Lens travel check wrote (or the "
                   "fallback). POST "
