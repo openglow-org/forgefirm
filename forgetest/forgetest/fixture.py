@@ -314,11 +314,12 @@ class Fixture:
 
     def _press(self, ms=None):
         """One press, spaced from the last one. `ms` is how long the box
-        holds it (the firmware clamps it into 20 to 500, and takes 200 when
-        it is not said): a check that must reach the machine *while* the
-        button is down asks for the longest press the box can make. The controller detects
-        the button's rising edge, so a press must follow a release it has
-        seen: the next press waits for the last pulse to end (the
+        holds it: the box's own 200 ms when it is not said, and the box
+        clamps a request into 20 to 500, so no press is ever held. Every
+        reader of the button catches the default press (an edge, or a poll
+        of 100 ms or less), so no check needs a longer one. The controller
+        detects the button's rising edge, so a press must follow a release
+        it has seen: the next press waits for the last pulse to end (the
         fixture's own pulse_ms) plus BUTTON_GAP_S. A 409 for a pulse in
         progress (a press this client did not time) is waited out once
         against the fixture's state, then retried."""

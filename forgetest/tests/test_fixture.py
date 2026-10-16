@@ -173,7 +173,7 @@ class ClientTests(unittest.TestCase):
         f.act("button", "press")
         self.assertEqual(self.dev.calls[-1], ("POST", "/button", {}))
         time.sleep(0.15)
-        # a check that must reach the machine while the button is down asks for the longest press
+        # a pulse length asked for goes to the box as asked; the clamp is the box's
         f.act("button", "press", ms=500)
         self.assertEqual(self.dev.calls[-1], ("POST", "/button", {"ms": 500}))
         time.sleep(0.15)                                             # the fake's pulse ends
