@@ -144,8 +144,10 @@ jobs:
       - name: No undefined names (the live drills never execute on the host)
         working-directory: forgefirm/forgetest
         run: |
-          pip install pyflakes
-          if python -B -m pyflakes forgetest tests | grep -E "undefined name"; then exit 1; fi
+          python -m pip install pyflakes
+          python -B -m pyflakes --version
+          python -B -m pyflakes forgetest tests > pyflakes.txt 2>&1 || true
+          if grep -E "undefined name|Traceback" pyflakes.txt; then exit 1; fi
 
       - name: Shared UI files match forgectrl at its pinned revision
         working-directory: forgefirm
