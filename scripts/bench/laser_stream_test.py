@@ -39,8 +39,9 @@ over TCP, then checks the dumps against the kernel feeder contract:
      rung's opening ticks carry the previous rung's duty
  11. under the density dose model no level ever reaches PWMSAR: every
      power byte carries full duty (one still leads each kernel run)
- 12. density matches the level the core commanded, rung by rung, and no
-     burst is longer than the base period
+ 12. density matches the level the core commanded, rung by rung, each
+     rung lit for its whole length, and no burst is longer than the base
+     period
  13. the model is a mask and never a source: run the same job under both
      models and every FIRE tick of the density run is a FIRE tick of the
      analog run, on an identical motion grid
@@ -52,7 +53,9 @@ over TCP, then checks the dumps against the kernel feeder contract:
      next run: a standalone S word between moves, from a sender slow
      enough to drain the planner, must still cut at the level it asked
      for rather than dark or at a stale level (judged under the shipped
-     density model, where the level is the FIRE density)
+     density model, where the level is the FIRE density), and over the
+     whole move: a level applied late shows as a lit span shorter than
+     the move
  16. and the off transition survives the same way: an M5 executed with
      the planner drained and the kernel run over must darken the rapids
      that follow it, and a bare G0 sent with the spindle off must ship
@@ -259,12 +262,16 @@ CHURN_BUDGET_S = (CHURN_MOTION_S + CHURN_GAPS_S) * 1.5 + 0.2
 LADDER_S = (20, 30, 60, 120, 200, 300)
 LADDER_DUTY = tuple(duty_for(s) for s in LADDER_S)
 LADDER_MM = 5.0
+LADDER_FEED = 300
 JOB_LADDER = ["G91", "G21", "M3"]
 for _i, _s in enumerate(LADDER_S):
     JOB_LADDER.append("S%d" % _s)
-    JOB_LADDER.append("G1 X%g F300" % (LADDER_MM if _i % 2 == 0 else -LADDER_MM))
+    JOB_LADDER.append("G1 X%g F%d" % (LADDER_MM if _i % 2 == 0 else -LADDER_MM,
+                                     LADDER_FEED))
     JOB_LADDER.append("G0 Y1")
 JOB_LADDER.append("M5")
+# One rung's length in machine ticks: the span each rung must stay lit for.
+LADDER_TICKS = LADDER_MM / (LADDER_FEED / 60.0) * MACHINE_TICK_HZ
 
 
 # Sessions E-G: the density dose model. $35 = 0 for the ladder because
@@ -327,6 +334,8 @@ for _i, _s in enumerate(IDLE_S_LEVELS):
     JOB_IDLE_S.append("G1 X%g F%d" % (IDLE_S_MM if _i % 2 == 0 else -IDLE_S_MM,
                                       IDLE_S_FEED))
 JOB_IDLE_S.append("M5")
+# One move's length in machine ticks: the span each level must stay lit for.
+IDLE_S_TICKS = IDLE_S_MM / (IDLE_S_FEED / 60.0) * MACHINE_TICK_HZ
 
 
 # Session J: the bench ladder's shape. M5 executes with the planner
@@ -891,8 +900,9 @@ def fire_spans(ticks, gap=RUNG_SPLIT_TICKS):
     return spans
 
 
-def check_density(name, data, levels, period, min_ticks):
-    """Rules 11-12: pinned duty, and density per rung matching the level."""
+def check_density(name, data, levels, period, min_ticks, move_ticks=None):
+    """Rules 11-12: pinned duty, density per rung matching the level, and
+    with move_ticks given, each rung's span the whole move long."""
     # A power byte still leads every kernel run - the run start resets the
     # hardware duty - but under this model it only ever carries full duty:
     # the level rides the FIRE bits, never PWMSAR.
@@ -909,6 +919,14 @@ def check_density(name, data, levels, period, min_ticks):
 
     out = []
     for (a, b), level in zip(spans, levels):
+        # The span is the whole move: a level applied late renders the
+        # right density over a shorter span, which the density alone
+        # cannot see. The lowest levels open and close a few periods of
+        # carried debt inside the move, well under the margin.
+        if move_ticks is not None and not 0.9 * move_ticks <= b - a <= 1.1 * move_ticks:
+            fail("[%s] level %d fire span of %d ticks, expected ~%d (the whole "
+                 "move): the move ran dark before the level was applied, or "
+                 "FIRE outlived it" % (name, level, b - a, move_ticks))
         seg = ticks[a:b]
         got = sum(1 for t in seg if t & 0x10) / float(len(seg))
         want = level / float(PWM_PERIOD)
@@ -1018,7 +1036,7 @@ def main():
     # the arm loads into $35.
     dens = run_session("density", JOB_LADDER, conf=DENSITY_CONF)
     rendered = check_density("density", dens, DENSITY_LEVEL, DENSITY_PERIOD_TICKS,
-                             DENSITY_MIN_MACHINE_TICKS)
+                             DENSITY_MIN_MACHINE_TICKS, LADDER_TICKS)
     check_termination("density", dens)
     if "laser armed (density, floor 0 %, curve off)" not in run_session.text:
         fail("[density] the arm did not select the density model at floor 0")
@@ -1074,7 +1092,7 @@ def main():
     # the one before it, and the stream ends dark.
     idle_s = run_session("idle-s", JOB_IDLE_S, conf=DENSITY_CONF_FLOORED)
     got = check_density("idle-s", idle_s, tuple(duty_for(l) for l in IDLE_S_LEVELS),
-                        DENSITY_PERIOD_TICKS, DENSITY_MIN_MACHINE_TICKS)
+                        DENSITY_PERIOD_TICKS, DENSITY_MIN_MACHINE_TICKS, IDLE_S_TICKS)
     check_termination("idle-s", idle_s)
     print("PASS [idle-s]: standalone S across idle gaps -> densities %s, each its own level"
           % [d for _l, d in got])
@@ -1115,7 +1133,7 @@ def main():
     text = run_session.text
     expect_levels = tuple(duty_for(x) for x in LADDER_S)
     check_density("floor-derived", floored, expect_levels, DENSITY_PERIOD_TICKS,
-                  DENSITY_MIN_MACHINE_TICKS)
+                  DENSITY_MIN_MACHINE_TICKS, LADDER_TICKS)
     if "laser armed (density, floor %g %%, curve off)" % PWM_MIN_PCT not in text:
         fail("[floor-derived] the arm report does not name the derived floor "
              "(text: %r)" % text[-400:])
