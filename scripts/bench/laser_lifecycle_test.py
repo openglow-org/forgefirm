@@ -16,7 +16,10 @@ reported messages:
   2. program end (M2) closing the window, and the next job arming
      afresh: laser_stream_test session K
   3. a sender change closes the window: a reconnected client must
-     re-arm - the displaced session's consent does not carry over
+     re-arm - the displaced session's consent does not carry over; the
+     disarm and the relock at the change are laser_arm_test.c case H,
+     and a new sender's soft reset of the held job is the core's reset
+     from a completed hold, session hold-reset-restart under rule 10
   4. the spindle-off grace counts down in HOLD, not only in Idle - a
      job abandoned in feed hold disarms after laser_disarm_s
   5. arming refused while the cooling verdict blocks fire, or before
