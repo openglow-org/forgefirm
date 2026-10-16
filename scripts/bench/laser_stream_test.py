@@ -84,7 +84,8 @@ over TCP, then checks the dumps against the kernel feeder contract:
  19. the dose curve's mapping of S onto delivered light is
      laser_arm_test.c case P's, and the rolloff reference run (rule 23)
      pins one point of it end to end: the S300 cruise renders the density
-     the curve maps 30 % light onto; every other session runs with
+     the curve maps 30 % light onto; every laser session but the rolloff
+     ones (rules 20 and 23) and the jog run (rule 22) runs with
      laser_dose_curve = off so its S-to-level arithmetic stays exact
  20. the corner rolloff starves the slow spots: under M4 with the curve
      in force, the accelerate-in head of a line renders less density at
