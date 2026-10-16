@@ -82,9 +82,10 @@ over TCP, then checks the dumps against the kernel feeder contract:
      is 0 (the floor, not $31, sets the bottom of the S range) and $35
      is the board's floor, landing at PWMSAR_FLOOR_MIN or above
  19. the dose curve's mapping of S onto delivered light is
-     laser_arm_test.c case P's; every session here but the rolloff ones
-     runs with laser_dose_curve = off so its S-to-level arithmetic stays
-     exact
+     laser_arm_test.c case P's, and the rolloff reference run (rule 23)
+     pins one point of it end to end: the S300 cruise renders the density
+     the curve maps 30 % light onto; every other session runs with
+     laser_dose_curve = off so its S-to-level arithmetic stays exact
  20. the corner rolloff starves the slow spots: under M4 with the curve
      in force, the accelerate-in head of a line renders less density at
      the default gamma of 2 than at gamma 1, and the cruise middle
@@ -309,6 +310,13 @@ DENSITY_CONF_FLOORED = ("laser_power_model = density\n"
                         "laser_dose_curve = off\n" + DENSITY_CONF_BASE)
 # The shipped default: the bench curve in force (no keys at all).
 DENSITY_CONF_CURVED = "laser_power_model = density\n" + DENSITY_CONF_BASE
+# Rule 19's end-to-end point: 30 % light (S300) through the bench-default
+# curve (glowforge_laser.c curve_default) lands between its (45 % density,
+# 21 % light) and (60 %, 37 %) points, 45 + 9/16 x 15 = 53.44 % density,
+# level 68 of 127. Mirrored here the way the floor is: changing the curve
+# changes this expectation.
+CURVE_S300_LEVEL = 68
+CURVE_S300_DENSITY = CURVE_S300_LEVEL / float(PWM_PERIOD)
 
 DENSITY_LEVEL = tuple(int(x * PWM_PERIOD / RPM_MAX) for x in LADDER_S)
 # A $35 typed ahead of the job: rule 18 says the arm overwrites it.
@@ -1531,6 +1539,12 @@ def main():
     a, b = rs[0]
     mid = rt[(a + b) // 2 - 1000:(a + b) // 2 + 1000]
     dens_ref = sum(1 for t in mid if t & 0x10) / float(len(mid))
+    # Rule 19: the reference cut is one M4 line at a known S under the
+    # shipped curve, so its cruise (velocity ratio 1, no rolloff) pins the
+    # curve's rendering end to end.
+    if abs(dens_ref - CURVE_S300_DENSITY) > 0.02:
+        fail("[rolloff-ref] the S300 cruise renders %.3f, expected %.3f through the "
+             "bench-default curve" % (dens_ref, CURVE_S300_DENSITY))
     tt = tick_bytes(two)
     ts = fire_spans(tt)
     if len(ts) != 1:
