@@ -379,8 +379,8 @@ def test_sender_wins_queued(s):
 
 
 class NewlinePoller(threading.Thread):
-    """A sender that polls the way LightBurn does: '?' with an end of line
-    behind it, on a timer. The '?' is a realtime character; the end of line
+    """A sender that polls '?' with an end of line behind it, on a timer,
+    as some Grbl senders do. The '?' is a realtime character; the end of line
     is an empty line, which the core answers ok."""
 
     def __init__(self, sender, period=0.25):
@@ -402,10 +402,9 @@ class NewlinePoller(threading.Thread):
 
 def poll_case(tag, eol):
     """An empty line is not the sender speaking. With a sender polling
-    '?'<eol> four times a second (LightBurn polls about twice a second): a
-    port jog is never refused for it, a long port jog runs whole under it,
-    and every poll still draws its one ok, during the jog too. A real line
-    still goes first."""
+    '?'<eol> four times a second: a port jog is never refused for it, a
+    long port jog runs whole under it, and every poll still draws its one
+    ok, during the jog too. A real line still goes first."""
     s = Session(eol=eol)
     try:
         s.sender.wait_state("Idle")
