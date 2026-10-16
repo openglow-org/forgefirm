@@ -485,8 +485,9 @@ class CatalogTests(unittest.TestCase):
     def test_the_shared_judges_exist_and_take_every_package_import_of_the_suite(self):
         # The list is kept by hand: the Context reaches runner.py, hw.py
         # and baseline.py with no import to find. So every package module
-        # a suite module does import has to be on it (or be the registry,
-        # which judges nothing), or that judge would be in no fingerprint.
+        # a suite module does import, at its top level or inside a function
+        # or a block, has to be on it (or be the registry, which judges
+        # nothing), or that judge would be in no fingerprint.
         import ast
         import glob
         paths = catalog.shared_judge_paths()
@@ -497,7 +498,7 @@ class CatalogTests(unittest.TestCase):
         for mod in sorted(glob.glob(os.path.join(catalog.suite_dir(), "*.py"))):
             with open(mod, encoding="utf-8") as f:
                 tree = ast.parse(f.read())
-            for node in tree.body:
+            for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.level == 2:
                     for name in ([node.module] if node.module else [a.name for a in node.names]):
                         self.assertIn(name + ".py", allowed,
@@ -614,6 +615,41 @@ def two(ctx):
         with open(other, "w", newline="\n") as f:
             f.write("def serve():\n    return 1\n")
         self.assertEqual((a2, b2), shas())
+        # Test.source_sha, which the fingerprint, the campaign and the gate
+        # read, takes the shared judges itself: a suite test's hash is the
+        # one with SHARED_JUDGES folded in, not the one without them.
+        import inspect
+        t = catalog.load_suite()["image.health"]
+        src = inspect.getsourcefile(t.fn)
+        self.assertEqual(t.source_sha, catalog.implementation_sha(src, t.id, judges=catalog.shared_judge_paths()))
+        self.assertNotEqual(t.source_sha, catalog.implementation_sha(src, t.id, judges=[]))
+
+    def test_a_sibling_imported_inside_a_function_moves_the_tests_that_run_it(self):
+        # A test that imports a judge inside its own function carries the
+        # judge in its hash, and no other test of its module does; a
+        # helper of the module that imports one inside its body carries it
+        # into every test of the module.
+        sib = os.path.join(self.tmp, "judge.py")
+
+        def write_judge(text):
+            with open(sib, "w", newline="\n") as f:
+                f.write(text)
+            catalog.forget(sib)
+        write_judge("def judge(x):\n    return x > 1\n")
+        self.write(self.MODULE.replace("def two(ctx):\n",
+                                       "def two(ctx):\n    from .judge import judge\n    judge(2)\n"))
+        a1, b1 = self.shas()
+        write_judge("def judge(x):\n    return x > 2\n")
+        a2, b2 = self.shas()
+        self.assertEqual(a1, a2)
+        self.assertNotEqual(b1, b2)
+        self.write(self.MODULE.replace("    return x + 1\n",
+                                       "    from .judge import judge\n    return judge(x)\n"))
+        a3, b3 = self.shas()
+        write_judge("def judge(x):\n    return x > 3\n")
+        a4, b4 = self.shas()
+        self.assertNotEqual(a3, a4)
+        self.assertNotEqual(b3, b4)
 
     def test_line_endings_do_not_count(self):
         a1, b1 = self.shas()

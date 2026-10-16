@@ -69,13 +69,14 @@ class Test:
     def source_sha(self):
         """The hash of the test's own implementation: its function (the
         decorator included) together with the code its module shares
-        among its tests - everything outside the @test functions - and
-        the shared judges (SHARED_JUDGES). Part of the fingerprint: a
-        change inside one test's body invalidates that test's earlier
-        passes and no other; a change to a helper invalidates the tests
-        of that module; a change to a shared judge invalidates every
-        test. A test the module does not define in the @test form hashes
-        its whole file."""
+        among its tests (everything outside the @test functions), the
+        shared code of every sibling module that either of the two
+        imports, and the shared judges (SHARED_JUDGES). Part of the
+        fingerprint: a change inside one test's body invalidates that
+        test's earlier passes and no other; a change to a helper
+        invalidates the tests of that module and the tests that import
+        it; a change to a shared judge invalidates every test. A test the
+        module does not define in the @test form hashes its whole file."""
         if self._source_sha is None:
             # One filler at a time: a second poll that arrives while the
             # first computes waits for it rather than repeating the work.
@@ -200,6 +201,20 @@ def _parsed(path):
         return hit
 
 
+def _test_defs(tree):
+    """{test id: its function} for the @test("...") functions at the top
+    level of a module's tree."""
+    defs = {}
+    for node in (tree.body if tree is not None else []):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for d in node.decorator_list:
+            if (isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "test"
+                    and d.args and isinstance(d.args[0], ast.Constant) and isinstance(d.args[0].value, str)):
+                defs[d.args[0].value] = node
+    return defs
+
+
 def module_parts(path):
     """(shared sha, {test id: own sha}) for a suite module: the test ids
     are read from the @test("...") decorators on the module's top-level
@@ -213,14 +228,9 @@ def module_parts(path):
     text, tree = _parsed(path)
     lines = text.split("\n")
     spans = {}
-    for node in (tree.body if tree is not None else []):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        for d in node.decorator_list:
-            if (isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "test"
-                    and d.args and isinstance(d.args[0], ast.Constant) and isinstance(d.args[0].value, str)):
-                start = min([dd.lineno for dd in node.decorator_list] + [node.lineno])
-                spans[d.args[0].value] = (start, node.end_lineno)
+    for tid, node in _test_defs(tree).items():
+        start = min([dd.lineno for dd in node.decorator_list] + [node.lineno])
+        spans[tid] = (start, node.end_lineno)
     owned = set()
     for a, b in spans.values():
         owned.update(range(a, b + 1))
@@ -233,10 +243,10 @@ def module_parts(path):
 
 
 def sibling_imports(path, seen=None):
-    """The suite modules a module imports with `from .x import ...`, as
-    paths, transitively, in a stable order. A helper a test calls from
-    a sibling module is part of the judge, so its text belongs in the
-    test's fingerprint."""
+    """The suite modules a module's shared text imports with `from .x
+    import ...`, as paths, transitively, in a stable order. A helper a
+    test calls from a sibling module is part of the judge, so its text
+    belongs in the test's fingerprint."""
     if seen is None:
         seen = []
     for sib in _direct_siblings(path):
@@ -246,33 +256,60 @@ def sibling_imports(path, seen=None):
     return seen
 
 
+def _imported(path, nodes):
+    """The suite modules the statements `nodes` import with `from .x
+    import`, at any depth (inside a function or a block too), in the
+    order they are written."""
+    here = os.path.dirname(path)
+    found = sorted((n for top in nodes for n in ast.walk(top)
+                    if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module),
+                   key=lambda n: (n.lineno, n.col_offset))
+    out = []
+    for node in found:
+        sib = os.path.join(here, node.module.replace(".", os.sep) + ".py")
+        if os.path.isfile(sib) and sib not in out:
+            out.append(sib)
+    return out
+
+
 def _direct_siblings(path):
-    """The suite modules one module imports itself, in import order."""
+    """The suite modules one module's shared text imports itself: at its
+    top level, and inside its helpers and blocks. What a @test function
+    imports is that test's own (_own_siblings)."""
     with _PARTS_LOCK:
         hit = _SIBLINGS.get(path)
         if hit is None:
             _text, tree = _parsed(path)
-            here = os.path.dirname(path)
-            hit = []
-            for node in (tree.body if tree is not None else []):
-                if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
-                    sib = os.path.join(here, node.module.replace(".", os.sep) + ".py")
-                    if os.path.isfile(sib):
-                        hit.append(sib)
-            _SIBLINGS[path] = hit
+            tests = list(_test_defs(tree).values())
+            shared = [n for n in (tree.body if tree is not None else []) if not any(n is t for t in tests)]
+            hit = _SIBLINGS[path] = _imported(path, shared)
         return hit
+
+
+def _own_siblings(path, test_id):
+    """The suite modules one test's own function imports: part of that
+    test's judge, and of no other test's."""
+    _text, tree = _parsed(path)
+    node = _test_defs(tree).get(test_id)
+    return _imported(path, [node]) if node is not None else []
 
 
 def implementation_sha(path, test_id, judges=None):
     """The implementation hash of one test (see Test.source_sha): the
     test's own text, the shared text of its module, the shared text of
-    every sibling suite module the module imports, and the text of the
-    shared judges. `judges` names files to take as the judges in place
-    of SHARED_JUDGES (the unit tests edit their own)."""
+    every sibling suite module the module's shared text or the test's
+    own function imports (transitively), and the text of the shared
+    judges. `judges` names files to take as the judges in place of
+    SHARED_JUDGES (the unit tests edit their own)."""
     shared, own = module_parts(path)
     if test_id not in own:
         return source_file_sha(path)
-    helpers = [module_parts(p)[0] for p in sorted(sibling_imports(path))]
+    sibs = sibling_imports(path)
+    for sib in _own_siblings(path, test_id):
+        if sib not in sibs and sib != path:
+            sibs.append(sib)
+            sibling_imports(sib, sibs)
+    helpers = [module_parts(p)[0] for p in sorted(sibs) if p != path]
     paths = shared_judge_paths() if judges is None else list(judges)
     judged = [module_parts(p)[0] for p in paths]
     return _manifest.sha256_text("%s:%s" % (":".join([shared] + helpers + judged), own[test_id]))
