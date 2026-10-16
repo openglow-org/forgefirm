@@ -318,11 +318,12 @@ class PackLicensesTests(unittest.TestCase):
 
     def test_a_license_text_tar_cannot_read_is_refused_and_the_tree_left(self):
         """A member tar cannot read fails the pack, bundle removed and tree
-        left: the manifest check alone passes a bundle truncated after it."""
+        left: tar skips that member, and the manifest check alone passes
+        the bundle without it."""
         if os.geteuid() == 0:
             self.skipTest("root reads every file")
         self.make_tree(self.RECIPES)
-        d = os.path.join(self.tree, "zlib")                 # sorts after license.manifest
+        d = os.path.join(self.tree, "zlib")
         os.makedirs(d)
         locked = os.path.join(d, "generic_Zlib")
         with open(locked, "w") as f:
