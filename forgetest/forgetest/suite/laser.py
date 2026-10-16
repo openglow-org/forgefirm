@@ -291,11 +291,13 @@ def dwell_gap(samples):
             "hv_enable_dipped": dip is not None, "hv_enable_back_lit": back_lit}
 
 
-def read_gaps(samples, key):
+def read_gaps(samples, key, t_end=None):
     """Over a sample trail: how many samples carry a reading for `key`,
     how many do not, and the longest stretch of seconds between two
     readings, the trail's ends counted as edges (an unread lead or tail
     is a gap too; a trail with no reading is one gap, its whole span).
+    The trail ends when its sampling stopped (`t_end`), not at the last
+    sample served: a tail the daemon did not serve at all is a gap too.
     A reading the daemon could not serve is a gap, never a dark sample:
     /status leaves the laser block out when the kernel's count did not
     read, and the count latches once per ~1 s window, so a window with
@@ -303,9 +305,58 @@ def read_gaps(samples, key):
     if not samples:
         return {"read": 0, "unread": 0, "gap_max_s": None}
     ts = [s["t"] for s in samples if s.get(key) is not None]
-    edges = [samples[0]["t"]] + ts + [samples[-1]["t"]]
+    last = samples[-1]["t"] if t_end is None else max(t_end, samples[-1]["t"])
+    edges = [samples[0]["t"]] + ts + [last]
     gap = max(b - a for a, b in zip(edges, edges[1:]))
     return {"read": len(ts), "unread": len(samples) - len(ts), "gap_max_s": round(gap, 3)}
+
+
+def rapid_place(stretch, x0):
+    """Where the head's reports place the rapid after the M5, judged over
+    the armed part of the dark stretch alone: its samples up to the first
+    disarmed one, that one included. Returns (i_out, i_back, i_closed):
+    the first sample with the head at least 19.5 mm out, the first after
+    it with the head back at x0 (within 0.05 mm), and the first disarmed
+    sample; each None when there is none. A window that closes before
+    the head is back leaves i_back None: the samples after the close
+    never place the rapid inside the window."""
+    i_closed = next((i for i, s in enumerate(stretch) if not s["armed"]), None)
+    part = stretch if i_closed is None else stretch[:i_closed + 1]
+    i_out = next((i for i, s in enumerate(part) if s.get("x") is not None and s["x"] - x0 >= 19.5), None)
+    i_back = (next((i for i in range(i_out + 1, len(part))
+                    if part[i].get("x") is not None and abs(part[i]["x"] - x0) < 0.05), None)
+              if i_out is not None else None)
+    return i_out, i_back, i_closed
+
+
+def sample_to_disarm(ctx, g, timeout=20.0, sample_hz=8):
+    """Sample until the armed window closes, or the timeout, with the
+    controller's state and machine X beside each sample ("x"). A G4 dwell
+    reports Idle, so Idle cannot end this; the window closing at the
+    program end does, after two more kernel windows and the read gap
+    allowed: the LASER_ON count for the window in flight at the close
+    latches up to one window later and is held through the next, so the
+    sampling runs on until that count has been read. Returns the samples
+    served and the time the sampling stopped, the trail's end for the
+    read rule."""
+    samples = []
+    period = 1.0 / sample_hz
+    t0 = time.time()
+    end = t0 + timeout
+    t_closed = None
+    while time.time() < end:
+        ctx.checkpoint()
+        smp = sample(ctx)
+        rep = g.status_report()
+        if smp:
+            smp["gstate"] = rep.get("state")
+            smp["x"] = (rep.get("MPos") or (None,))[0]
+            samples.append(smp)
+            if t_closed is None and not smp["armed"]:
+                t_closed = time.time()
+                end = t_closed + 2 * EMISSION_WINDOW_S + EMISSION_READ_GAP_S
+        time.sleep(period)
+    return samples, time.time()
 
 
 def run_and_sample(ctx, g, job, sample_hz=8, overall_timeout=200):
@@ -411,46 +462,20 @@ def wait_disarm(ctx, timeout):
                   "second press. The square ends at M5 with the window still open; once the "
                   "LASER_ON count reads 0 (the dark point), a rapid runs 20 mm out over the "
                   "first side and back, then the program ends. From the dark point until the "
-                  "window closes, every sample reads no emission and the HV current at its idle "
-                  "reading, the kernel's LASER_ON count read in every ~1 s window of that stretch "
-                  "and in the window that latches after the close (a reading the daemon could not "
-                  "serve is a gap, never a dark sample), and the head's reports place the rapid "
-                  "inside that stretch: LASER_ON stays off with FIRE clear while the chain can "
-                  "fire. The M2 program end "
-                  "disarms promptly (job-based, not the 60 s idle grace) and the button goes "
+                  "window closes, and on until the count of the window in flight at the close is "
+                  "read, every sample reads no emission and the HV current at its idle reading, "
+                  "the kernel's LASER_ON count read in every ~1 s window of that stretch (a "
+                  "reading the daemon could not serve is a gap, never a dark sample, and so is a "
+                  "tail it served none of), and the head's reports place the rapid inside the "
+                  "window, between the dark point and the close: LASER_ON stays off with FIRE "
+                  "clear while the chain can fire. The M2 program end disarms promptly after the "
+                  "head is back (job-based, not the 60 s idle grace) and the button goes "
                   "dark. The operator confirms all four sides.")
 def emission_witness(ctx):
     ev = ctx.evidence
     # The rapid after the M5 (G91 is modal from the square): out over the
     # first side and back, then the program end.
     rapid_tail = ["G0 X20", "G4 P2.5", "G0 X-20", "G4 P0.5", "G90", "M2"]
-
-    def sample_to_disarm(g, timeout=20.0, sample_hz=8):
-        """Sample until the armed window closes, or the timeout, with the
-        controller's state and machine X beside each sample ("x"). A G4
-        dwell reports Idle, so Idle cannot end this; the window closing at
-        the program end does, after two more kernel windows: the LASER_ON
-        count for the window in flight at the close latches up to one
-        window later and is held through the next, so the sampling runs
-        on until that count has been read."""
-        samples = []
-        period = 1.0 / sample_hz
-        t0 = time.time()
-        end = t0 + timeout
-        t_closed = None
-        while time.time() < end:
-            ctx.checkpoint()
-            smp = sample(ctx)
-            rep = g.status_report()
-            if smp:
-                smp["gstate"] = rep.get("state")
-                smp["x"] = (rep.get("MPos") or (None,))[0]
-                samples.append(smp)
-                if t_closed is None and not smp["armed"]:
-                    t_closed = time.time()
-                    end = t_closed + 2 * EMISSION_WINDOW_S
-            time.sleep(period)
-        return samples
 
     with ctx.grbl() as g, LiveJob(ctx, g):
         prepare(ctx, g)
@@ -490,7 +515,7 @@ def emission_witness(ctx):
             dark["x"] = (rep.get("MPos") or (None,))[0]
             ctx.check(dark["x"] is not None, "the controller reports no machine position: %s", rep)
             stream(g, rapid_tail)
-            tail = sample_to_disarm(g)
+            tail, t_end = sample_to_disarm(ctx, g)
         finally:
             ctx.clear_notice()
         samples = cut + [dark] + tail
@@ -545,39 +570,40 @@ def emission_witness(ctx):
         ctx.log("exhaust at the first emission sample: %s rpm (floor %.0f)",
                 ev["exhaust_at_first_fire"], floor)
     # The rapid after the M5, with the window open and FIRE clear: every
-    # sample from the dark point until the window closes reads no emission
-    # and the HV current at its idle reading, and the kernel's LASER_ON
-    # count was read in every ~1 s window of that stretch and in the one
-    # that latches after the close (the stretch runs two windows past it).
-    # A reading the daemon could not serve is a gap, never a dark sample.
-    # The head's reports place the rapid inside the stretch: out to
-    # +20 mm, then back at the start.
+    # sample from the dark point until the sampling stops (two windows and
+    # the read gap allowed past the close) reads no emission and the HV
+    # current at its idle reading, and the kernel's LASER_ON count was read
+    # in every ~1 s window of that stretch, the one that latches after the
+    # close included: the end of the sampling is the trail's last edge. A
+    # reading the daemon could not serve is a gap, never a dark sample.
+    # The head's reports place the rapid inside the window, from the dark
+    # point to the close: out to +20 mm, then back at the start.
     stretch = [dark] + tail
     x0 = dark["x"]
-    i_out = next((i for i, s in enumerate(stretch) if s.get("x") is not None and s["x"] - x0 >= 19.5), None)
-    i_back = (next((i for i in range(i_out + 1, len(stretch))
-                    if stretch[i].get("x") is not None and abs(stretch[i]["x"] - x0) < 0.05), None)
-              if i_out is not None else None)
-    closed = next((s for s in stretch if not s["armed"]), None)
+    i_out, i_back, i_closed = rapid_place(stretch, x0)
+    closed = stretch[i_closed] if i_closed is not None else None
+    armed_part = stretch if i_closed is None else stretch[:i_closed + 1]
     relit = [s for s in stretch if s["emission"]]
     hv_dark = max((s["hv"] for s in stretch if s["hv"] is not None), default=0)
-    reads = read_gaps(stretch, "emission")
-    hv_reads = read_gaps(stretch, "hv")
+    reads = read_gaps(stretch, "emission", t_end)
+    hv_reads = read_gaps(stretch, "hv", t_end)
     dt = (closed["t"] - stretch[i_back]["t"]) if (closed and i_back is not None) else None
-    ev["rapid"] = {"samples": len(stretch), "span_s": round((closed or stretch[-1])["t"] - dark["t"], 2),
-                   "x_start": x0, "x_max": max((s["x"] for s in stretch if s.get("x") is not None), default=None),
+    ev["rapid"] = {"samples": len(armed_part), "span_s": round((closed or stretch[-1])["t"] - dark["t"], 2),
+                   "x_start": x0, "x_max": max((s["x"] for s in armed_part if s.get("x") is not None), default=None),
                    "out_at_s": round(stretch[i_out]["t"] - dark["t"], 2) if i_out is not None else None,
                    "back_at_s": round(stretch[i_back]["t"] - dark["t"], 2) if i_back is not None else None,
                    "relit": [(round(s["t"] - dark["t"], 2), s["emission"]) for s in relit][:8],
                    "hv_max": hv_dark, "locked_at_dark": dark["locked"],
                    "locked_at_out": stretch[i_out]["locked"] if i_out is not None else None,
+                   "sampled_past_close_s": round(t_end - closed["t"], 2) if closed else None,
                    "emission_reads": reads, "hv_reads": hv_reads}
     ev["disarm_after_idle_s"] = round(dt, 1) if dt is not None else None
-    ctx.log("the rapid after the M5: %d samples over %.1f s from the dark point, out at +%s s, back at +%s s, "
-            "%d with emission, HV max %s; %d of %d samples carried the LASER_ON count, longest unread "
-            "stretch %s s; the window closed %s s after the head was back", len(stretch),
-            ev["rapid"]["span_s"], ev["rapid"]["out_at_s"], ev["rapid"]["back_at_s"], len(relit), hv_dark,
-            reads["read"], len(stretch), reads["gap_max_s"], ev["disarm_after_idle_s"])
+    ctx.log("the rapid after the M5: %d samples over %.1f s from the dark point to the close, out at +%s s, "
+            "back at +%s s; sampled %s s past the close, %d of %d samples with emission, HV max %s, %d of %d "
+            "carried the LASER_ON count, longest unread stretch %s s; the window closed %s s after the head "
+            "was back", len(armed_part), ev["rapid"]["span_s"], ev["rapid"]["out_at_s"], ev["rapid"]["back_at_s"],
+            ev["rapid"]["sampled_past_close_s"], len(relit), len(stretch), hv_dark, reads["read"],
+            len(stretch), reads["gap_max_s"], ev["disarm_after_idle_s"])
     ctx.check(armed_seen, "the armed window was never observed (arm refused, or no button press)")
     ctx.check(peak > 0, "no emission witnessed on the square (emission_samples stayed 0)")
     first_idle_fire = ev["idle_airflow_fire"][0] if idle_fire else (None, None, None)
@@ -592,8 +618,9 @@ def emission_witness(ctx):
     ctx.check(hv and max(hv) > min(hv), "HV current did not rise during the burn (%s..%s)",
               ev["hv_min"], ev["hv_max"])
     ctx.check(i_out is not None and i_back is not None,
-              "the rapid did not run inside the dark stretch: out at %s, back at %s (X from %s, max %s)",
-              ev["rapid"]["out_at_s"], ev["rapid"]["back_at_s"], x0, ev["rapid"]["x_max"])
+              "the rapid did not run inside the dark stretch with the window open: out at %s, back at %s "
+              "(X from %s, max %s), the window closed at %s", ev["rapid"]["out_at_s"], ev["rapid"]["back_at_s"],
+              x0, ev["rapid"]["x_max"], round(closed["t"] - dark["t"], 2) if closed else None)
     ctx.check(stretch[i_out]["locked"] is False, "the laser latch was locked with the head at +20 mm "
               "(laser_locked %s): the rapid ran unarmed", stretch[i_out]["locked"])
     ctx.check(reads["read"] >= RAPID_MIN_READS and reads["gap_max_s"] is not None
@@ -609,7 +636,7 @@ def emission_witness(ctx):
               hv_reads["read"], len(stretch), RAPID_MIN_READS)
     ctx.check(hv_dark <= HV_DARK_MAX, "HV current %s after the M5 (idle reads ~0): the discharge ran "
               "through the rapid", hv_dark)
-    ctx.check(dt is not None and dt < 10.0,
+    ctx.check(dt is not None and 0 <= dt < 10.0,
               "the M2 job did not disarm promptly (%s s after the head was back; the idle grace is ~60 s)",
               ev["disarm_after_idle_s"])
     ctx.check(gap["button_latch_unlocked_samples"] and gap["button_latch_unlocked_max"] == 0,
