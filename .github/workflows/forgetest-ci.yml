@@ -158,7 +158,11 @@ jobs:
 
       - name: Coverage lint (enforced)
         working-directory: forgefirm/forgetest
-        run: python -B -m forgetest.coverage --manifest ../tree-manifest.json --enforce | tee "$GITHUB_STEP_SUMMARY"
+        # The step runs under bash -e with no pipefail of its own: set here,
+        # the status of the step is the lint's, not tee's.
+        run: |
+          set -o pipefail
+          python -B -m forgetest.coverage --manifest ../tree-manifest.json --enforce | tee "$GITHUB_STEP_SUMMARY"
 
       - name: Gate self-check on the tree manifest
         working-directory: forgefirm
