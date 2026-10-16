@@ -316,6 +316,21 @@ class PackLicensesTests(unittest.TestCase):
             self.assertIn("common-licenses/license.manifest", t.getnames())
         self.assertFalse(os.path.exists(self.tree))
 
+    def test_a_license_text_tar_cannot_read_is_refused_and_the_tree_left(self):
+        """A member tar cannot read fails the pack, bundle removed and tree
+        left: the manifest check alone passes a bundle truncated after it."""
+        if os.geteuid() == 0:
+            self.skipTest("root reads every file")
+        self.make_tree(self.RECIPES)
+        d = os.path.join(self.tree, "zlib")                 # sorts after license.manifest
+        os.makedirs(d)
+        locked = os.path.join(d, "generic_Zlib")
+        with open(locked, "w") as f:
+            f.write("zlib license\n")
+        os.chmod(locked, 0)                              # rmtree still unlinks it
+        self.assertRefused(self.pack())
+        self.assertTrue(os.path.isfile(self.manifest))
+
 
 class RootfsLintTests(unittest.TestCase):
     """rootfs-lint.sh, the image's last rootfs step, on a fixture tree: a

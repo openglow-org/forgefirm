@@ -31,8 +31,11 @@ done
 
 base=$(basename "$dir")
 mkdir -p "$(dirname "$out")" || fail "cannot make the directory of $out"
+# tar runs the compressor itself, so its exit status covers both: a
+# member it cannot read fails the pack, and a failed pack leaves no bundle.
 tar -C "$(dirname "$dir")" --sort=name --mtime=@0 --owner=0 --group=0 \
-    --numeric-owner -cf - "$base" | gzip -9 -n > "$out" || fail "cannot write $out"
+    --numeric-owner -I 'gzip -9 -n' -cf "$out" "$base" \
+    || { rm -f "$out"; fail "cannot pack $dir into $out"; }
 # the tree goes only once the bundle holds its manifest
 tar -tzf "$out" "$base/license.manifest" > /dev/null 2>&1 \
     || fail "$out holds no $base/license.manifest"
