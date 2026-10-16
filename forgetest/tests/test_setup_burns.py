@@ -290,6 +290,9 @@ class BurnRunTests(unittest.TestCase):
         self.saved_root = os.environ.get("GF_SYSFS_ROOT")
         os.environ["GF_SYSFS_ROOT"] = self.sysfs + "/"
         self.fake = helpers.FakeForgectrl().start()
+        # the head at its home against the gantry stops, X and Y referenced
+        # by a manual home (the fake's pos is X0 Y0 Z0)
+        self.fake.state["status"].update({"homed": True, "homed_axes": 7, "home_source": "manual"})
         self.daemon = ScriptedDaemon(self.fake)
         self.poll = setup_dark.POLL_S
         setup_dark.POLL_S = 0.01
@@ -333,6 +336,10 @@ class BurnRunTests(unittest.TestCase):
         self.assertNotIn("lens_hall_edge_z_mm", start)
         self.assertEqual((start["lens_stop_below_steps"], start["lens_stop_above_steps"]), ("14", "20"))
         self.assertEqual(run.evidence["result"]["emission"]["hv_max"], 610)
+        # the head's place on record before the start, judged at X0 Y0
+        self.assertEqual(run.evidence["head_at_start"],
+                         {"pos": {"x": 0.0, "y": 0.0, "z": 0.0}, "homed_axes": 7, "home_source": "manual",
+                          "judged": True})
         # the witnesses read from here at every poll: each at its peak
         seen = run.evidence["emission_seen"]
         self.assertEqual((seen["laser_on_max"], seen["hv_max"]), (118, 431))
@@ -428,6 +435,27 @@ class BurnRunTests(unittest.TestCase):
             self.run_test("setup.focus")
         self.assertIn("the tube current never rose", str(cm.exception))
         self.assert_found()
+
+    def test_a_head_off_its_home_fails_before_any_start(self):
+        # X and Y referenced by a manual home, and the head 12.5 mm from
+        # the stops: nothing starts, no controller lever is touched.
+        self.fake.state["status"]["pos"] = {"x": 12.5, "y": 0.0, "z": 0.0}
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.focus")
+        self.assertIn("not at its home", str(cm.exception))
+        self.assertEqual(self.daemon.order, [])
+        self.assertEqual(self.daemon.lever_posts(), [])
+        self.assert_found()
+
+    def test_an_unreferenced_head_runs_on_the_operators_word(self):
+        # A fresh controller's counters-only position places nothing: the
+        # read is recorded, not judged, and the burn runs.
+        self.fake.state["status"].update({"homed": False, "homed_axes": 4, "home_source": "startup",
+                                          "pos": {"x": 12.5, "y": 0.0, "z": 0.0}})
+        run = self.run_test("setup.focus")
+        self.assertEqual(run.evidence["head_at_start"]["judged"], False)
+        self.assertEqual(run.evidence["head_at_start"]["home_source"], "startup")
+        self.assertEqual(self.daemon.order, ["laser.focus"])
 
     def test_a_burn_the_test_itself_never_saw_fails_and_still_restores(self):
         # The burn's result reports a lit burn, and the test's own reads

@@ -43,8 +43,11 @@ BURN_COVERS = [("forgectrl", "src/wizlive.*"), ("forgectrl", "src/wizrun.h"),
 
 # Every burn asks first that the gantry stops are installed and the head
 # is at its home against them; the bench's head stands there, and every
-# burn's tail brings it back.
+# burn's tail brings it back. head_at_home reads the head's place from
+# /status before the wizard starts and judges it at X0 Y0, within
+# HOME_TOL_MM, when a manual home references X and Y.
 HOME = "The head is home"
+HOME_TOL_MM = 0.05
 EDGE_KEY = "lens_hall_edge_z_mm"
 FOCUS_KEYS = ["thickness_mm", "z_passes", "ladder_z", "window", "emission", "pick", "picked_lines",
               "pick_half_steps", "edge_z_mm", "steps_per_mm", "max_height_mm", "focus_range_mm", "summary"]
@@ -78,6 +81,45 @@ class Witnesses:
 
     def record(self):
         return {"laser_on_max": self.laser_on_max, "hv_max": self.hv_max, "reads": self.reads}
+
+
+def head_at_home(ctx):
+    """The head's place on record before the wizard starts, read from
+    /status under the campaign's own controller: the wizard restarts the
+    controller before its home prompt, and a fresh controller drops the
+    X/Y reference, so a read at that prompt places nothing. Judged at
+    X0 Y0 within HOME_TOL_MM when X and Y are referenced by a manual
+    home, the one provider that declares X0 Y0 at the gantry stops.
+    Unreferenced, the head's place rests on the operator's word at the
+    ready gate, and the record says so."""
+    fc = ctx.forgectrl
+    read = {}
+
+    def served():
+        st = fc.status()
+        if not isinstance(st.get("pos"), dict):
+            return False
+        read.update(st)
+        return True
+    took = ctx.wait_for(served, 10)
+    ctx.check(took is not None, "/status served no head position within 10 s: the head's place cannot "
+              "go on record before the burn")
+    pos = read.get("pos") or {}
+    axes = read.get("homed_axes")
+    source = read.get("home_source")
+    referenced = isinstance(axes, int) and (axes & 3) == 3 and source == "manual"
+    ctx.evidence["head_at_start"] = {"pos": pos, "homed_axes": axes, "home_source": source,
+                                     "judged": referenced}
+    if not referenced:
+        ctx.log("the head's place rests on the operator's word at the ready gate (X and Y unreferenced: "
+                "homed_axes %s, home_source %s, pos %s)", axes, source, pos)
+        return
+    x, y = pos.get("x"), pos.get("y")
+    at_home = (isinstance(x, (int, float)) and isinstance(y, (int, float))
+               and abs(x) <= HOME_TOL_MM and abs(y) <= HOME_TOL_MM)
+    ctx.check(at_home, "the head is not at its home against the gantry stops: /status reads pos %s with X "
+              "and Y referenced by a manual home; home it there before the burn", pos)
+    ctx.log("the head is home on record: pos %s, X and Y referenced by a manual home", pos)
 
 
 def preview_ok(ctx, wid):
@@ -267,9 +309,12 @@ def focus_window_ok(ctx, r, before):
              "the button again at the arm, as the page asks.",
              "Nothing else: the test answers every prompt itself and puts back the setting the "
              "burn writes."],
-      description="The focus burn as a fresh head runs it: the edge setting is cleared first, so "
-                  "the burn starts from the bench reference's edge, while the lens window stays "
-                  "the one the Lens travel check wrote (or the fallback). POST "
+      description="The focus burn as a fresh head runs it. Before anything starts, the head's "
+                  "place is read from /status and recorded: judged at X0 Y0 when a manual home "
+                  "references X and Y, else left to the operator's word at the ready gate. The "
+                  "edge setting is cleared, so the burn starts from the bench reference's edge, "
+                  "while the lens window stays the one the Lens travel check wrote (or the "
+                  "fallback). POST "
                   "/wiz/laser.focus/start is answered that the gantry stops are installed, "
                   "references the lens, takes the controller in loopback posture, is answered that "
                   "the head is home and that the scrap is in the corner, and takes the thickness "
@@ -328,6 +373,7 @@ def focus(ctx):
             ctx.log("the controller could not be restarted on the settings as found: %s", e)
     ctx.ready("The focus burn: twelve lines on the scrap after a press. The bench presses when the "
               "button lights.")
+    head_at_home(ctx)
     try:
         with Restore(ctx, [EDGE_KEY] + LENS_WINDOW_KEYS):
             # A fresh head's focus: the edge unknown, so the burn runs from the
