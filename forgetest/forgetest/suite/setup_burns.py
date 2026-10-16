@@ -176,9 +176,6 @@ def emission_ok(ctx, last, seen):
               "the result does not record the beam sensor: %s", e)
     ctx.log("the beam sensor rose %s (seen: %s)", e.get("thermopile_delta"), e.get("beam_sensor_seen"))
     w = seen.record()
-    ctx.evidence["emission_seen"] = w
-    ctx.log("seen from here: LASER_ON count peak %s, tube current peak %s over %d polls",
-            w["laser_on_max"], w["hv_max"], w["reads"])
     ctx.check(w["reads"] > 0, "the test could not read the witnesses from sysfs during the burn")
     ctx.check((w["laser_on_max"] or 0) > 0,
               "the kernel's LASER_ON count never read nonzero from here during the burn (%d reads); the "
@@ -231,6 +228,12 @@ def burn(ctx, wid, arm, pick, want):
         last = run_check(ctx, wid, on_prompt, 900, on_poll=seen)
     finally:
         ctx.clear_notice()
+        # What the test read itself goes on record however the burn ends:
+        # reported dark, failed, timed out, or aborted.
+        w = seen.record()
+        ctx.evidence["emission_seen"] = w
+        ctx.log("seen from here: LASER_ON count peak %s, tube current peak %s over %d polls",
+                w["laser_on_max"], w["hv_max"], w["reads"])
     emission_ok(ctx, last, seen)
     r = last.get("result") or {}
     missing = [k for k in want if k not in r]

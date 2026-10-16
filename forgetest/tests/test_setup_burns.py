@@ -314,7 +314,7 @@ class BurnRunTests(unittest.TestCase):
 
     def run_test(self, tid):
         t = catalog.load_suite()[tid]
-        run = Run("test", t.id, t.title)
+        run = self.run = Run("test", t.id, t.title)     # kept for a run that fails
         run.unattended = True           # the ready gate passes; the arm cue is a notice
         t.fn(Context(run, None, t))
         return run
@@ -434,6 +434,9 @@ class BurnRunTests(unittest.TestCase):
         with self.assertRaises(Failed) as cm:
             self.run_test("setup.focus")
         self.assertIn("the tube current never rose", str(cm.exception))
+        # what the test read itself is on record beside the daemon's word
+        seen = self.run.evidence["emission_seen"]
+        self.assertEqual((seen["laser_on_max"], seen["hv_max"]), (118, 431))
         self.assert_found()
 
     def test_a_head_off_its_home_fails_before_any_start(self):
@@ -468,6 +471,15 @@ class BurnRunTests(unittest.TestCase):
         self.assertIn("LASER_ON count never read nonzero", str(cm.exception))
         self.assert_found()
         self.assert_restarted_on_found()
+
+    def test_a_burn_whose_tube_current_the_test_never_saw_rise_fails(self):
+        # The LASER_ON count read nonzero from here, and the tube current
+        # never left zero: the second witness is judged on its own reads.
+        self.plant("pic/hv_current", "0")
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.focus")
+        self.assertIn("tube current never read over %d from here" % setup_burns.HV_ON, str(cm.exception))
+        self.assert_found()
 
     def test_a_burn_with_a_silent_beam_sensor_passes(self):
         # A head whose beam sensor gives no output: the tube current and
@@ -511,6 +523,7 @@ class BurnRunTests(unittest.TestCase):
         with self.assertRaises(Aborted):
             t.fn(Context(run, None, t))
         self.assertEqual(self.daemon.aborted, ["laser.focus"])
+        self.assertIn("emission_seen", run.evidence)    # the test's own reads, on record all the same
         self.assert_found()
         self.assert_restarted_on_found()
 
