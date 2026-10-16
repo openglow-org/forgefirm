@@ -326,6 +326,9 @@ class CoverageReportTests(unittest.TestCase):
         self.assertFalse(self._runs(step % "    if: ${{ always() }}\n", test))
         self.assertTrue(self._runs(step % "    if: true\n", test))
         self.assertTrue(self._runs(step % "    if: 'true'\n", test))
+        # however the step is spelled: more than one space after its dash, or a quoted key
+        self.assertFalse(self._runs("steps:\n  -   run: ./build/tray_test\n      if: false\n", test))
+        self.assertFalse(self._runs(step % "    \"if\": false\n", test))
         # a step whose failure the run tolerates proves nothing; literally false is no tolerance
         self.assertFalse(self._runs(step % "    continue-on-error: true\n", test))
         self.assertFalse(self._runs(step % "    continue-on-error: ${{ inputs.soft }}\n", test))

@@ -119,13 +119,13 @@ BEHAVIORAL = [
 # "forgefirm" for this repository (the null-sink harnesses under
 # scripts/bench/, which grblhal-glowforge's workflow runs). The workflow
 # must run the host test: on push or pull request, in a step that runs on
-# every run of the workflow and whose failure fails it (no `if:` and no
-# `continue-on-error:` on the step or its job), and name it, or discover it
-# (a glob, unittest discover, pytest on its directory). A host-tested path
-# counts as covered in the coverage lint, and like every path no test
-# covers it is in no fingerprint: a change there makes no acceptance run
-# necessary. A path a catalog test exercises on the hardware belongs in
-# that test's covers, not here.
+# every run of the workflow and whose failure fails it (no `if:` other than
+# `true` and no `continue-on-error:` other than `false` on the step or its
+# job), and name it, or discover it (a glob, unittest discover, pytest on
+# its directory). A host-tested path counts as covered in the coverage
+# lint, and like every path no test covers it is in no fingerprint: a
+# change there makes no acceptance run necessary. A path a catalog test
+# exercises on the hardware belongs in that test's covers, not here.
 HOST_TESTED = [
     # An extension package's holds as the engine reads them (forgeext's
     # holdkeep_test and run_test prove the writer's side).
@@ -418,7 +418,8 @@ def repo_name(manifest, repo):
 _STEP_KEYS = ("name", "uses", "run", "id", "if", "with", "env", "working-directory", "shell",
               "continue-on-error", "timeout-minutes")
 _STEP_RX = re.compile(r"^(\s*)-\s+(%s)\s*:" % "|".join(re.escape(k) for k in _STEP_KEYS))
-_KEY_RX = re.compile(r"^(\s*)([\w-]+)\s*:\s*(.*)$")
+# A mapping key, plain or quoted ("if": is the same key as if:).
+_KEY_RX = re.compile(r"""^(\s*)["']?([\w-]+)["']?\s*:\s*(.*)$""")
 _ON_RX = re.compile(r"""^(?:on|"on"|'on')\s*:\s*(.*)$""")
 # What a job or a step says about whether it runs on every run of the
 # workflow, and whether its failure fails the run.
@@ -515,7 +516,9 @@ def workflow_steps(text):
             i += 1
             continue
         dash = len(m.group(1))
-        body = [" " * (dash + 2) + lines[i][dash + 1:].lstrip()]
+        # The dash becomes a space, nothing realigned: the first key stays at
+        # the column the step's other keys use, however many spaces follow it.
+        body = [" " * (dash + 1) + lines[i][dash + 1:]]
         i += 1
         while i < len(lines) and (not lines[i].strip() or _indent(lines[i]) > dash):
             body.append(lines[i])
