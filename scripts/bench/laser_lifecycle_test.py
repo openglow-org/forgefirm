@@ -945,7 +945,7 @@ def test_cancel_and_abort():
 
         s.send_raw("M5")
         s.send_raw("G91")
-        s.send_raw("G1 X30 F600")                       # 3 s
+        s.send_raw("G1 X120 F3000")                     # 2.4 s
         if not s.wait_state("Run", 5):
             fail("[cancel-abort] the move never reported Run (state %s)" % s.state())
         time.sleep(0.5)
@@ -957,7 +957,7 @@ def test_cancel_and_abort():
             fail("[cancel-abort] ^X mid-move did not ask the kernel to stop with its ramp "
                  "(no cnc/stop write)")
         x2 = s.mpos_x()
-        if x2 is None or not 0.5 < x2 - x1 < 29.5:
+        if x2 is None or not 0.5 < x2 - x1 < 119.5:
             fail("[cancel-abort] the abort did not keep a plausible position (X %s from %.3f)" % (x2, x1))
         moved = s.shipped_x_steps()
         if abs(x2 * spm - moved) > 0.5:
