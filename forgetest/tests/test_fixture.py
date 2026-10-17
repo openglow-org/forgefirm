@@ -40,6 +40,8 @@ class FakeFixture:
         self.button_enabled = button_enabled
         self.calls = []
         self.presses = 0            # presses the device performed
+        self.reply_delay = 0.0      # seconds between a press and its reply
+        self.replied = 0            # delayed replies the device is done with (sent or lost)
         srv = self
 
         class H(BaseHTTPRequestHandler):
@@ -95,6 +97,14 @@ class FakeFixture:
                     threading.Timer(0.05, lambda: srv.state.__setitem__("button", "idle")).start()
                     s = self._state()
                     s["pulse_ms"] = 200
+                    if srv.reply_delay:
+                        time.sleep(srv.reply_delay)     # the reply comes after the client gave up
+                        try:
+                            self._json(200, s)
+                        except OSError:
+                            pass
+                        srv.replied += 1
+                        return None
                     return self._json(200, s)
                 if self.path == "/release":
                     srv.state = {"lid": "closed", "interlock": "closed", "button": "idle"}
@@ -108,6 +118,11 @@ class FakeFixture:
     def stop(self):
         self.httpd.shutdown()
         self.httpd.server_close()
+
+    def wait_replied(self, n, timeout=5.0):
+        deadline = time.time() + timeout
+        while self.replied < n and time.time() < deadline:
+            time.sleep(0.02)
 
 
 class ConfigTests(unittest.TestCase):
@@ -155,11 +170,11 @@ class ClientTests(unittest.TestCase):
         self.resolved.append(hostname)
         return "127.0.0.1"
 
-    def client(self, **over):
+    def client(self, timeout=3.0, resolver=None, **over):
         cfg = {"hostname": "forgefixture", "key": KEY, "channels": ["lid", "interlock", "button"],
                "port": self.dev.port}
         cfg.update(over)
-        return fx.Fixture(cfg, resolver=self.resolver)
+        return fx.Fixture(cfg, timeout=timeout, resolver=resolver or self.resolver)
 
     def test_status_covers_act_release(self):
         f = self.client()
@@ -195,6 +210,35 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(fx.FixtureError) as cm:
             f.act("button", "press")
         self.assertIn("jumper", str(cm.exception))
+
+    def test_a_failure_after_the_request_went_out_says_so(self):
+        # The press made and its reply lost (it comes after the client's
+        # timeout): sent, one press. A refusal, a failed lookup and a
+        # refused connect: not sent, no press. The one retry keeps it.
+        self.dev.reply_delay = 0.6
+        with self.assertRaises(fx.FixtureError) as cm:
+            self.client(timeout=0.2, ip="127.0.0.1").act("button", "press")
+        self.assertTrue(cm.exception.sent)
+        self.dev.wait_replied(1)
+        self.assertEqual(self.dev.presses, 1)
+        answers = ["127.0.0.1"]                 # the refresh lookup after the timeout finds nothing
+        with self.assertRaises(fx.FixtureError) as cm:
+            self.client(timeout=0.2, resolver=lambda h: answers.pop(0) if answers else None).act("button", "press")
+        self.assertTrue(cm.exception.sent)
+        self.dev.wait_replied(2)
+        self.assertEqual(self.dev.presses, 2)
+        self.dev.reply_delay = 0.0
+        self.dev.button_enabled = False
+        with self.assertRaises(fx.FixtureError) as cm:
+            self.client(ip="127.0.0.1").act("button", "press")
+        self.assertFalse(cm.exception.sent)
+        with self.assertRaises(fx.FixtureError) as cm:
+            self.client(resolver=lambda h: None).act("button", "press")
+        self.assertFalse(cm.exception.sent)
+        with self.assertRaises(fx.FixtureError) as cm:
+            self.client(timeout=0.5, ip="127.0.0.1", port=1).act("button", "press")
+        self.assertFalse(cm.exception.sent)
+        self.assertEqual(self.dev.presses, 2)
 
     def test_a_wrong_key_is_refused(self):
         f = self.client(key="wrong")
@@ -631,7 +675,7 @@ class RoutingTests(unittest.TestCase):
             # press was taken, and no notice asks for a second one.
             def pressed_then_failed(channel, state, ms=None):
                 lit["v"] = False                         # the controller takes the press
-                raise fx.FixtureError("timed out")
+                raise fx.FixtureError("timed out", sent=True)
             self.stub.act = pressed_then_failed
             lit["v"] = True
             self.assertTrue(ctx.press_now())
@@ -644,6 +688,25 @@ class RoutingTests(unittest.TestCase):
                 time.sleep(0.02)
             time.sleep(0.1)
             self.assertEqual(ctx.evidence["actions"][-1]["by"], "fixture")
+            self.assertIsNone(run.notice)
+            # A refusal (or a request that never reached the box) while the
+            # button went out: a press at the machine was taken, so no notice
+            # goes up either, and the record does not give it to the box.
+            def refused_while_pressed(channel, state, ms=None):
+                lit["v"] = False                         # a person's press is taken
+                raise fx.FixtureError("button press -> 409 button disabled: the enable jumper is out")
+            self.stub.act = refused_while_pressed
+            lit["v"] = True
+            self.assertFalse(ctx.press_now())
+            self.assertIsNone(run.notice)
+            self.assertEqual(ctx.evidence["actions"][-1]["by"], "operator")
+            lit["v"] = True
+            self.assertTrue(ctx.arm_press())
+            deadline = time.time() + 2
+            while "fixture_error" not in ctx.evidence["actions"][-1] and time.time() < deadline:
+                time.sleep(0.02)
+            time.sleep(0.1)
+            self.assertEqual(ctx.evidence["actions"][-1]["by"], "operator")
             self.assertIsNone(run.notice)
         finally:
             runner_mod.hw.button_lit = saved

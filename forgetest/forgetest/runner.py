@@ -485,7 +485,7 @@ class Context:
         except _fixture.FixtureError as e:
             rec["fixture_error"] = str(e)
             if self._press_taken(rec, e):
-                return True
+                return rec["by"] == "fixture"
             self.log("ARM press: fixture failed (%s) - asking the operator", e)
             self.notice(text)
             self._clear_when_taken()
@@ -496,16 +496,23 @@ class Context:
 
     def _press_taken(self, rec, err):
         """After the box reported a failed press of a lit button: True when
-        the button is out, so the controller took a press (the box pressed
-        and its reply was lost). The press is recorded as the box's, and
-        no notice goes up, because it would ask for a second press, and a
-        press during the job pauses it. A button still lit, or unreadable,
-        is False: the operator is asked."""
+        the button is out, so the controller took a press. No notice goes
+        up then, because it would ask for a second press, and a press during
+        the job pauses it. The press is recorded as the box's only when its
+        request went out and the failure came after it (err.sent: the box
+        pressed and its reply was lost). After a refusal, a failed lookup
+        or a failed connect the box made no press, and the record stays as
+        it was: the press was a person's. A button still lit, or
+        unreadable, is False: the operator is asked."""
         if hw.button_lit() is not False:
             return False
-        rec["by"] = "fixture"
-        self.log("ARM press: the fixture reported a failure (%s), and the button is out: the press "
-                 "was taken; no notice", err)
+        if getattr(err, "sent", False):
+            rec["by"] = "fixture"
+            self.log("ARM press: the fixture reported a failure (%s), and the button is out: the press "
+                     "was taken; no notice", err)
+        else:
+            self.log("ARM press: the fixture made no press (%s), and the button is out: a press was "
+                     "taken all the same; no notice", err)
         return True
 
     def _clear_when_taken(self, lit_timeout=ARM_LIT_WAIT_S):

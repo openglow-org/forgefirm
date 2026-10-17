@@ -43,7 +43,14 @@ PULSE_WAIT_S = 1.5              # a pulse in progress ends within the firmware's
 
 
 class FixtureError(Exception):
-    pass
+    """A request the fixture did not carry out as asked. `sent` is True
+    when the failure came after the request went out (no reply, or a
+    reply cut off), so the box may have acted on it; a refusal, a failed
+    lookup and a failed connect leave it False."""
+
+    def __init__(self, *args, sent=False):
+        super().__init__(*args)
+        self.sent = sent
 
 
 # ---------------------------------------------------------------- mDNS
@@ -271,11 +278,20 @@ class Fixture:
                 body = {}
             return e.code, body
         except (urllib.error.URLError, socket.timeout, OSError) as e:
+            # urllib raises a failed connect or send as a URLError; a
+            # timeout or a reset after the request went out comes bare, and
+            # the box may have acted on the request
+            sent = not isinstance(e, urllib.error.URLError)
             if retry and not self.ip_override:
-                # the address may have moved: one fresh lookup, one retry
-                self.address(refresh=True)
-                return self._request(method, path, body, retry=False)
-            raise FixtureError("fixture %s: %s %s: %s" % (self.where(), method, path, e))
+                # the address may have moved: one fresh lookup, one retry,
+                # and a failure of either still says the first one went out
+                try:
+                    self.address(refresh=True)
+                    return self._request(method, path, body, retry=False)
+                except FixtureError as again:
+                    again.sent = again.sent or sent
+                    raise
+            raise FixtureError("fixture %s: %s %s: %s" % (self.where(), method, path, e), sent=sent)
 
     def status(self):
         st, body = self._request("GET", "/")
