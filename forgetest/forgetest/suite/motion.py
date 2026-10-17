@@ -202,7 +202,7 @@ def pacing(ctx):
                   "Then a soft reset (^X) during a 60 mm G1 at F3000: the kernel ramps the motion "
                   "down (its tick rate falls before the run ends) and leaves running with no "
                   "underrun and no fault, the ring is empty after the reset, MPos matches the "
-                  "kernel's step counters within a step after $X, the homed mask is kept, the sender "
+                  "kernel's step counters within half a step after $X, the homed mask is kept, the sender "
                   "is not told the position is lost, and a jog back by the MPos distance returns "
                   "the kernel's X counter to its start within a step. "
                   "No jog refused, every move returns to Idle, position drift within 0.05 mm, and "
@@ -386,16 +386,24 @@ def jog_roundtrip(ctx):
                          "ended at speed, not on the ramp" % (100 * tail["fraction"], f0, 1e3 * tail["window_s"]))
         if rec["ring_after"]:
             fails.append("the ring still holds %d bytes after the reset: the clear did not run" % rec["ring_after"])
-        # The read-back is exact. The kernel counts X_DIR set as -X, so
-        # the sign of its X count is the one this +X move gave it.
+        # The read-back is exact, and the judge allows half a step. The
+        # smallest miss the read-back can make is one step: the core's
+        # kill step for the pulse start that never came, which a position
+        # kept as the core counted it carries. MPos is reported to
+        # 0.001 mm, so the difference of two readings carries up to 0.21
+        # step at x32 (0.05 at x8): a correct read-back lands within
+        # that, a one-step miss at 0.79 step or more, and a one-step
+        # tolerance would let the miss land on either side of it. The
+        # kernel counts X_DIR set as -X, so the sign of its X count is
+        # the one this +X move gave it.
         if abs(kd[0]) < spm[0] or md[0] <= 0:
             fails.append("the move did not reach the kernel or MPos: kernel X %+d steps, MPos X %+.1f steps"
                          % (kd[0], md[0]))
-        elif abs(abs(kd[0]) - md[0]) > 1.0:
+        elif abs(abs(kd[0]) - md[0]) > 0.5:
             fails.append("MPos X moved %.1f steps and the kernel played %d: the position was not read back "
                          "from the kernel's counters" % (md[0], abs(kd[0])))
         for a, name in ((1, "Y"), (2, "Z")):
-            if kd[a] or abs(md[a]) > 1.0:
+            if kd[a] or abs(md[a]) > 0.5:
                 fails.append("%s moved under an X move: kernel %+d steps, MPos %+.1f steps" % (name, kd[a], md[a]))
         # The reference is kept.
         if h1 != h0:
