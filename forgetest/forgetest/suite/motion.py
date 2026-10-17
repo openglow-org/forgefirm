@@ -191,18 +191,221 @@ def pacing(ctx):
     ctx.log("PASS: idle %.1f%%, moving %.1f%%, parked %.1f%%, hold/resume exact", idle, moving, parked)
 
 
-@test("motion.jog-roundtrip", title="Motion quality: bounded jogs, max rate, diagonal, hold/resume",
+@test("motion.jog-roundtrip", title="Motion quality: bounded jogs, max rate, diagonal, hold/resume, "
+                                   "a soft reset during a move",
       subsystem="motion", kind="auto", mode="grbl", est_min=3,
-      covers=_MOTION_COVERS, requires=["kernel.latch-locked-idle"],
+      covers=_MOTION_COVERS, requires=["kernel.latch-locked-idle", "kernel.k1-k2"],
       steps=["Setup: the head parked with at least 60 mm of free +X and 40 mm of free +Y travel; "
              "bed clear, lid closed."],
       description="Sanity jogs (X, Y 40 mm out/back at F2400), max-rate X out/back (60 mm at "
                   "F12000), a diagonal out/back, then a G1 with a feed-hold/resume in the middle. "
+                  "Then a soft reset (^X) during a 60 mm G1 at F3000: the kernel ramps the motion "
+                  "down (its tick rate falls before the run ends) and leaves running with no "
+                  "underrun and no fault, the ring is empty after the reset, MPos matches the "
+                  "kernel's step counters within a step after $X, the homed mask is kept, the sender "
+                  "is not told the position is lost, and a jog back by the MPos distance returns "
+                  "the kernel's X counter to its start within a step. "
                   "No jog refused, every move returns to Idle, position drift within 0.05 mm, and "
                   "the head accelerometer - the supervisor's own motion witness - saw the head move "
                   "on every jog it could sample; the counters alone are not proof of motion.")
 def jog_roundtrip(ctx):
     ev = ctx.evidence
+
+    def reset_during_move(g):
+        """A soft reset during a move, from rest with the head at the start:
+        the kernel's ramp, the position read back from its step counters,
+        the reference kept, and the head jogged back. The readings go to the
+        evidence; the failures are returned, for the caller to judge once
+        the head is back."""
+        fc = ctx.forgectrl
+        machine_idle(ctx)
+        g.drain()
+        spm = [grbl_setting(g, k) for k in ("$100", "$101", "$102")]
+        ctx.check(all(spm), "the step scales did not read back ($100 %s, $101 %s, $102 %s)", *spm)
+        f0 = hw.sysfs_int("cnc/step_freq")
+        ramp = hw.sysfs_int("cnc/ramp_rate")
+        ctx.check(f0 and ramp, "cnc/step_freq %s, cnc/ramp_rate %s: the kernel's tick is unreadable",
+                  f0, ramp)
+        under0, faults0 = hw.sysfs_int("cnc/underruns"), hw.sysfs_read("cnc/faults")
+        p0 = _kernel_position()
+        m0 = g.status_report().get("MPos")
+        h0 = _port_state(fc).get("homed")
+        ctx.check(m0, "no MPos in the status report before the reset")
+        # The mask comes from the controller port's state record: $# prints
+        # its [HOME:...:mask] line only with $22 on, which the driver
+        # leaves off. The driver always holds the Z bit (the lens hold);
+        # without it the mask could not tell a kept reference from a
+        # dropped one.
+        ctx.check(isinstance(h0, int) and h0 & 4,
+                  "the homed mask reads %r before the reset: the lens hold (Z, 4) is not in it, so "
+                  "the mask cannot witness the reset", h0)
+        log0 = _log_offset(GRBLHAL_LOG)
+        rec = {"step_freq": f0, "ramp_rate": ramp, "spm": spm, "kernel_before": list(p0),
+               "mpos_before": list(m0), "homed_before": h0}
+        r = g.command("G91G1X60F3000", timeout=0.5)
+        ctx.check(not any(x.startswith("error") for x in r), "the 60 mm G1 was refused: %s", r)
+        ctx.check(wait_state(ctx, g, "Run", 2.0), "the 60 mm G1 did not start (no Run within 2 s)")
+        # The kernel's run starts a queue depth behind the core's; the ^X
+        # lands 0.3 s into it, with the head at its cruise (the move takes
+        # 1.2 s, its acceleration 71 ms).
+        ok = ctx.wait_for(lambda: hw.sysfs_read("cnc/state") == "running", 1.0, poll=0.01)
+        ctx.check(ok is not None, "the kernel did not start the 60 mm G1 within 1 s of Run (cnc/state %s)",
+                  hw.sysfs_read("cnc/state"))
+        time.sleep(0.3)
+        kx = _kernel_position()
+        kstate = hw.sysfs_read("cnc/state")
+        ctx.check(kstate == "running", "the kernel was %s at the ^X: the move had ended before it", kstate)
+        g.realtime(0x18)
+        t_x = time.time()
+        # The stop: the kernel leaves running, polled at 5 ms. Each sample
+        # is the time after the ^X, the state, the bytes played and the
+        # bytes handed (the position record).
+        samples = []
+        while True:
+            st = hw.sysfs_read("cnc/state")
+            pos = _kernel_position()
+            t = time.time() - t_x
+            samples.append((t, st, pos[3], pos[4]))
+            if st != "running" or t > 1.0:
+                break
+            time.sleep(0.005)
+        state = None
+        end = t_x + 2.0
+        while time.time() < end:
+            state = g.status_report()["state"]
+            if state.startswith("Alarm"):
+                break
+            time.sleep(0.05)
+        rec.update({"t_x": round(t_x, 3), "queue_at_x": kx[4] - kx[3], "kernel_end_state": samples[-1][1],
+                    "left_running_s": round(samples[-1][0], 4), "samples": len(samples),
+                    "state_after_x": state})
+        ev["reset"] = rec
+        if not (state or "").startswith("Alarm"):
+            if (state or "").startswith("Idle"):
+                ctx.fail("the move had ended before the ^X: the controller is Idle with no alarm")
+            ctx.fail("the controller was not in Alarm within 2 s of the ^X (state %s)", state)
+
+        # The read-back ends inside a second of the reset, and the core's
+        # re-init flushes what it has read: the unlock goes after both.
+        ctx.sleep(max(0.0, t_x + 2.0 - time.time()))
+        text = g.drain()
+        r = g.command("$X")
+        text += "\n".join(r) + "\n"
+        rec["unlock"] = r
+        ctx.check(r and r[-1] == "ok", "$X after the reset answered %s", r)
+        ctx.check(wait_state(ctx, g, "Idle", 5.0), "the controller is not Idle after $X")
+        machine_idle(ctx)
+        text += g.drain()
+        m1 = g.status_report().get("MPos")
+        p1 = _kernel_position()
+        h1 = _port_state(fc).get("homed")
+        ctx.check(m1, "no MPos in the status report after $X")
+        lost = [ln.strip() for ln in text.splitlines()
+                if ln.strip().startswith("[MSG:") and "read back" in ln]
+        kd = [p1[a] - p0[a] for a in range(3)]
+        md = [(m1[a] - m0[a]) * spm[a] for a in range(3)]
+        rec.update({"kernel_after": list(p1), "mpos_after": list(m1), "homed_after": h1,
+                    "kernel_delta_steps": kd, "mpos_delta_steps": [round(v, 2) for v in md],
+                    "ring_after": p1[4] - p1[3], "lost_messages": lost,
+                    "readback_log": _log_lines(GRBLHAL_LOG, log0,
+                                               "soft reset: the kernel ramped the motion down")[-1:]})
+
+        # Hand back: a jog by the MPos distance (a jog carries its own G91:
+        # the reset restored the parser's defaults).
+        dx = m1[0] - m0[0]
+        if abs(dx) >= 0.001:
+            r = g.command("$J=G91X%.3fF3000" % -dx)
+            ctx.check(not any(x.startswith("error") for x in r), "the jog back was refused: %s", r)
+            _, states, _ = wait_idle(ctx, g)
+            ctx.check("TIMEOUT" not in states, "the jog back did not return to Idle")
+        machine_idle(ctx)
+        p2 = _kernel_position()
+        under1, faults1 = hw.sysfs_int("cnc/underruns"), hw.sysfs_read("cnc/faults")
+        rec.update({"kernel_handed_back": list(p2), "underruns": [under0, under1], "faults": [faults0, faults1]})
+
+        # The ramp: the kernel decelerated. Nothing but its ramp lowers the
+        # tick rate once a run is up to speed, so the bytes it played over
+        # the run's last 25 to 50 ms, against the tick, say whether the run
+        # ended at speed or decelerated. The queue at cnc/stop is about 110 ms of
+        # ticks: the ring holds 200 ms and the producer leads by 10 ms, and
+        # the core's alarm hold plays 100 ms of it at the tick before the
+        # driver's stop. The ramp to the kernel's 900 Hz floor consumes
+        # (f0^2 - 900^2) / (2 a) ticks, 112.6 ms of the tick (12687 ticks
+        # at the x32 tick of 112640 Hz and its 500000 Hz/s ramp; the ramp
+        # scales with the tick, so every mode gives the same fractions).
+        # So the run ends at the floor, or out of data part way down the
+        # ramp at f0 * sqrt(1 - 2 (a / f0) Q): 15% of the tick with 110 ms
+        # left, 33% with 100 ms, 45% with 90 ms. The tail's mean is that
+        # plus a W / 2: at most 56% of the tick over 50 ms with 90 ms left,
+        # 21% to 39% over 25 ms with 100 to 110 ms left. A run that ends at
+        # the tick (a run-out with no stop) reads 100%, within the
+        # sampling's few percent over 25 ms. The bound is 70%: 25%
+        # above the slowest ramped tail and 30% below a run-out.
+        # The other readings are recorded, not judged: with the ramp about
+        # the size of the queue, the steps that never played can be none,
+        # the bytes played match a run-out within a few percent, and the
+        # time to leave running (about 250 ms with 100 ms left, 290 ms with
+        # 110 ms) is within 10% of the 100 ms hold plus three quarters of
+        # the 223 ms ramp (267 ms).
+        running = [s for s in samples if s[1] == "running"]
+        tail = None
+        if running:
+            last = running[-1]
+            rec["last_running_s"] = round(last[0], 4)
+            before = [s for s in running if last[0] - s[0] >= 0.025]
+            if before:
+                first = before[-1]
+                w = last[0] - first[0]
+                rate = ((last[2] - first[2]) & 0xffffffff) / w
+                tail = {"window_s": round(w, 4), "rate_hz": round(rate), "fraction": round(rate / f0, 3)}
+        rec.update({"tail": tail, "ramp_s": round((f0 - 900.0) / ramp, 4),
+                    "ramp_ticks": int((f0 * f0 - 900.0 * 900.0) / (2.0 * ramp)),
+                    "ring_at_idle": samples[-1][3] - samples[-1][2]})
+        ctx.log("soft reset during the move: kernel %s %.0f ms after the ^X (queue %d ticks at the ^X, "
+                "ramp %d ticks over %.0f ms), tail %s; kernel delta %s steps, MPos delta %s steps, "
+                "homed %s -> %s, ring %d after the reset, read-back %s",
+                rec["kernel_end_state"], 1e3 * rec["left_running_s"], rec["queue_at_x"], rec["ramp_ticks"],
+                1e3 * rec["ramp_s"], tail, kd, rec["mpos_delta_steps"], h0, h1, rec["ring_after"],
+                rec["readback_log"] or "(no line)")
+
+        fails = []
+        if samples[-1][1] == "running":
+            fails.append("the kernel was still running 1.0 s after the ^X")
+        elif samples[-1][1] != "idle":
+            fails.append("the kernel left running into %s, not idle" % samples[-1][1])
+        if under1 != under0 or faults1 != faults0:
+            fails.append("cnc/underruns %s -> %s, cnc/faults %s -> %s across the reset"
+                         % (under0, under1, faults0, faults1))
+        if tail is None:
+            fails.append("the kernel left running %.0f ms after the ^X with no 25 ms of its run sampled "
+                         "after it: a stop with no ramp" % (1e3 * rec["left_running_s"]))
+        elif tail["window_s"] > 0.050:
+            fails.append("the poll did not sample the run's tail (a %.0f ms gap)" % (1e3 * tail["window_s"]))
+        elif tail["fraction"] > 0.70:
+            fails.append("the kernel's tick ran at %.0f%% of %d Hz over the run's last %.0f ms: the run "
+                         "ended at speed, not on the ramp" % (100 * tail["fraction"], f0, 1e3 * tail["window_s"]))
+        if rec["ring_after"]:
+            fails.append("the ring still holds %d bytes after the reset: the clear did not run" % rec["ring_after"])
+        # The read-back is exact. The kernel counts X_DIR set as -X, so
+        # the sign of its X count is the one this +X move gave it.
+        if abs(kd[0]) < spm[0] or md[0] <= 0:
+            fails.append("the move did not reach the kernel or MPos: kernel X %+d steps, MPos X %+.1f steps"
+                         % (kd[0], md[0]))
+        elif abs(abs(kd[0]) - md[0]) > 1.0:
+            fails.append("MPos X moved %.1f steps and the kernel played %d: the position was not read back "
+                         "from the kernel's counters" % (md[0], abs(kd[0])))
+        for a, name in ((1, "Y"), (2, "Z")):
+            if kd[a] or abs(md[a]) > 1.0:
+                fails.append("%s moved under an X move: kernel %+d steps, MPos %+.1f steps" % (name, kd[a], md[a]))
+        # The reference is kept.
+        if h1 != h0:
+            fails.append("the homed mask went %s -> %s across the reset: the reference was dropped" % (h0, h1))
+        if lost:
+            fails.append("the sender was told the position is lost: %s" % lost[-1])
+        if abs(p2[0] - p0[0]) > 1:
+            fails.append("the jog back left the kernel's X counter %+d steps from its start" % (p2[0] - p0[0]))
+        return fails
+
     accel = hw.AccelSampler()
     ctx.check(accel.available, "no head accelerometer found (i2c %s): the motion witness is missing",
               hw.HEAD_ACCEL_I2C)
@@ -269,6 +472,10 @@ def jog_roundtrip(ctx):
         ctx.log("after ~: states %s", states)
         g.command("G1X-30F2400", timeout=0.5)
         wait_idle(ctx, g)
+        fails = reset_during_move(g)
+        for why in fails:
+            ctx.log("soft reset: %s", why)
+        ctx.check(not fails, "soft reset during the move: %s", "; ".join(fails))
         g.command("G90")
         final = g.status_report().get("MPos")
         ev["final"] = final
