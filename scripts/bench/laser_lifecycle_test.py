@@ -68,9 +68,11 @@ reported messages:
      alarm, the return to the job start - and a later press resumes
      nothing
  17. a jog cancel (0x85) stops a jog short of its target, Idle; a ^X
-     mid-move lands in Alarm with the position kept and no return to the
-     job start; $X recovers to Idle and the next jog ships steps
-     (GFSINK_DUMP)
+     mid-move asks the kernel for its ramp (cnc/stop in GFSINK_ATTR_LOG)
+     and lands in Alarm with the position kept: MPos is the X that the
+     shipped stream (GFSINK_DUMP) moved, an unreferenced lens is still
+     held after $X, and the head does not return to the job start; $X
+     recovers to Idle and the next jog ships steps
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -221,11 +223,13 @@ class Session:
     """One controller process with the lifecycle overrides applied."""
 
     def __init__(self, name, fire_ok=True, disarm_s=2, switches=None, conf_extra="",
-                 armed_ack=True, ack_after_s=0.0, dump=False):
+                 armed_ack=True, ack_after_s=0.0, dump=False, attr_log=False):
         self.name = name
         self.workdir = tempfile.mkdtemp(prefix="laser-lifecycle-")
         # The stream the controller ships, when the case reads it.
         self.dump = os.path.join(self.workdir, "stream") if dump else None
+        # The sysfs writes the hardware would get, when the case reads them.
+        self.attr_log = os.path.join(self.workdir, "attr.log") if attr_log else None
         conf = os.path.join(self.workdir, "forgefirm.conf")
         with open(conf, "w") as f:
             # The fan grace at 0 keeps the arm's acknowledgment budget at its
@@ -238,8 +242,11 @@ class Session:
         env.pop("GFSINK", None)
         env.pop("GF_SWITCH_FILE", None)
         env.pop("GFSINK_DUMP", None)
+        env.pop("GFSINK_ATTR_LOG", None)
         if self.dump:
             env["GFSINK_DUMP"] = self.dump
+        if self.attr_log:
+            env["GFSINK_ATTR_LOG"] = self.attr_log
         self.switch_file = None
         if switches is not None:
             self.switch_file = os.path.join(self.workdir, "switches")
@@ -329,6 +336,33 @@ class Session:
         read_avail(self.sock, self.log, 0.3)
         m = re.findall(r"MPos:(-?[\d.]+)", "".join(self.log[-4:]))
         return float(m[-1]) if m else None
+
+    def setting(self, n):
+        """A $-setting's value, from a $$ dump."""
+        mark = len(self.log)
+        send_line(self.sock, "$$", self.log)
+        m = re.search(r"\$%d=(-?[\d.]+)" % n, "".join(self.log[mark:]))
+        return float(m.group(1)) if m else None
+
+    def attr_count(self, write):
+        """How many times the hardware would have been given `write`
+        ("<attr> <value>") so far."""
+        try:
+            with open(self.attr_log) as f:
+                return sum(1 for line in f if line.strip() == write)
+        except OSError:
+            return 0
+
+    def shipped_x_steps(self):
+        """The X steps the shipped stream moved, net: a tick byte (bit 7
+        clear) with the X step bit (0x01), the X direction bit (0x02) set
+        for -X."""
+        try:
+            with open(self.dump, "rb") as f:
+                data = f.read()
+        except OSError:
+            return 0
+        return sum((-1 if b & 0x02 else 1) for b in data if not b & 0x80 and b & 0x01)
 
     def armed_count(self):
         return "".join(self.log).count(ARMED)
@@ -882,12 +916,18 @@ def test_pause_then_lid_cancel_returns_to_the_job_start():
 
 def test_cancel_and_abort():
     """Rule 17: a jog cancel (0x85) stops a jog short of its target and
-    leaves the controller Idle. A ^X mid-move is a controlled abort: Alarm,
-    the position kept, and no return to the job start (that move is the lid
-    policy's alone). $X recovers to Idle, the head does not move on its
-    own, and the next jog ships steps."""
-    s = Session("cancel-abort", disarm_s=60, dump=True)
+    leaves the controller Idle. A ^X mid-move is a controlled abort: the
+    kernel is told to stop with its ramp, Alarm, the position kept, and
+    no return to the job start (that move is the lid policy's alone). The
+    position kept is the X that the shipped stream moved, and the lens,
+    which has no reference here, is still held where it stands. $X
+    recovers to Idle, the head does not move on its own, and the next jog
+    ships steps."""
+    s = Session("cancel-abort", disarm_s=60, dump=True, attr_log=True)
     try:
+        spm = s.setting(100)
+        if not spm:
+            fail("[cancel-abort] no $100 in the settings dump")
         x0 = s.mpos_x()
         if x0 is None:
             fail("[cancel-abort] no position in the status report")
@@ -909,12 +949,20 @@ def test_cancel_and_abort():
         if not s.wait_state("Run", 5):
             fail("[cancel-abort] the move never reported Run (state %s)" % s.state())
         time.sleep(0.5)
+        stops = s.attr_count("cnc/stop 1")
         s.sock.sendall(b"\x18")
         if not s.wait_state("Alarm", 5):
             fail("[cancel-abort] ^X mid-move did not land in Alarm (state %s)" % s.state())
+        if s.attr_count("cnc/stop 1") <= stops:
+            fail("[cancel-abort] ^X mid-move did not ask the kernel to stop with its ramp "
+                 "(no cnc/stop write)")
         x2 = s.mpos_x()
         if x2 is None or not 0.5 < x2 - x1 < 29.5:
             fail("[cancel-abort] the abort did not keep a plausible position (X %s from %.3f)" % (x2, x1))
+        moved = s.shipped_x_steps()
+        if abs(x2 * spm - moved) > 0.5:
+            fail("[cancel-abort] the position after the abort is not the X the stream moved "
+                 "(X %.3f is %.1f steps, the stream moved %d)" % (x2, x2 * spm, moved))
         send_line(s.sock, "$X", s.log)
         if not s.wait_state("Idle", 5):
             fail("[cancel-abort] $X did not recover to Idle (state %s)" % s.state())
@@ -924,6 +972,12 @@ def test_cancel_and_abort():
         x3 = s.mpos_x()
         if x3 is None or abs(x3 - x2) > 0.05:
             fail("[cancel-abort] the head moved on its own after the abort (X %s, was %.3f)" % (x3, x2))
+        # The lens has no reference in this session, so it is held where it
+        # stands, and the abort keeps it held.
+        mark = len(s.log)
+        if send_line(s.sock, "$J=G91Z1F100", s.log, tolerate_error=True) != "error" or \
+                "error:15" not in "".join(s.log[mark:]):
+            fail("[cancel-abort] a Z jog after the abort was not refused: the lens is no longer held")
         shipped = os.path.getsize(s.dump) if os.path.exists(s.dump) else 0
         s.send_raw("$J=G91X-5F2400")
         if not s.wait_state("Jog", 3) or not s.wait_state("Idle", 5):
@@ -931,8 +985,9 @@ def test_cancel_and_abort():
         grew = (os.path.getsize(s.dump) if os.path.exists(s.dump) else 0) - shipped
         if grew <= 0:
             fail("[cancel-abort] the jog after $X shipped no steps")
-        print("PASS [cancel-abort]: 0x85 stopped the jog at %.3f mm of 40, Idle; ^X mid-move landed in "
-              "Alarm at %.3f mm with no return; $X recovered to Idle and the next jog shipped %d bytes"
+        print("PASS [cancel-abort]: 0x85 stopped the jog at %.3f mm of 40, Idle; ^X mid-move asked "
+              "for the kernel's stop and landed in Alarm at %.3f mm, the X the stream moved, with no "
+              "return and the lens still held; $X recovered to Idle and the next jog shipped %d bytes"
               % (x1 - x0, x2 - x1, grew))
     finally:
         s.close()
