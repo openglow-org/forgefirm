@@ -21,7 +21,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
 import helpers  # noqa: E402
-from forgetest import catalog  # noqa: E402
+from forgetest import baseline, catalog  # noqa: E402
 from forgetest.runner import Aborted, Context, Failed, Run  # noqa: E402
 from forgetest.suite import setup_burns, setup_dark  # noqa: E402
 
@@ -291,14 +291,19 @@ class BurnRunTests(unittest.TestCase):
         os.environ["GF_SYSFS_ROOT"] = self.sysfs + "/"
         self.fake = helpers.FakeForgectrl().start()
         # the head at its home against the gantry stops, X and Y referenced
-        # by a manual home (the fake's pos is X0 Y0 Z0)
+        # by a manual home with no offset (the fake's pos is X0 Y0 Z0), its
+        # anchor declaring the stops at X0 Y0
         self.fake.state["status"].update({"homed": True, "homed_axes": 7, "home_source": "manual"})
+        self.saved_anchor = baseline.ANCHOR_PATH
+        baseline.ANCHOR_PATH = os.path.join(self.sysfs, "grblhal.homed")
+        self.anchor("0.000 0.000 0.000 7 manual")
         self.daemon = ScriptedDaemon(self.fake)
         self.poll = setup_dark.POLL_S
         setup_dark.POLL_S = 0.01
 
     def tearDown(self):
         setup_dark.POLL_S = self.poll
+        baseline.ANCHOR_PATH = self.saved_anchor
         self.fake.stop()
         if self.saved_root is None:
             os.environ.pop("GF_SYSFS_ROOT", None)
@@ -311,6 +316,12 @@ class BurnRunTests(unittest.TestCase):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write(value + "\n")
+
+    def anchor(self, line):
+        """The controller's home anchor as a home writes it: X Y Z, the
+        axes it references, and what set it."""
+        with open(baseline.ANCHOR_PATH, "w") as f:
+            f.write(line + "\n")
 
     def run_test(self, tid):
         t = catalog.load_suite()[tid]
@@ -451,11 +462,13 @@ class BurnRunTests(unittest.TestCase):
         self.assert_found()
 
     def test_a_manual_home_offset_puts_the_stops_off_x0_y0(self):
-        # manual_home_x 5 and manual_home_y 3: a manual home declares the
-        # stops X-5 Y-3 and leaves the head at X0 Y0, in front of them,
-        # where the wizard does not draw from. X0 Y0 fails before any start,
-        # with no controller lever touched; the head at the stops is home.
+        # A manual home made with manual_home_x 5 and manual_home_y 3
+        # declares the stops X-5 Y-3 (its anchor) and leaves the head at
+        # X0 Y0, in front of them, where the wizard does not draw from. X0
+        # Y0 fails before any start, with no controller lever touched; the
+        # head at the stops is home.
         self.fake.state["settings"].update({"manual_home_x": "5", "manual_home_y": "3"})
+        self.anchor("-5.000 -3.000 0.000 7 manual")
         with self.assertRaises(Failed) as cm:
             self.run_test("setup.focus")
         self.assertIn("not at its home", str(cm.exception))
@@ -467,12 +480,34 @@ class BurnRunTests(unittest.TestCase):
         run = self.run_test("setup.focus")
         self.assertTrue(run.evidence["head_at_start"]["judged"])
         self.assertEqual(self.daemon.order, ["laser.focus"])
-        # an offset that does not read as a number places no stops: nothing starts
-        self.fake.state["settings"]["manual_home_x"] = "five"
+        # The offsets cleared after that home leave its reference as it is:
+        # the stops are still X-5 Y-3, and the head at X0 Y0 still fails
+        # before any start.
+        for k in ("manual_home_x", "manual_home_y"):
+            self.fake.state["settings"].pop(k)
+        self.fake.state["status"]["pos"] = {"x": 0.0, "y": 0.0, "z": 0.0}
         with self.assertRaises(Failed) as cm:
             self.run_test("setup.focus")
-        self.assertIn("manual_home_x reads 'five'", str(cm.exception))
+        self.assertIn("not at its home", str(cm.exception))
         self.assertEqual(self.daemon.order, ["laser.focus"])
+        # The offsets set after a home made with none: the head at X0 Y0 is
+        # at the stops that home declared, and the burn runs.
+        self.fake.state["settings"].update({"manual_home_x": "5", "manual_home_y": "3"})
+        self.anchor("0.000 0.000 0.000 7 manual")
+        run = self.run_test("setup.focus")
+        self.assertEqual(run.evidence["head_at_start"]["stops"], {"x": 0.0, "y": 0.0})
+        self.assertEqual(self.daemon.order, ["laser.focus", "laser.focus"])
+        # An anchor that is gone, or that is not the manual home /status
+        # reports, places no stops: nothing starts.
+        os.unlink(baseline.ANCHOR_PATH)
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.focus")
+        self.assertIn("home anchor", str(cm.exception))
+        self.anchor("0.000 0.000 0.000 4 startup")
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.focus")
+        self.assertIn("home anchor", str(cm.exception))
+        self.assertEqual(self.daemon.order, ["laser.focus", "laser.focus"])
 
     def test_an_unreferenced_head_runs_on_the_operators_word(self):
         # A fresh controller's counters-only position places nothing: the
