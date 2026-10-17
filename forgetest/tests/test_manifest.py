@@ -611,9 +611,10 @@ def two(ctx):
         self.assertEqual((a2, b2), self.shas())
 
     def test_a_shared_judge_edit_moves_every_test(self):
-        # runner.py, hw.py, baseline.py and puls.py are in every test's
-        # path with no import to follow (the Context, the baseline around
-        # each run), so their text joins every implementation hash.
+        # runner.py, hw.py and baseline.py are in every test's path with no
+        # import to follow (the Context, the baseline around each run), and
+        # puls.py comes in by a package import the walk does not follow, so
+        # their text joins every implementation hash.
         judge = os.path.join(self.tmp, "hwlike.py")
 
         def write_judge(text):

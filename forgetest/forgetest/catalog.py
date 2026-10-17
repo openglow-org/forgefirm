@@ -147,15 +147,17 @@ def source_file_sha(path):
     return hashlib.sha256(data).hexdigest()
 
 
-# The package modules every test runs through without importing them:
-# the Context a test is handed and the takeover (runner.py), the sysfs,
-# LED, switch and HTTP readers behind it (hw.py), the fresh-boot idle
-# state judged around every run (baseline.py), and the dark job the
-# cloud and extension tests print (puls.py). Their text is part of every
-# judge, so it joins every implementation hash: a change to one of them
-# moves every test. The rest of the package (the server, the page, the
-# campaign rules, the artifact, the manifest, this registry, the bench
-# actuator) judges nothing about the machine and stays out.
+# The package modules that judge the machine. Every test runs through
+# the first three without importing them: the Context a test is handed
+# and the takeover (runner.py), the sysfs, LED, switch and HTTP readers
+# behind it (hw.py), and the fresh-boot idle state judged around every
+# run (baseline.py). puls.py is the dark job the cloud and extension
+# tests print: suite/cloud.py imports it from the package (`from .. import
+# puls`), an import the sibling walk does not follow. Their text joins
+# every implementation hash: a change to one of them moves every test.
+# The rest of the package (the server, the page, the campaign rules, the
+# artifact, the manifest, this registry, the bench actuator) judges
+# nothing about the machine and stays out.
 SHARED_JUDGES = ("baseline.py", "hw.py", "puls.py", "runner.py")
 
 
