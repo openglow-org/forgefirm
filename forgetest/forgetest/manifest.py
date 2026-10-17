@@ -121,7 +121,8 @@ BEHAVIORAL = [
 # must run the host test: on push or pull request, in a step that runs on
 # every run of the workflow and whose failure fails it (no `if:` other than
 # `true` and no `continue-on-error:` other than `false` on the step or its
-# job), and name it, or discover it (a glob, unittest discover, pytest on
+# job, and no key with one stray quote where the lint reads the workflow's
+# keys), and name it, or discover it (a glob, unittest discover, pytest on
 # its directory). A host-tested path counts as covered in the coverage
 # lint, and like every path no test covers it is in no fingerprint: a
 # change there makes no acceptance run necessary. A path a catalog test
@@ -418,8 +419,13 @@ def repo_name(manifest, repo):
 _STEP_KEYS = ("name", "uses", "run", "id", "if", "with", "env", "working-directory", "shell",
               "continue-on-error", "timeout-minutes")
 _STEP_RX = re.compile(r"^(\s*)-\s+(%s)\s*:" % "|".join(re.escape(k) for k in _STEP_KEYS))
-# A mapping key, plain or quoted ("if": is the same key as if:).
-_KEY_RX = re.compile(r"""^(\s*)["']?([\w-]+)["']?\s*:\s*(.*)$""")
+# A mapping key, plain or in a matched pair of quotes ("if": is the same
+# key as if:).
+_KEY_RX = re.compile(r"""^(\s*)(?=(?:"[\w-]+"|'[\w-]+'|[\w-]+)\s*:)["']?([\w-]+)["']?\s*:\s*(.*)$""")
+# A key with one stray quote (if": or "if:), which _KEY_RX does not read:
+# YAML reads a key with the quote in its name, which no workflow key and
+# no event has, or refuses the file.
+_STRAY_RX = re.compile(r"""^\s*["']?[\w-]+["']?\s*:""")
 _ON_RX = re.compile(r"""^(?:on|"on"|'on')\s*:\s*(.*)$""")
 # What a job or a step says about whether it runs on every run of the
 # workflow, and whether its failure fails the run.
@@ -428,6 +434,11 @@ _CONDITION_KEYS = ("if", "continue-on-error")
 
 def _indent(line):
     return len(line) - len(line.lstrip(" "))
+
+
+def _stray_key(line):
+    """Whether a line is a mapping key with one stray quote."""
+    return _KEY_RX.match(line) is None and _STRAY_RX.match(line) is not None
 
 
 def _lines(text):
@@ -455,7 +466,9 @@ def workflow_triggers(text):
     items of its list (`on: [push, pull_request]`, or one per line), or
     its one scalar (`on: push`). What is under an event (its branches,
     its paths, a dispatch's inputs) is not an event. A flow mapping
-    (`on: {push: ...}`) is not read, and names no event."""
+    (`on: {push: ...}`) is not read, and names no event. An event key
+    with one stray quote (`push":`) is no event, and the workflow then
+    reads as one that runs on none."""
     lines = _lines(text)
     for i, ln in enumerate(lines):
         m = _ON_RX.match(ln) if not _indent(ln) else None
@@ -479,6 +492,8 @@ def workflow_triggers(text):
             body = child.strip()
             if body.startswith("- "):
                 out.add(_scalar(body[2:]))
+            elif _stray_key(child):
+                return set()
             else:
                 km = _KEY_RX.match(child)
                 if km:
@@ -495,10 +510,14 @@ def workflow_steps(text):
     in one. YAML read by its indentation, as far as these workflows use
     it; comments, whole lines and from ' #' to the end of a line, are not
     read. Anything outside a step (a trigger's paths, a job's name) is not
-    a step."""
+    a step. A key with one stray quote (`if":`, `"run:`) at the top level,
+    at a job's name or a job's key, or at a step's key is no key the lint
+    reads: every step of the workflow then carries "unread" and counts as
+    no step."""
     lines = _lines(text)
     steps, i = [], 0
     in_jobs, job_at, key_at, job = False, None, None, None
+    stray = False
     while i < len(lines):
         km = _KEY_RX.match(lines[i])
         if km:                      # a mapping key: which job this is, and what the job itself says
@@ -511,6 +530,10 @@ def workflow_steps(text):
                 key_at = ind
                 if key in _CONDITION_KEYS:
                     job[key] = _scalar(km.group(3))
+        elif _stray_key(lines[i]):
+            ind = _indent(lines[i])
+            stray = stray or ind == 0 or (in_jobs and (job_at is None or ind == job_at or (
+                ind > job_at and (key_at is None or ind == key_at))))
         m = _STEP_RX.match(lines[i])
         if not m:
             i += 1
@@ -528,6 +551,7 @@ def workflow_steps(text):
         while k < len(body):
             km = _KEY_RX.match(body[k])
             if not km or _indent(body[k]) != key_col:
+                stray = stray or (_indent(body[k]) == key_col and _stray_key(body[k]))
                 k += 1
                 continue
             key, val = km.group(2), _scalar(km.group(3))
@@ -546,6 +570,9 @@ def workflow_steps(text):
         if job is not None:
             step["job"] = job       # the job's own dict: a job key written after its steps counts too
         steps.append(step)
+    if stray:
+        for s in steps:
+            s["unread"] = True
     return steps
 
 
@@ -554,7 +581,10 @@ def _on_every_run(step):
     fails the run: neither it nor its job carries an `if:` other than
     `true`, or a `continue-on-error:` other than `false`. A step that
     runs only under a condition, or whose failure the run tolerates,
-    proves nothing about what it runs."""
+    proves nothing about what it runs, and neither does a step of a
+    workflow with a key the lint cannot read ("unread")."""
+    if step.get("unread"):
+        return False
     for d in (step, step.get("job") or {}):
         if d.get("if", "true").lower() != "true" or d.get("continue-on-error", "false").lower() != "false":
             return False

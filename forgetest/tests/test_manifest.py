@@ -329,6 +329,14 @@ class CoverageReportTests(unittest.TestCase):
         # however the step is spelled: more than one space after its dash, or a quoted key
         self.assertFalse(self._runs("steps:\n  -   run: ./build/tray_test\n      if: false\n", test))
         self.assertFalse(self._runs(step % "    \"if\": false\n", test))
+        # a key with one stray quote is no key the lint reads: at a step's key, a job's key or
+        # the top level, no step of the workflow counts
+        self.assertFalse(self._runs(step % "    if\": false\n", test))
+        self.assertFalse(self._runs("steps:\n  - name: x\n    run\": ./build/tray_test\n", test))
+        self.assertFalse(self._runs("jobs:\n  t:\n    if\": false\n    steps:\n      - run: ./build/tray_test\n",
+                                    test))
+        self.assertFalse(self._runs("jobs\":\n  t:\n    if: false\n    steps:\n      - run: ./build/tray_test\n",
+                                    test))
         # a step whose failure the run tolerates proves nothing; literally false is no tolerance
         self.assertFalse(self._runs(step % "    continue-on-error: true\n", test))
         self.assertFalse(self._runs(step % "    continue-on-error: ${{ inputs.soft }}\n", test))
@@ -361,6 +369,9 @@ class CoverageReportTests(unittest.TestCase):
                                              "        type: string\n"), {"workflow_dispatch"})
         self.assertEqual(m.workflow_triggers("on:\n  workflow_call:\n"), {"workflow_call"})
         self.assertEqual(m.workflow_triggers("name: x\njobs:\n  t:\n    steps: []\n"), set())
+        # an event key with one stray quote is no event, and the workflow then names none
+        self.assertEqual(m.workflow_triggers("on:\n  push\":\n"), set())
+        self.assertEqual(m.workflow_triggers("on:\n  push:\n  'pull_request:\n"), set())
 
     def test_the_lint_says_when_it_could_not_read_a_workflow(self):
         import contextlib
