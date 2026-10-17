@@ -533,8 +533,9 @@ class BurnRunTests(unittest.TestCase):
 
     def test_a_burn_whose_tube_current_the_test_never_saw_rise_fails(self):
         # The LASER_ON count read nonzero from here, and the tube current
-        # never left zero: the second witness is judged on its own reads.
-        self.plant("pic/hv_current", "0")
+        # never read over HV_ON: the second witness is judged on its own
+        # reads, against the daemon's own threshold for a lit burn.
+        self.plant("pic/hv_current", str(setup_burns.HV_ON))
         with self.assertRaises(Failed) as cm:
             self.run_test("setup.focus")
         self.assertIn("tube current never read over %d from here" % setup_burns.HV_ON, str(cm.exception))
