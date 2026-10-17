@@ -166,7 +166,8 @@ class RapidTailTests(unittest.TestCase):
 
         class Grbl:
             def status_report(self):
-                return {"state": "Idle", "MPos": (0.0, 0.0, 0.0)}
+                # the time of the read, as the head's X
+                return {"state": "Idle", "MPos": (clock.now, 0.0, 0.0)}
         saved = laser.time, laser.sample
         self.addCleanup(setattr, laser, "time", saved[0])
         self.addCleanup(setattr, laser, "sample", saved[1])
@@ -177,6 +178,9 @@ class RapidTailTests(unittest.TestCase):
         self.assertTrue(all(s["armed"] for s in tail[:-1]))
         self.assertGreaterEqual(t_end - closed["t"], 2 * laser.EMISSION_WINDOW_S + laser.EMISSION_READ_GAP_S)
         self.assertFalse(covered(laser.read_gaps(tail, "emission", t_end)))
+        # each sample's X is read before its armed flag: an X that places
+        # the head was read with the window open
+        self.assertTrue(all(s["x"] < s["t"] for s in tail))
 
 
 def place_trail(xs, closes_at):
@@ -195,6 +199,10 @@ class RapidPlaceTests(unittest.TestCase):
         # the window closes in the dwell at +20 mm and the head comes back
         # after the close: the samples past the close do not place it
         self.assertEqual(laser.rapid_place(place_trail(self.XS, 4), 0.0), (2, None, 4))
+        # the window reads closed at the first sample with the head back:
+        # that sample does not tell whether the head was back before the
+        # close, so it does not place it
+        self.assertEqual(laser.rapid_place(place_trail(self.XS, 6), 0.0), (2, None, 6))
 
 
 if __name__ == "__main__":

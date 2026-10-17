@@ -313,15 +313,17 @@ def read_gaps(samples, key, t_end=None):
 
 def rapid_place(stretch, x0):
     """Where the head's reports place the rapid after the M5, judged over
-    the armed part of the dark stretch alone: its samples up to the first
-    disarmed one, that one included. Returns (i_out, i_back, i_closed):
-    the first sample with the head at least 19.5 mm out, the first after
-    it with the head back at x0 (within 0.05 mm), and the first disarmed
-    sample; each None when there is none. A window that closes before
-    the head is back leaves i_back None: the samples after the close
-    never place the rapid inside the window."""
+    the armed part of the dark stretch alone: its samples before the first
+    disarmed one. Returns (i_out, i_back, i_closed): the first sample with
+    the head at least 19.5 mm out, the first after it with the head back
+    at x0 (within 0.05 mm), and the first disarmed sample; each None when
+    there is none. A window that closes before the head is back leaves
+    i_back None: only a sample that read the window open places the head
+    back, and sample_to_disarm reads its X before its armed flag, so the
+    head was back with the window open. The first disarmed sample does
+    not tell whether the head came back before the close or after it."""
     i_closed = next((i for i, s in enumerate(stretch) if not s["armed"]), None)
-    part = stretch if i_closed is None else stretch[:i_closed + 1]
+    part = stretch if i_closed is None else stretch[:i_closed]
     i_out = next((i for i, s in enumerate(part) if s.get("x") is not None and s["x"] - x0 >= 19.5), None)
     i_back = (next((i for i in range(i_out + 1, len(part))
                     if part[i].get("x") is not None and abs(part[i]["x"] - x0) < 0.05), None)
@@ -331,14 +333,15 @@ def rapid_place(stretch, x0):
 
 def sample_to_disarm(ctx, g, timeout=20.0, sample_hz=8):
     """Sample until the armed window closes, or the timeout, with the
-    controller's state and machine X beside each sample ("x"). A G4 dwell
-    reports Idle, so Idle cannot end this; the window closing at the
-    program end does, after two more kernel windows and the read gap
-    allowed: the LASER_ON count for the window in flight at the close
-    latches up to one window later and is held through the next, so the
-    sampling runs on until that count has been read. Returns the samples
-    served and the time the sampling stopped, the trail's end for the
-    read rule."""
+    controller's state and machine X beside each sample ("x"), read just
+    before the sample: a sample that reads the window open read its X
+    with the window open (rapid_place). A G4 dwell reports Idle, so Idle
+    cannot end this; the window closing at the program end does, after
+    two more kernel windows and the read gap allowed: the LASER_ON count
+    for the window in flight at the close latches up to one window later
+    and is held through the next, so the sampling runs on until that
+    count has been read. Returns the samples served and the time the
+    sampling stopped, the trail's end for the read rule."""
     samples = []
     period = 1.0 / sample_hz
     t0 = time.time()
@@ -346,8 +349,8 @@ def sample_to_disarm(ctx, g, timeout=20.0, sample_hz=8):
     t_closed = None
     while time.time() < end:
         ctx.checkpoint()
-        smp = sample(ctx)
         rep = g.status_report()
+        smp = sample(ctx)
         if smp:
             smp["gstate"] = rep.get("state")
             smp["x"] = (rep.get("MPos") or (None,))[0]
@@ -474,8 +477,10 @@ def wait_disarm(ctx, timeout):
 def emission_witness(ctx):
     ev = ctx.evidence
     # The rapid after the M5 (G91 is modal from the square): out over the
-    # first side and back, then the program end.
-    rapid_tail = ["G0 X20", "G4 P2.5", "G0 X-20", "G4 P0.5", "G90", "M2"]
+    # first side and back, then the program end. The head stands back for
+    # 1 s before the M2, so that a sample of a slow sampling loop still
+    # reads it back with the window open (rapid_place).
+    rapid_tail = ["G0 X20", "G4 P2.5", "G0 X-20", "G4 P1", "G90", "M2"]
 
     with ctx.grbl() as g, LiveJob(ctx, g):
         prepare(ctx, g)
