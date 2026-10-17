@@ -499,7 +499,9 @@ class CatalogTests(unittest.TestCase):
         # and baseline.py with no import to find. So every package module
         # a suite module does import, at its top level or inside a function
         # or a block, has to be on it (or be the registry, which judges
-        # nothing), or that judge would be in no fingerprint.
+        # nothing), or that judge would be in no fingerprint. The sibling
+        # walk follows the relative spelling alone, so a suite module
+        # imports the package by no absolute name.
         import ast
         import glob
         paths = catalog.shared_judge_paths()
@@ -515,6 +517,12 @@ class CatalogTests(unittest.TestCase):
                     for name in ([node.module] if node.module else [a.name for a in node.names]):
                         self.assertIn(name + ".py", allowed,
                                       "%s imports %s, which no fingerprint carries" % (os.path.basename(mod), name))
+                absolute = ([node.module or ""] if isinstance(node, ast.ImportFrom) and node.level == 0
+                            else [a.name for a in node.names] if isinstance(node, ast.Import) else [])
+                for name in absolute:
+                    self.assertFalse(name == "forgetest" or name.startswith("forgetest."),
+                                     "%s imports %s by its absolute name, which no hash follows: import it "
+                                     "relatively (from .. or from .)" % (os.path.basename(mod), name))
 
 
 class ImplementationHashTests(unittest.TestCase):
@@ -638,15 +646,18 @@ def two(ctx):
 
     def test_a_sibling_imported_inside_a_function_moves_the_tests_that_run_it(self):
         # A test that imports a judge inside its own function carries the
-        # judge in its hash, and no other test of its module does; a
-        # helper of the module that imports one inside its body carries it
-        # into every test of the module.
-        sib = os.path.join(self.tmp, "judge.py")
+        # judge in its hash, and what the judge imports in turn, at any
+        # depth, and no other test of its module does; a helper of the
+        # module that imports one inside its body carries it into every
+        # test of the module.
+        def put(name, text):
+            path = os.path.join(self.tmp, name)
+            with open(path, "w", newline="\n") as f:
+                f.write(text)
+            catalog.forget(path)
 
         def write_judge(text):
-            with open(sib, "w", newline="\n") as f:
-                f.write(text)
-            catalog.forget(sib)
+            put("judge.py", text)
         write_judge("def judge(x):\n    return x > 1\n")
         self.write(self.MODULE.replace("def two(ctx):\n",
                                        "def two(ctx):\n    from .judge import judge\n    judge(2)\n"))
@@ -655,6 +666,20 @@ def two(ctx):
         a2, b2 = self.shas()
         self.assertEqual(a1, a2)
         self.assertNotEqual(b1, b2)
+        # judge.py imports limit.py, which imports base.py: an edit to
+        # either moves m.two, and not m.one
+        put("base.py", "BASE = 1\n")
+        put("limit.py", "from .base import BASE\n\n\nLIMIT = BASE\n")
+        write_judge("from .limit import LIMIT\n\n\ndef judge(x):\n    return x > LIMIT\n")
+        a5, b5 = self.shas()
+        put("limit.py", "from .base import BASE\n\n\nLIMIT = BASE + 1\n")
+        a6, b6 = self.shas()
+        self.assertEqual(a5, a6)
+        self.assertNotEqual(b5, b6)
+        put("base.py", "BASE = 2\n")
+        a7, b7 = self.shas()
+        self.assertEqual(a6, a7)
+        self.assertNotEqual(b6, b7)
         self.write(self.MODULE.replace("    return x + 1\n",
                                        "    from .judge import judge\n    return judge(x)\n"))
         a3, b3 = self.shas()
