@@ -511,9 +511,10 @@ def workflow_steps(text):
     it; comments, whole lines and from ' #' to the end of a line, are not
     read. Anything outside a step (a trigger's paths, a job's name) is not
     a step. A key with one stray quote (`if":`, `"run:`) at the top level,
-    at a job's name or a job's key, or at a step's key is no key the lint
-    reads: every step of the workflow then carries "unread" and counts as
-    no step."""
+    at a job's name or a job's key, at a step's key, or as the first key of
+    any list item (a step's first key is on its dash line: `- run": make`)
+    is no key the lint reads: every step of the workflow then carries
+    "unread" and counts as no step."""
     lines = _lines(text)
     steps, i = [], 0
     in_jobs, job_at, key_at, job = False, None, None, None
@@ -534,6 +535,11 @@ def workflow_steps(text):
             ind = _indent(lines[i])
             stray = stray or ind == 0 or (in_jobs and (job_at is None or ind == job_at or (
                 ind > job_at and (key_at is None or ind == key_at))))
+        # A list item's first key is on its dash line, where _STEP_RX reads no
+        # key with a stray quote: the dash and the spaces after it become spaces.
+        item = re.match(r"^\s*-\s+", lines[i])
+        if item and _stray_key(" " * item.end() + lines[i][item.end():]):
+            stray = True
         m = _STEP_RX.match(lines[i])
         if not m:
             i += 1

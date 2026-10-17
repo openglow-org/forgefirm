@@ -330,10 +330,11 @@ class CoverageReportTests(unittest.TestCase):
         # however the step is spelled: more than one space after its dash, or a quoted key
         self.assertFalse(self._runs("steps:\n  -   run: ./build/tray_test\n      if: false\n", test))
         self.assertFalse(self._runs(step % "    \"if\": false\n", test))
-        # a key with one stray quote is no key the lint reads: at a step's key, a job's key or
-        # the top level, no step of the workflow counts
+        # a key with one stray quote is no key the lint reads: at a step's key (its first one on
+        # its dash line too), a job's key or the top level, no step of the workflow counts
         self.assertFalse(self._runs(step % "    if\": false\n", test))
         self.assertFalse(self._runs("steps:\n  - name: x\n    run\": ./build/tray_test\n", test))
+        self.assertFalse(self._runs("steps:\n  - run\": make\n  - run: ./build/tray_test\n", test))
         self.assertFalse(self._runs("jobs:\n  t:\n    if\": false\n    steps:\n      - run: ./build/tray_test\n",
                                     test))
         self.assertFalse(self._runs("jobs\":\n  t:\n    if: false\n    steps:\n      - run: ./build/tray_test\n",
