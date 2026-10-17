@@ -132,10 +132,11 @@ def run_check(ctx, wid, on_prompt, timeout_s, on_poll=None):
         raise
     ev["elapsed_s"] = round(time.time() - t0, 1)
     ev["phases"] = phases[-12:]
-    ctx.check(last is not None, "the %s check did not end within %d s", wid, timeout_s)
     if last is None:
+        # A check this test stops following is aborted before the test
+        # fails: no check runs on behind the FAIL.
         fc.post("/wiz/%s/abort" % wid)
-        return {}
+    ctx.check(last is not None, "the %s check did not end within %d s", wid, timeout_s)
     ev["log"] = last.get("log", [])[-12:]
     ev["error"] = last.get("error")
     ev["result"] = last.get("result")

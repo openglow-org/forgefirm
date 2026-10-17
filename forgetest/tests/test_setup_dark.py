@@ -408,6 +408,26 @@ class LensCheckTests(ScriptedCheck):
         self.assertIn(("/wiz/lens.travel/abort", {}), self.fake.posts)
         self.assert_put_back()
 
+    def test_a_check_that_does_not_end_in_time_is_aborted_before_the_test_fails(self):
+        # The run never ends: the test stops following it at its timeout,
+        # aborts it, and fails, so no check runs on behind the FAIL.
+        from forgetest.runner import Failed
+        from forgetest.suite import setup_dark
+        real = self.fake.on_get
+
+        def on_get(path, q):
+            if path == "/wiz/dark":
+                return 200, dict(self.dark)         # running until aborted
+            return real(path, q)
+        self.fake.on_get = on_get
+        t = catalog.load_suite()["setup.check-lens"]
+        ctx = Context(Run("test", t.id, t.title), None, t)
+        with self.assertRaises(Failed) as cm:
+            setup_dark.run_check(ctx, self.WID, lambda p: None, 0.2)
+        self.assertIn("did not end within", str(cm.exception))
+        self.assertIn(("/wiz/lens.travel/abort", {}), self.fake.posts)
+        self.assertFalse(self.dark["running"])
+
     def test_a_controller_that_does_not_restart_fails_the_hand_back(self):
         # The start refused: the controller stays stopped on the stale
         # window's heels, and the run says so rather than pass.
