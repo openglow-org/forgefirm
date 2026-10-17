@@ -73,6 +73,11 @@ reported messages:
      shipped stream (GFSINK_DUMP) moved, an unreferenced lens is still
      held after $X, and the head does not return to the job start; $X
      recovers to Idle and the next jog ships steps
+ 18. a ^X during the web-service homing session keeps the lens hold: the
+     session's command is ended, the stream owes no stop, the reset lands
+     in Alarm, and after $X a Z jog is still refused (error 15) with MPos
+     Z unmoved, while a program Z move hits the pinned lens's soft limit
+     (ALARM:2)
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -335,6 +340,12 @@ class Session:
         self.sock.sendall(b"?")
         read_avail(self.sock, self.log, 0.3)
         m = re.findall(r"MPos:(-?[\d.]+)", "".join(self.log[-4:]))
+        return float(m[-1]) if m else None
+
+    def mpos_z(self):
+        self.sock.sendall(b"?")
+        read_avail(self.sock, self.log, 0.3)
+        m = re.findall(r"MPos:-?[\d.]+,-?[\d.]+,(-?[\d.]+)", "".join(self.log[-4:]))
         return float(m[-1]) if m else None
 
     def setting(self, n):
@@ -993,6 +1004,100 @@ def test_cancel_and_abort():
         s.close()
 
 
+HOME_SESSION_CMD = "sleep 47.25"
+
+
+def home_sessions():
+    """How many processes of the web-service homing session's command are
+    running (the command is one no other process on the host uses)."""
+    r = subprocess.run(["pgrep", "-f", HOME_SESSION_CMD], capture_output=True, text=True)
+    return len(r.stdout.split())
+
+
+def test_homing_abort_keeps_z_hold():
+    """Rule 18: a ^X during the web-service homing session keeps the lens
+    hold. The session owns the device while it runs, so the reset reads
+    nothing back and the position stays lost; the lens, unreferenced in
+    this session, must still be held where it stands once $X has cleared
+    the alarm. The session's command is ended by the reset, and the stream
+    owes the kernel no stop. A program Z move then hits the pinned lens's
+    soft limit."""
+    s = Session("home-reset", disarm_s=60, attr_log=True,
+                conf_extra="homing_mode = gfcloud\ngfcloud_home_cmd = %s\n" % HOME_SESSION_CMD)
+    try:
+        if home_sessions():
+            fail("[home-reset] a homing session's command is already running on the host")
+        mark = len(s.log)
+        if send_line(s.sock, "$J=G91Z1F100", s.log, tolerate_error=True) != "error" or \
+                "error:15" not in "".join(s.log[mark:]):
+            fail("[home-reset] the lens is not held before the session: a Z jog was not refused")
+        send_line(s.sock, "", s.log)
+        z0 = s.mpos_z()
+        if z0 is None:
+            fail("[home-reset] no position in the status report")
+        stops = s.attr_count("cnc/stop 1")
+        s.send_raw("$H")
+        if not s.wait_state("Home", 5):
+            fail("[home-reset] $H never reported Home (state %s)" % s.state())
+        time.sleep(0.5)
+        if not home_sessions():
+            fail("[home-reset] the homing session's command is not running")
+        mark = len(s.log)
+        s.sock.sendall(b"\x18")
+        if not s.wait_state("Alarm", 8):
+            fail("[home-reset] ^X during the homing session did not land in Alarm (state %s)"
+                 % s.state())
+        read_avail(s.sock, s.log, 0.5)
+        if "ALARM:6" not in "".join(s.log[mark:]):
+            fail("[home-reset] the reset during homing did not raise ALARM:6")
+        end = time.time() + 3
+        while home_sessions() and time.time() < end:
+            time.sleep(0.1)
+        if home_sessions():
+            fail("[home-reset] the homing session's command outlived the reset")
+        if s.attr_count("cnc/stop 1") != stops:
+            fail("[home-reset] the reset during the session wrote cnc/stop: the stream owed no stop")
+        send_line(s.sock, "$X", s.log)
+        if not s.wait_state("Idle", 5):
+            fail("[home-reset] $X did not recover to Idle (state %s)" % s.state())
+        mark = len(s.log)
+        if send_line(s.sock, "$J=G91Z1F100", s.log, tolerate_error=True) != "error" or \
+                "error:15" not in "".join(s.log[mark:]):
+            fail("[home-reset] a Z jog after the reset was not refused: the lens hold was dropped")
+        time.sleep(0.6)
+        z1 = s.mpos_z()
+        if z1 is None or abs(z1 - z0) > 0.001:
+            fail("[home-reset] the lens moved after the reset (Z %s, was %.3f)" % (z1, z0))
+        send_line(s.sock, "", s.log)
+        mark = len(s.log)
+        s.send_raw("G91 G1 Z1 F100")
+        if read_avail(s.sock, s.log, 5.0, until=("ALARM:", "ok")) != "ALARM:" or \
+                "ALARM:2" not in "".join(s.log[mark:]):
+            fail("[home-reset] a program Z move did not hit the pinned lens's soft limit (ALARM:2)")
+        # The soft-limit alarm asks for a reset before $X unlocks it: one
+        # sent once a status report has come from the alarm's wait. A ^X
+        # on the heels of the ALARM line lands while the soft limit's own
+        # reset is still pending and is folded into it. The '?' polls keep
+        # the controller's output flowing while it waits for the banner.
+        if not s.wait_state("Alarm", 5):
+            fail("[home-reset] no status report from the soft-limit alarm (state %s)" % s.state())
+        banners = s.count("GrblHAL")
+        s.sock.sendall(b"\x18")
+        end = time.time() + 5
+        while s.count("GrblHAL") <= banners and time.time() < end:
+            s.state()
+        if s.count("GrblHAL") <= banners:
+            fail("[home-reset] no reset banner after the ^X that clears the soft limit")
+        send_line(s.sock, "$X", s.log)
+        if not s.wait_state("Idle", 5):
+            fail("[home-reset] $X after the soft limit did not recover to Idle (state %s)" % s.state())
+        print("PASS [home-reset]: ^X during the homing session ended its command, wrote no "
+              "cnc/stop, landed in ALARM:6; after $X the Z jog was refused with Z at %.3f and "
+              "a program Z move raised ALARM:2" % z1)
+    finally:
+        s.close()
+
+
 def test_lid_cancel_from_hold():
     """Rule 16: a job paused on the button is not resumable past a lid
     open. The lid cancels it from the hold as it does from Run - the
@@ -1134,6 +1239,7 @@ def main():
     test_lid_cancels_and_returns()
     test_pause_then_lid_cancel_returns_to_the_job_start()
     test_cancel_and_abort()
+    test_homing_abort_keeps_z_hold()
     test_lid_cancel_from_hold()
     test_lid_policy_hold()
     test_sigterm_mid_job()
