@@ -194,7 +194,8 @@ def pacing(ctx):
 @test("motion.jog-roundtrip", title="Motion quality: bounded jogs, max rate, diagonal, hold/resume, "
                                    "a soft reset during a move",
       subsystem="motion", kind="auto", mode="grbl", est_min=3,
-      covers=_MOTION_COVERS, requires=["kernel.latch-locked-idle", "kernel.k1-k2"],
+      covers=_MOTION_COVERS + [("forgectrl", "src/main.c")],
+      requires=["kernel.latch-locked-idle", "kernel.k1-k2"],
       steps=["Setup: the head parked with at least 60 mm of free +X and 40 mm of free +Y travel; "
              "bed clear, lid closed."],
       description="Sanity jogs (X, Y 40 mm out/back at F2400), max-rate X out/back (60 mm at "
