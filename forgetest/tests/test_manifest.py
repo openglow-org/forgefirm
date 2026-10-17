@@ -536,8 +536,9 @@ class CatalogTests(unittest.TestCase):
         # a suite module does import, at its top level or inside a function
         # or a block, has to be on it (or be the registry, which judges
         # nothing), or that judge would be in no fingerprint. The sibling
-        # walk follows the relative spelling alone, so a suite module
-        # imports the package by no absolute name.
+        # walk follows the relative spellings alone (`from .x import` and
+        # `from . import x`), so a suite module imports the package by no
+        # absolute name.
         import ast
         import glob
         paths = catalog.shared_judge_paths()
@@ -724,6 +725,15 @@ def two(ctx):
         a4, b4 = self.shas()
         self.assertNotEqual(a3, a4)
         self.assertNotEqual(b3, b4)
+        # the spelling with no module (`from . import x`, as homeoff.py imports cloud.py) is
+        # walked the same
+        self.write(self.MODULE.replace("def two(ctx):\n",
+                                       "def two(ctx):\n    from . import judge as j\n    j.judge(2)\n"))
+        a8, b8 = self.shas()
+        write_judge("def judge(x):\n    return x > 4\n")
+        a9, b9 = self.shas()
+        self.assertEqual(a8, a9)
+        self.assertNotEqual(b8, b9)
 
     def test_line_endings_do_not_count(self):
         a1, b1 = self.shas()

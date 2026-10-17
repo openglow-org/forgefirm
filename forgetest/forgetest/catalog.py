@@ -246,9 +246,9 @@ def module_parts(path):
 
 def sibling_imports(path, seen=None):
     """The suite modules a module's shared text imports with `from .x
-    import ...`, as paths, transitively, in a stable order. A helper a
-    test calls from a sibling module is part of the judge, so its text
-    belongs in the test's fingerprint."""
+    import ...` or `from . import x`, as paths, transitively, in a stable
+    order. A helper a test calls from a sibling module is part of the
+    judge, so its text belongs in the test's fingerprint."""
     if seen is None:
         seen = []
     for sib in _direct_siblings(path):
@@ -260,17 +260,19 @@ def sibling_imports(path, seen=None):
 
 def _imported(path, nodes):
     """The suite modules the statements `nodes` import with `from .x
-    import`, at any depth (inside a function or a block too), in the
-    order they are written."""
+    import` or `from . import x` (each name a module of the suite), at any
+    depth (inside a function or a block too), in the order they are
+    written."""
     here = os.path.dirname(path)
     found = sorted((n for top in nodes for n in ast.walk(top)
-                    if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module),
+                    if isinstance(n, ast.ImportFrom) and n.level == 1),
                    key=lambda n: (n.lineno, n.col_offset))
     out = []
     for node in found:
-        sib = os.path.join(here, node.module.replace(".", os.sep) + ".py")
-        if os.path.isfile(sib) and sib not in out:
-            out.append(sib)
+        for name in ([node.module] if node.module else [a.name for a in node.names]):
+            sib = os.path.join(here, name.replace(".", os.sep) + ".py")
+            if os.path.isfile(sib) and sib not in out:
+                out.append(sib)
     return out
 
 
