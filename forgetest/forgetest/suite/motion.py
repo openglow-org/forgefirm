@@ -284,7 +284,8 @@ def jog_roundtrip(ctx):
         if not (state or "").startswith("Alarm"):
             if (state or "").startswith("Idle"):
                 ctx.fail("the move had ended before the ^X: the controller is Idle with no alarm")
-            ctx.fail("the controller was not in Alarm within 2 s of the ^X (state %s)", state)
+            ctx.fail("the controller was not in Alarm within 2 s of the ^X (state %s)",
+                     state or "unread: the 5 ms sampling loop ran past the 2 s")
 
         # The read-back ends inside a second of the reset, and the core's
         # re-init flushes what it has read: the unlock goes after both.
@@ -327,27 +328,35 @@ def jog_roundtrip(ctx):
         # The ramp: the kernel decelerated. Nothing but its ramp lowers the
         # tick rate once a run is up to speed, so the bytes it played over
         # the run's last 25 to 50 ms, against the tick, say whether the run
-        # ended at speed or decelerated. The queue at cnc/stop is about 110 ms of
-        # ticks: the ring holds 200 ms and the producer leads by 10 ms, and
-        # the core's alarm hold plays 100 ms of it at the tick before the
-        # driver's stop. The ramp to the kernel's 900 Hz floor consumes
-        # (f0^2 - 900^2) / (2 a) ticks, 112.6 ms of the tick (12687 ticks
-        # at the x32 tick of 112640 Hz and its 500000 Hz/s ramp; the ramp
-        # scales with the tick, so every mode gives the same fractions).
-        # So the run ends at the floor, or out of data part way down the
-        # ramp at f0 * sqrt(1 - 2 (a / f0) Q): 15% of the tick with 110 ms
-        # left, 33% with 100 ms, 45% with 90 ms. The tail's mean is that
-        # plus a W / 2: at most 56% of the tick over 50 ms with 90 ms left,
-        # 21% to 39% over 25 ms with 100 to 110 ms left. A run that ends at
-        # the tick (a run-out with no stop) reads 100%, within the
-        # sampling's few percent over 25 ms. The bound is 70%: 25%
-        # above the slowest ramped tail and 30% below a run-out.
+        # ended at speed or decelerated. The queue at cnc/stop is about
+        # 110 ms of ticks: the ring holds 200 ms and the producer leads by
+        # 10 ms, and the core's alarm hold plays 100 ms of it at the tick
+        # before the driver's stop. The kernel's ramp is stepped (cnc.c,
+        # ramp_update_tasklet_fn): the tick holds for the first 10 ms,
+        # then every 10 ms it drops by ramp_rate / 100 until it reaches
+        # the 900 Hz floor, which plays 10 ms before the stop. At the x32
+        # tick of 112640 Hz and its 500000 Hz/s ramp that is 5000 Hz off
+        # every 10 ms: 24 intervals, 240 ms, about 13270 ticks, 118 ms of
+        # the tick (the ramp scales with the tick, so every mode gives the
+        # same fractions). So the run ends at the floor, or out of data
+        # part way down the ramp, on the interval its queue runs out in:
+        # 24% of the tick with 110 ms left, 38% with 100 ms, 51% with
+        # 90 ms. The tail's mean over the 25 to 30 ms the poll samples is
+        # higher, since it spans the intervals before: 32% with 110 ms
+        # left, 45% with 100 ms, 56% with 90 ms (61% over the 50 ms window
+        # bound), and a few percent when the run reaches the floor. A run
+        # that ends at the tick (a run-out with no stop) reads 100%,
+        # within the sampling's few percent over 25 ms. The bound is 70%:
+        # 14 points above the slowest ramped tail and 30 below a run-out.
         # The other readings are recorded, not judged: with the ramp about
         # the size of the queue, the steps that never played can be none,
         # the bytes played match a run-out within a few percent, and the
-        # time to leave running (about 250 ms with 100 ms left, 290 ms with
-        # 110 ms) is within 10% of the 100 ms hold plus three quarters of
-        # the 223 ms ramp (267 ms).
+        # time to leave running is the 100 ms hold plus the run's end on
+        # the ramp: about 240 ms with 100 ms left, 270 ms with 110 ms,
+        # 340 ms when the run reaches the floor. The evidence's ramp_ticks
+        # and ramp_s are the continuous figures, (f0^2 - 900^2) / (2 a)
+        # and (f0 - 900) / a: 12687 ticks and 223 ms at x32, about 4% and
+        # 7% under the stepped ramp's.
         running = [s for s in samples if s[1] == "running"]
         tail = None
         if running:
