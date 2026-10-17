@@ -242,7 +242,7 @@ class CoverageReportTests(unittest.TestCase):
         self.assertEqual(m.host_row_problems(man, [runs], root=root, sources=None), [])
         self.assertEqual(m.host_row_problems(man, [idle], root=root, sources=None),
                          [(idle[0], idle[1], idle[2], ci + " does not run it")])
-        # a workflow that runs on no push or pull request runs it on no change, and a step whose
+        # a workflow whose own on: names neither push nor pull_request is listed, and a step whose
         # failure the run tolerates does not run it
         job = "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n      - run: python3 scripts/bench/stream_test.py\n"
         root = self._root({"scripts/bench/stream_test.py": "",
@@ -252,7 +252,7 @@ class CoverageReportTests(unittest.TestCase):
         manual = runs[:3] + ("forgefirm:.github/workflows/manual.yml",)
         soft = runs[:3] + ("forgefirm:.github/workflows/soft.yml",)
         self.assertEqual(m.host_row_problems(man, [manual, soft], root=root, sources=None),
-                         [manual[:3] + (manual[3] + " runs on no push or pull request",),
+                         [manual[:3] + (manual[3] + ": the lint reads no push or pull_request in its own on:",),
                           soft[:3] + (soft[3] + " does not run it",)])
 
     def _runs(self, yml, path):
@@ -320,7 +320,8 @@ class CoverageReportTests(unittest.TestCase):
     def test_a_step_counts_only_when_every_run_of_the_workflow_runs_it_and_its_failure_fails_the_run(self):
         step = "steps:\n  - name: x\n%s    run: ./build/tray_test\n"
         test = "tests/tray_test.c"
-        # a step under an if: runs it on some runs, not every run; literally true is no condition
+        # the lint evaluates no condition: an if: other than the literal true counts as no step,
+        # always() included; literally true is no condition
         self.assertFalse(self._runs(step % "    if: false\n", test))
         self.assertFalse(self._runs(step % "    if: github.event_name == 'push'\n", test))
         self.assertFalse(self._runs(step % "    if: ${{ always() }}\n", test))

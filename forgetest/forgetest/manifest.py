@@ -577,12 +577,13 @@ def workflow_steps(text):
 
 
 def _on_every_run(step):
-    """Whether a step runs on every run of its workflow and its failure
-    fails the run: neither it nor its job carries an `if:` other than
-    `true`, or a `continue-on-error:` other than `false`. A step that
-    runs only under a condition, or whose failure the run tolerates,
-    proves nothing about what it runs, and neither does a step of a
-    workflow with a key the lint cannot read ("unread")."""
+    """Whether the lint counts a step as one that runs on every run of
+    its workflow and fails the run when it fails: neither the step nor
+    its job carries an `if:` other than the literal `true` or a
+    `continue-on-error:` other than the literal `false`, and the
+    workflow has no key the lint cannot read ("unread"). The lint
+    evaluates no condition, so a step under `always()` or `success()`
+    counts as no step too."""
     if step.get("unread"):
         return False
     for d in (step, step.get("job") or {}):
@@ -708,10 +709,11 @@ def workflow_runs(steps, test_path):
     (tests.test_x, tests.test_x.Case.test_one); unittest discover from the
     test's own directory with a pattern its name matches; pytest on the
     test or its own directory. An argument to anything else (echo, a build,
-    an install) does not run the test. Only a step that runs on every run of
-    the workflow, and that fails the run when it fails, counts: a step under
-    an `if:` other than true, or with a `continue-on-error:` other than
-    false, on the step or on its job, runs nothing."""
+    an install) does not run the test. Only a step that _on_every_run
+    accepts counts: the lint evaluates no condition, so a step under an
+    `if:` other than the literal true, or with a `continue-on-error:`
+    other than the literal false, on the step or on its job, counts as
+    no step."""
     full = posixpath.normpath(test_path)
     stem, ext = posixpath.splitext(posixpath.basename(full))
     compiled = ext in (".c", ".cc", ".cpp")
@@ -757,10 +759,12 @@ def host_row_problems(manifest, host=HOST_TESTED, root=REPO_ROOT, sources=SOURCE
     """HOST_TESTED rows that prove nothing: a glob that selects no
     behavioral file of its component (the same defect as an empty covers
     entry), a host test or a workflow that does not exist, a workflow that
-    cannot be read where it should be, one that runs on no push or pull
-    request (a dispatch, a call or a schedule runs on no change), one that
-    does not check out the test's repository, or one with no step that
-    runs the test on every run (workflow_runs). Whether a
+    cannot be read where it should be, one whose own `on:` names neither
+    push nor pull_request as the lint reads it (workflow_triggers: a
+    dispatch, a call or a schedule alone, a call not followed to the
+    workflow that calls it, and a flow mapping, which names no event),
+    one that does not check out the test's repository, or one with no
+    step that runs the test on every run (workflow_runs). Whether a
     workflow runs its test is not checked where it cannot be read (see
     read_source). Returns [(component, glob, host test, why)]."""
     out = []
@@ -779,7 +783,7 @@ def host_row_problems(manifest, host=HOST_TESTED, root=REPO_ROOT, sources=SOURCE
         if text is None:
             continue
         if not workflow_triggers(text) & {"push", "pull_request"}:
-            out.append((comp, pat, ref, "%s runs on no push or pull request" % ci))
+            out.append((comp, pat, ref, "%s: the lint reads no push or pull_request in its own on:" % ci))
             continue
         steps = workflow_steps(text)
         test_repo, _sep, test_path = ref.partition(":")
