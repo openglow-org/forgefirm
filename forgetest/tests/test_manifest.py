@@ -258,6 +258,10 @@ class CoverageReportTests(unittest.TestCase):
     def _runs(self, yml, path):
         return m.workflow_runs(m.workflow_steps(yml), path)
 
+    def _block(self, *lines, keys=""):
+        """A one-step workflow whose run text is these lines, the step's other keys before it."""
+        return "steps:\n  - name: x\n%s    run: |\n%s" % (keys, "".join("      %s\n" % ln for ln in lines))
+
     def test_what_running_a_host_test_looks_like(self):
         step = "steps:\n  - name: x\n    run: %s\n"
         self.assertTrue(self._runs(step % "./build/tray_test", "tests/tray_test.c"))
@@ -266,9 +270,11 @@ class CoverageReportTests(unittest.TestCase):
         self.assertTrue(self._runs(step % "python3 forgefirm/scripts/bench/ctlport_test.py build/x",
                                    "forgefirm/scripts/bench/ctlport_test.py"))
         self.assertTrue(self._runs(step % "python -m pytest -q tests", "tests/test_frame.py"))
-        # a block, with the step's working-directory: the words are its paths
+        # a block, with the step's working-directory: the words are its paths (the loop as
+        # python3-gfhardware's CI writes it, an expansion in an assignment)
         block = ("steps:\n  - name: every module\n    working-directory: %s\n    run: |\n"
-                 "      set -e\n      for t in tests/test_*.py; do\n        python -m unittest \"tests.$t\"\n"
+                 "      set -e\n      for t in tests/test_*.py; do\n        m=$(basename \"$t\" .py)\n"
+                 "        python -m unittest -v \"tests.$m\"\n"
                  "      done\n  - working-directory: forgefirm/forgetest\n"
                  "    run: python -B -m unittest discover -s tests -v\n")
         self.assertTrue(self._runs(block % "gfh", "gfh/tests/test_feeder.py"))
@@ -279,8 +285,8 @@ class CoverageReportTests(unittest.TestCase):
         self.assertFalse(self._runs("on:\n  push:\n    paths:\n      - 'kas/source-bundle.yml'\n"
                                     + step % "python3 x.py", "kas/source-bundle.yml"))
         self.assertFalse(self._runs(step % "./build/lens_test  # tray_test is manual", "tests/tray_test.c"))
-        self.assertFalse(self._runs(step % "for t in tests/test_*.py; do python $t; done",
-                                    "tools/tests/test_feeder.py"))
+        self.assertFalse(self._runs("steps:\n  - run: |\n      for t in tests/test_*.py; do\n        python $t\n"
+                                    "      done\n", "tools/tests/test_feeder.py"))
         self.assertFalse(self._runs(step % "python -m unittest discover -s tests",
                                     "scripts/bench/tests/foo_test.py"))
         # a longer name, another file, a step's name, a comment line
@@ -293,6 +299,7 @@ class CoverageReportTests(unittest.TestCase):
         # discover or pytest runs its own directory's matching files only
         self.assertFalse(self._runs(step % "echo tray_test", "tests/tray_test.c"))
         self.assertFalse(self._runs(step % "echo ./build/tray_test", "tests/tray_test.c"))
+        self.assertFalse(self._runs(step % "command -v ./build/tray_test", "tests/tray_test.c"))   # prints it
         self.assertFalse(self._runs(step % "cmake --build build --target tray_test", "tests/tray_test.c"))
         self.assertFalse(self._runs(step % "cat tests/run_test.py", "tests/run_test.py"))
         self.assertFalse(self._runs(step % "python -m unittest discover -s forgefirm",
@@ -356,6 +363,34 @@ class CoverageReportTests(unittest.TestCase):
         two = "jobs:\n  a:\n    if: false\n    steps:\n      - run: %s\n  b:\n    steps:\n      - run: %s\n"
         self.assertTrue(self._runs(two % ("make", "./build/tray_test"), test))
         self.assertFalse(self._runs(two % ("./build/tray_test", "make"), test))
+        # the run text is read as bash -e or sh -e runs it: the test counts on a line that holds it
+        # alone, or in a pipeline under pipefail; any other operator on the line, or a pipe with no
+        # pipefail, keeps it from counting
+        for line in ("./build/tray_test || true", "true || ./build/tray_test", "./build/tray_test; true",
+                     "./build/tray_test &", "./build/tray_test | tee log"):
+            self.assertFalse(self._runs(self._block(line), test), line)
+        self.assertTrue(self._runs(self._block("set -o pipefail", "./build/tray_test | tee log"), test))
+        self.assertTrue(self._runs(self._block("./build/tray_test | tee log", keys="    shell: bash\n"), test))
+        # no line counts after one that ends the step, turns errexit off, sets an option the lint
+        # does not follow (noexec), or opens a here-document or a compound command
+        for before in ("exit 0", "set +e", "set -n", "python3 - <<'EOF'"):
+            self.assertFalse(self._runs(self._block(before, "./build/tray_test"), test), before)
+        self.assertFalse(self._runs(self._block("{", "./build/tray_test", "} || true"), test))
+        # a loop counts only with a body whose lines count
+        for body in ("python $t || true", "python $t | tee log"):
+            self.assertFalse(self._runs(self._block("for t in tests/test_*.py; do", body, "done"), "tests/test_x.py"),
+                             body)
+        # a folded block, and a scalar continued under its key, are one line to the shell
+        self.assertFalse(self._runs("steps:\n  - run: >\n      ./build/tray_test\n      || true\n", test))
+        self.assertFalse(self._runs("steps:\n  - run: ./build/tray_test\n      || true\n", test))
+        # the lint reads the text of bash and sh alone: the step's shell, or its job's or its
+        # workflow's default
+        self.assertFalse(self._runs(self._block("./build/tray_test", keys="    shell: bash {0}\n"), test))
+        self.assertTrue(self._runs(self._block("./build/tray_test", keys="    shell: sh\n"), test))
+        self.assertFalse(self._runs("jobs:\n  t:\n    defaults:\n      run:\n        shell: pwsh\n    steps:\n"
+                                    "      - run: ./build/tray_test\n", test))
+        self.assertFalse(self._runs("defaults:\n  run:\n    shell: pwsh\njobs:\n  t:\n    steps:\n"
+                                    "      - run: ./build/tray_test\n", test))
         # a checkout under a condition is no checkout
         yml = "steps:\n  - uses: actions/checkout@v4\n%s    with:\n      path: own\n"
         self.assertEqual(m.checkout_path(m.workflow_steps(yml % ""), "x", True), "own")

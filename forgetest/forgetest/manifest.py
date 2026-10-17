@@ -122,11 +122,15 @@ BEHAVIORAL = [
 # every run of the workflow and whose failure fails it (no `if:` other than
 # `true` and no `continue-on-error:` other than `false` on the step or its
 # job, and no key with one stray quote where the lint reads the workflow's
-# keys), and name it, or discover it (a glob, unittest discover, pytest on
-# its directory). A host-tested path counts as covered in the coverage
-# lint, and like every path no test covers it is in no fingerprint: a
-# change there makes no acceptance run necessary. A path a catalog test
-# exercises on the hardware belongs in that test's covers, not here.
+# keys), under bash or sh, on a line of the step's run text whose failure
+# ends the step (the command alone on its line, or in a pipeline under
+# pipefail, with errexit set and no line before it that ends the step or
+# opens a compound command: workflow_runs), and name it, or discover it (a
+# glob, unittest discover, pytest on its directory). A host-tested path
+# counts as covered in the coverage lint, and like every path no test
+# covers it is in no fingerprint: a change there makes no acceptance run
+# necessary. A path a catalog test exercises on the hardware belongs in
+# that test's covers, not here.
 HOST_TESTED = [
     # An extension package's holds as the engine reads them (forgeext's
     # holdkeep_test and run_test prove the writer's side).
@@ -502,15 +506,40 @@ def workflow_triggers(text):
     return set()
 
 
+def _defaults(lines, i):
+    """{"shell": its value} for the `defaults:` key at lines[i] when it
+    gives the run steps a shell:, {} when it gives none. A flow mapping
+    (at the key or at its run:) and a key with one stray quote under it
+    give None: a shell the lint does not read."""
+    if _KEY_RX.match(lines[i]).group(3).strip():
+        return {"shell": None}
+    out = {}
+    for ln in lines[i + 1:]:
+        if not ln.strip():
+            continue
+        if _indent(ln) <= _indent(lines[i]):
+            break
+        km = _KEY_RX.match(ln)
+        if _stray_key(ln) or (km and km.group(2) == "run" and km.group(3).strip()):
+            return {"shell": None}
+        if km and km.group(2) == "shell":
+            out["shell"] = _scalar(km.group(3))
+    return out
+
+
 def workflow_steps(text):
     """A workflow's steps, each a dict of its keys: "uses", "run" (the
-    command text, a block's lines joined), "working-directory", "with"
-    (a dict), "if" and "continue-on-error" as written, and "job": the
-    "if" and "continue-on-error" of the job the step is in, when it is
-    in one. YAML read by its indentation, as far as these workflows use
-    it; comments, whole lines and from ' #' to the end of a line, are not
-    read. Anything outside a step (a trigger's paths, a job's name) is not
-    a step. A key with one stray quote (`if":`, `"run:`) at the top level,
+    command text: a literal block's lines one per line; a folded block,
+    or a scalar continued on the lines under its key, as one line),
+    "working-directory", "with" (a dict), "shell", "if" and
+    "continue-on-error" as written; "job": the "if" and
+    "continue-on-error" of the job the step is in, when it is in one,
+    and the "shell" its `defaults:` give; and "workflow": the "shell" the
+    workflow's own `defaults:` give, when they give one (_defaults). YAML
+    read by its indentation, as far as these workflows use it; comments,
+    whole lines and from ' #' to the end of a line, are not read.
+    Anything outside a step (a trigger's paths, a job's name) is not a
+    step. A key with one stray quote (`if":`, `"run:`) at the top level,
     at a job's name or a job's key, at a step's key, or as the first key of
     any list item (a step's first key is on its dash line: `- run": make`)
     is no key the lint reads: every step of the workflow then carries
@@ -518,19 +547,23 @@ def workflow_steps(text):
     lines = _lines(text)
     steps, i = [], 0
     in_jobs, job_at, key_at, job = False, None, None, None
-    stray = False
+    stray, workflow = False, {}
     while i < len(lines):
         km = _KEY_RX.match(lines[i])
         if km:                      # a mapping key: which job this is, and what the job itself says
             ind, key = _indent(lines[i]), km.group(2)
             if ind == 0:
                 in_jobs, job_at, key_at, job = key == "jobs", None, None, None
+                if key == "defaults":
+                    workflow.update(_defaults(lines, i))
             elif in_jobs and (job_at is None or ind == job_at):
                 job_at, key_at, job = ind, None, {}
             elif in_jobs and job_at is not None and ind > job_at and (key_at is None or ind == key_at):
                 key_at = ind
                 if key in _CONDITION_KEYS:
                     job[key] = _scalar(km.group(3))
+                elif key == "defaults":
+                    job.update(_defaults(lines, i))
         elif _stray_key(lines[i]):
             ind = _indent(lines[i])
             stray = stray or ind == 0 or (in_jobs and (job_at is None or ind == job_at or (
@@ -570,15 +603,27 @@ def workflow_steps(text):
                 step["with"] = {c.group(2): c.group(3).strip().strip("'\"")
                                 for c in (_KEY_RX.match(x) for x in child) if c}
             elif key == "run":
-                step["run"] = "\n".join(x.strip() for x in child) if val[:1] in ("|", ">") else val
+                # YAML folds a folded block, and a plain or quoted scalar continued on the
+                # lines under its key, into one line where no blank or more indented line
+                # breaks it. Read as one line: where YAML keeps a break, the joined line
+                # counts no command that the shell's own lines would not.
+                text = [x.strip() for x in child if x.strip()]
+                if val[:1] == "|":
+                    step["run"] = "\n".join(x.strip() for x in child)
+                elif val[:1] == ">":
+                    step["run"] = " ".join(text)
+                else:
+                    step["run"] = _scalar(" ".join([km.group(3).strip()] + text))
             else:
                 step[key] = val
         if job is not None:
             step["job"] = job       # the job's own dict: a job key written after its steps counts too
         steps.append(step)
-    if stray:
-        for s in steps:
+    for s in steps:
+        if stray:
             s["unread"] = True
+        if workflow:
+            s["workflow"] = workflow
     return steps
 
 
@@ -613,33 +658,224 @@ def checkout_path(steps, name, own):
     return None
 
 
-_SPLIT_RX = re.compile(r"&&|\|\||[;|\n]|(?:^|(?<=\s))(?:then|do|else)(?=\s|$)")
-_PREFIXES = ("sudo", "env", "time", "exec", "command", "nice")
+# What only starts the real command, and the flags with which each one
+# runs it. Any other flag (`command -v` and `sudo -l` print the command)
+# leaves the prefix as the command.
+_PREFIXES = {"sudo": ("-E", "-H", "-n"), "env": ("-i", "-"), "time": ("-p",), "command": ("-p",), "nice": ()}
 _INTERPRETER_RX = re.compile(r"^(?:python[0-9.]*|bash|sh)$")
+# The shell's operators, the longest first. A redirection keeps a command
+# one command, and a pipe joins commands into a pipeline; any other
+# operator makes a list of commands, puts one in the background, or opens
+# a subshell or a here-document.
+_OPERATORS = ("&>>", "&&", "||", ";;", ";&", "|&", ">>", "<<", ">&", "<&", "<>", ">|", "&>",
+              "|", "&", ";", "(", ")", "<", ">")
+_REDIRECTIONS = frozenset((">", ">>", "<", ">&", "<&", "<>", ">|", "&>", "&>>"))
+# A command word that opens or closes a compound command (an if, a case,
+# a loop, a group, a function) or negates a status.
+_RESERVED = frozenset(("if", "then", "elif", "else", "fi", "case", "esac", "for", "select", "while",
+                       "until", "do", "done", "function", "coproc", "{", "}", "[[", "]]", "!"))
+# A command after which the lint cannot tell what a later line runs, or
+# whether a failure still ends the step.
+_STOPS = frozenset(("exit", "return", "exec", "trap", "eval", "source", ".", "alias", "shopt",
+                    "enable", "builtin", "hash", "break", "continue", "logout"))
+# The `set` options the lint follows (errexit, pipefail) or knows to
+# change neither; a `set` of any other option ends what it reads.
+_SET_FLAGS = {"e": "errexit", "u": "nounset", "x": "xtrace", "v": "verbose"}
+_SET_NAMES = frozenset(("errexit", "pipefail", "nounset", "xtrace", "verbose"))
 
 
-def _commands(run):
-    """The simple commands of a step's run text, each as its words, with
-    what only starts the real command taken off: sudo and its flags, env,
-    time, exec, and variable assignments."""
-    import shlex
-    out = []
-    for part in _SPLIT_RX.split(run.replace("\\\n", " ")):
-        try:
-            words = shlex.split(part)
-        except ValueError:
-            words = part.split()
-        while words:
-            if words[0] in _PREFIXES:
-                words = words[1:]
-                while words and words[0].startswith("-"):
-                    words = words[1:]
-            elif re.match(r"^[A-Za-z_]\w*=", words[0]):
-                words = words[1:]
+def _part_end(line, i):
+    """Where the part of a shell word that starts at line[i] ends: a
+    quoted string, an escaped character, an expansion ($(...), ${...},
+    `...`), or one character; -1 when it does not close on the line."""
+    n, c = len(line), line[i]
+    if c == "\\":
+        return i + 2 if i + 1 < n else -1
+    if c == "'":
+        j = line.find("'", i + 1)
+        return j + 1 if j > 0 else -1
+    if c in "\"`":
+        j = i + 1
+        while j < n and line[j] != c:
+            j = _part_end(line, j) if line[j] in "\\$" or (c == '"' and line[j] == "`") else j + 1
+            if j < 0:
+                return -1
+        return j + 1 if j < n else -1
+    if c == "$" and line[i + 1:i + 2] in ("(", "{"):
+        opener, depth, j = line[i + 1], 0, i + 1
+        while j < n:
+            if line[j] == opener:
+                depth, j = depth + 1, j + 1
+            elif line[j] == (")" if opener == "(" else "}"):
+                depth, j = depth - 1, j + 1
+                if not depth:
+                    return j
+            elif line[j] in "\\'\"`$":
+                j = _part_end(line, j)
+                if j < 0:
+                    return -1
             else:
+                j += 1
+        return -1
+    return i + 1
+
+
+def _shell_words(line):
+    """One line of shell as the lint reads it: [(True, word) or (False,
+    operator)], a word with its quotes taken off and its expansions kept
+    as written; None when a quote or an expansion does not close on the
+    line."""
+    out, word, i = [], None, 0
+    while i < len(line):
+        c = line[i]
+        if c in " \t|&;()<>":
+            if word is not None:
+                out.append((True, word))
+                word = None
+            if c in " \t":
+                i += 1
+            else:
+                op = next(o for o in _OPERATORS if line.startswith(o, i))
+                out.append((False, op))
+                i += len(op)
+            continue
+        j = _part_end(line, i)
+        if j < 0:
+            return None
+        part = line[i:j]
+        if part[0] in "'\"":
+            part = part[1:-1]
+        elif part[0] == "\\":
+            part = part[1:]
+        word = (word or "") + part
+        i = j
+    if word is not None:
+        out.append((True, word))
+    return out
+
+
+def _command(words):
+    """A simple command's words with what only starts the real command
+    taken off: sudo, env, time, command and nice with the flags with which
+    they run it (_PREFIXES), and variable assignments."""
+    while words:
+        if words[0] in _PREFIXES:
+            rest = words[1:]
+            while rest and rest[0] in _PREFIXES[words[0]]:
+                rest = rest[1:]
+            if rest[:1] and rest[0].startswith("-"):
                 break
-        if words:
-            out.append(words)
+            words = rest
+        elif re.match(r"^[A-Za-z_]\w*=", words[0]):
+            words = words[1:]
+        else:
+            break
+    return words
+
+
+def _line_commands(tokens):
+    """The commands of a line of shell (_shell_words) that is one simple
+    command, or a pipeline of them, and nothing else, each as its words
+    after _command, with its redirections taken off. None for any other
+    line: one that does not close, holds another operator (a list, a
+    background job, a subshell, a here-document) or a pipe at its end, or
+    has a command that is a reserved word or one of _STOPS."""
+    if tokens is None:
+        return None
+    cmds, words, k = [], [], 0
+    while k < len(tokens):
+        is_word, text = tokens[k]
+        if is_word:
+            words.append(text)
+        elif text in _REDIRECTIONS and k + 1 < len(tokens) and tokens[k + 1][0]:
+            k += 1                      # the redirection's target
+        elif text == "|" and words:
+            cmds.append(words)
+            words = []
+        else:
+            return None
+        k += 1
+    if cmds and not words:
+        return None
+    cmds = [_command(c) for c in cmds + [words]]
+    return None if any(c[:1] and (c[0] in _RESERVED or c[0] in _STOPS) for c in cmds) else cmds
+
+
+def _for_header(tokens):
+    """The words of a line `for <name> in <words>; do` without its `; do`,
+    None for any other line."""
+    if (tokens and len(tokens) >= 5 and tokens[0] == (True, "for") and tokens[2] == (True, "in")
+            and tokens[-2:] == [(False, ";"), (True, "do")] and all(w for w, _t in tokens[:-2])):
+        return [t for _w, t in tokens[:-2]]
+    return None
+
+
+def _set(args, opts):
+    """Follow in opts the errexit and pipefail that a `set` command's
+    arguments set or clear. False when they name an option the lint does
+    not follow (noexec, onecmd, the listing of `set -o`)."""
+    k = 0
+    while k < len(args):
+        a, k = args[k], k + 1
+        if a in ("-", "--") or len(a) < 2 or a[0] not in "-+":
+            return True                 # the positional parameters follow
+        for ch in a[1:]:
+            if ch == "o":
+                name, k = (args[k] if k < len(args) else ""), k + 1
+            else:
+                name = _SET_FLAGS.get(ch)
+            if name not in _SET_NAMES:
+                return False
+            if name in opts:
+                opts[name] = a[0] == "-"
+    return True
+
+
+def _shell(step):
+    """The shell a step's run text runs under: the step's own shell:, else
+    its job's `defaults: run: shell:`, else the workflow's; "" for none,
+    which is bash -e (sh -e with no bash) on a Linux or macOS runner (the
+    lint does not read runs-on). None when any one of them is other than
+    bash or sh: the lint reads the text of no other shell."""
+    given = [d["shell"] for d in (step, step.get("job") or {}, step.get("workflow") or {}) if "shell" in d]
+    if any(g not in ("bash", "sh") for g in given):
+        return None
+    return given[0] if given else ""
+
+
+def _run_commands(run, shell):
+    """The commands of a step's run text that the lint counts, each as its
+    words (_line_commands): see workflow_runs."""
+    opts = {"errexit": True, "pipefail": shell == "bash"}
+    lines = [ln.strip() for ln in run.replace("\\\n", " ").split("\n") if ln.strip()]
+    out, k = [], 0
+    while k < len(lines):
+        tokens = _shell_words(lines[k])
+        k += 1
+        header = _for_header(tokens)
+        if header is not None:          # the loop is read whole: its header, its body, its done
+            groups = [[header]]
+            while k < len(lines) and lines[k] != "done":
+                cmds = _line_commands(_shell_words(lines[k]))
+                if (cmds is None or any(c[:1] == ["set"] for c in cmds)
+                        or (len(cmds) > 1 and not opts["pipefail"])):
+                    return out
+                groups.append(cmds)
+                k += 1
+            if k == len(lines):
+                return out
+            k += 1
+        else:
+            cmds = _line_commands(tokens)
+            if cmds is None:
+                return out
+            if any(c[:1] == ["set"] for c in cmds):
+                if len(cmds) > 1 or not _set(cmds[0][1:], opts):
+                    return out
+                continue
+            groups = [cmds]
+        if opts["errexit"]:
+            out.extend(c for cmds in groups if len(cmds) == 1 or opts["pipefail"] for c in cmds if c)
     return out
 
 
@@ -706,26 +942,46 @@ def _pytest_runs(args, full, at):
 def workflow_runs(steps, test_path):
     """Whether a step of the workflow runs the test at test_path (its path
     in the workspace: the checkout's path joined to the test's path in its
-    repository). Only what a step's run commands execute counts, each path
-    resolved against the step's working-directory: the command itself
-    (a script run directly, or a C test's built binary, <dir>/<stem>);
-    the script an interpreter runs (python, bash, sh), a glob matching the
-    whole path; a for loop's list over the test; python -m unittest given
-    the test's file or a dotted name whose module is that file
-    (tests.test_x, tests.test_x.Case.test_one); unittest discover from the
-    test's own directory with a pattern its name matches; pytest on the
-    test or its own directory. An argument to anything else (echo, a build,
-    an install) does not run the test. Only a step that _on_every_run
-    accepts counts: the lint evaluates no condition, so a step under an
-    `if:` other than the literal true, or with a `continue-on-error:`
-    other than the literal false, on the step or on its job, counts as
-    no step."""
+    repository) so that a failure of the test fails the step.
+
+    Only a step that _on_every_run accepts counts: the lint evaluates no
+    condition, so a step under an `if:` other than the literal true, or
+    with a `continue-on-error:` other than the literal false, on the step
+    or on its job, counts as no step. So does a step whose shell is other
+    than bash or sh (_shell: its own shell:, or a `defaults: run: shell:`
+    of its job or of the workflow).
+
+    The lint reads a step's run text line by line as bash -e or sh -e
+    runs it, a backslash at the end of a line joining the next one
+    (_run_commands). A command counts on a line that holds it alone, with
+    its redirections, or in a pipeline under pipefail (shell: bash, or a
+    `set -o pipefail` on an earlier line), and only while errexit holds
+    (`set +e` clears it). A pipeline with no pipefail does not count. The
+    lint stops at a line that holds any other operator (`||`, `&&`, `;`,
+    `&`, a subshell, a here-document), whose command opens a compound
+    command (if, case, while, until, a group, a function) or negates a
+    status (!), whose command is one of _STOPS (exit, exec, trap, eval,
+    source and the like), or that sets an option it does not follow: no
+    command on that line or after it counts. A for loop counts in one
+    form: `for <name> in <words>; do` on its own line, body lines that
+    count, and `done` on its own line.
+
+    Each path is resolved against the step's working-directory. A command
+    runs the test when it is the test (a script run directly, or a C
+    test's built binary, <dir>/<stem>); the script an interpreter runs
+    (python, bash, sh), a glob matching the whole path; a for loop's list
+    over the test; python -m unittest given the test's file or a dotted
+    name whose module is that file (tests.test_x,
+    tests.test_x.Case.test_one); unittest discover from the test's own
+    directory with a pattern its name matches; pytest on the test or its
+    own directory. An argument to anything else (echo, a build, an
+    install) does not run the test."""
     full = posixpath.normpath(test_path)
     stem, ext = posixpath.splitext(posixpath.basename(full))
     compiled = ext in (".c", ".cc", ".cpp")
     for s in steps:
-        run = s.get("run")
-        if not run or not _on_every_run(s):
+        run, shell = s.get("run"), _shell(s)
+        if not run or shell is None or not _on_every_run(s):
             continue
         wd = s.get("working-directory") or "."
 
@@ -734,7 +990,7 @@ def workflow_runs(steps, test_path):
 
         def names(p):
             return "$" not in p and _segments_match(full, at(p))
-        for words in _commands(run):
+        for words in _run_commands(run, shell):
             cmd, args = words[0], words[1:]
             if cmd == "for" and "in" in args:
                 if any(names(p) for p in args[args.index("in") + 1:]):
