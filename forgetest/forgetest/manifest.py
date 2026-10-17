@@ -541,9 +541,10 @@ def workflow_steps(text):
     Anything outside a step (a trigger's paths, a job's name) is not a
     step. A key with one stray quote (`if":`, `"run:`) at the top level,
     at a job's name or a job's key, at a step's key, or as the first key of
-    any list item (a step's first key is on its dash line: `- run": make`)
-    is no key the lint reads: every step of the workflow then carries
-    "unread" and counts as no step."""
+    a list item outside a step (a step's first key is on its dash line,
+    `- run": make`; a matrix entry is such an item; a list inside a step's
+    body is not read) is no key the lint reads: every step of the workflow
+    then carries "unread" and counts as no step."""
     lines = _lines(text)
     steps, i = [], 0
     in_jobs, job_at, key_at, job = False, None, None, None
