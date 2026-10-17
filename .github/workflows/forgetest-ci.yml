@@ -144,13 +144,17 @@ jobs:
       - name: No undefined names (the live drills never execute on the host)
         working-directory: forgefirm/forgetest
         # pyflakes exits 1 for any message, unused imports included, so the
-        # grep is the gate; any other status (a signal, a usage error) or a
-        # capture that cannot be written fails the step.
+        # grep is the gate. A run stopped by SIGINT exits 1 too, and its
+        # "... stopped" line fails the grep. Any other status (a usage
+        # error, a signal pyflakes does not handle) fails the step and
+        # prints the capture, and a capture that cannot be written fails it
+        # too. pyflakes ends a SIGPIPE with status 1 and no line, and a
+        # write to the capture file raises none.
         run: |
           python -m pip install pyflakes
           python -B -m pyflakes --version
-          { python -B -m pyflakes forgetest tests || test $? -eq 1; } > pyflakes.txt 2>&1
-          if grep -E "undefined name|Traceback" pyflakes.txt; then exit 1; fi
+          { python -B -m pyflakes forgetest tests || test $? -eq 1; } > pyflakes.txt 2>&1 || { cat pyflakes.txt; exit 1; }
+          if grep -E "undefined name|Traceback|^\.\.\. stopped$" pyflakes.txt; then exit 1; fi
 
       - name: Shared UI files match forgectrl at its pinned revision
         working-directory: forgefirm
