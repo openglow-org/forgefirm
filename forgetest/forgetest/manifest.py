@@ -563,25 +563,43 @@ def workflow_filters(text):
 
 def _needs(lines, i):
     """The job names the `needs:` key at lines[i] names: a flow list
-    (`[build, lint]`), one scalar, or a block list on the lines under
-    it. None for a form the lint does not read (a line under the key
-    that is no list item): a need no job meets."""
+    (`[build, lint]`, on the key's line or continued on the lines under
+    it up to its `]`), one scalar, or a block list on the lines under it
+    (its items deeper than the key, or at the key's own indentation).
+    None for every other form, which the lint does not read: a name no
+    job has, so the need is never met. That is an empty `needs:` (`[]`,
+    or nothing under the key), a flow list a key or a shallower line
+    interrupts before its `]`, a line under the key that is no list
+    item, and list items at two indentations."""
+    key_at = _indent(lines[i])
     val = _KEY_RX.match(lines[i]).group(3).strip()
     if val.startswith("["):
-        return [_scalar(x) for x in val.strip("[]").split(",") if x.strip()]
+        for ln in lines[i + 1:]:
+            if "]" in val:
+                break
+            if not ln.strip():
+                continue
+            ind, body = _indent(ln), ln.strip()
+            if ind < key_at or (ind == key_at and not body.startswith("]")):
+                return None
+            val += " " + body
+        if "]" not in val:
+            return None
+        return [_scalar(x) for x in val[1:val.index("]")].split(",") if x.strip()] or None
     if val:
         return [_scalar(val)]
-    out = []
+    out, at = [], None
     for ln in lines[i + 1:]:
         if not ln.strip():
             continue
-        if _indent(ln) <= _indent(lines[i]):
+        ind, body = _indent(ln), ln.strip()
+        if ind < key_at or (ind == key_at and not body.startswith("- ")):
             break
-        body = ln.strip()
-        if not body.startswith("- "):
+        at = ind if at is None else at
+        if not body.startswith("- ") or ind != at:
             return None
         out.append(_scalar(body[2:]))
-    return out
+    return out or None
 
 
 def _needs_run(jobs):

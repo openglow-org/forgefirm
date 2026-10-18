@@ -413,7 +413,8 @@ class CoverageReportTests(unittest.TestCase):
         # on not every run, however the needs: is written
         yml = "jobs:\n  build:\n%s    steps:\n      - run: make\n  test:\n%s    steps:\n      - run: ./build/tray_test\n"
         for needs in ("    needs: build\n", "    needs: [build]\n", "    needs: ['build']\n",
-                      "    needs:\n      - build\n"):
+                      "    needs:\n      - build\n", "    needs:\n    - build\n",
+                      "    needs: [\n      build\n    ]\n"):
             self.assertTrue(self._runs(yml % ("", needs), test), needs)
             self.assertFalse(self._runs(yml % ("    if: false\n", needs), test), needs)
             self.assertFalse(self._runs(yml % ("    if: github.event_name == 'push'\n", needs), test), needs)
@@ -430,6 +431,29 @@ class CoverageReportTests(unittest.TestCase):
         self.assertFalse(self._runs(yml % ("    needs: test\n", "    needs: build\n"), test))
         self.assertFalse(self._runs(yml % ("", "    needs: test\n"), test))
         self.assertFalse(self._runs(yml % ("", "    needs:\n      build: true\n"), test))
+        # a flow list split after a comma keeps the name on its second line: a conditional job
+        # there holds the dependent job back
+        split = (chain % "").replace("    needs: [b]\n", "    needs: [a,\n      b]\n")
+        self.assertTrue(self._runs(split, test))
+        self.assertFalse(self._runs(split.replace("  b:\n    needs: a\n", "  b:\n    needs: a\n    if: false\n"), test))
+        # an empty needs: (which GitHub refuses), a flow list a key interrupts before its ], and
+        # list items at two indentations each fail closed
+        for needs in ("    needs: []\n", "    needs:\n", "    needs: [\n      build\n",
+                      "    needs:\n      - build\n    - build\n"):
+            self.assertFalse(self._runs(yml % ("", needs), test), needs)
+        # through a row: the test job needs, in a block list at the key's own indentation, a
+        # build job under if: false (the checkout in a job of its own, as the lint reads a
+        # checkout for the whole workflow)
+        man = helpers.make_manifest()
+        root = self._root({"scripts/bench/stream_test.py": "",
+                           ".github/workflows/needs.yml": "on: [push]\njobs:\n  lint:\n    steps:\n"
+                           "      - uses: actions/checkout@v4\n  build:\n    if: false\n    steps:\n"
+                           "      - run: make\n  test:\n    needs:\n    - build\n    steps:\n"
+                           "      - run: python3 scripts/bench/stream_test.py\n"})
+        row = ("grblhal-glowforge", "src/driver.c", "forgefirm:scripts/bench/stream_test.py",
+               "forgefirm:.github/workflows/needs.yml")
+        self.assertEqual(m.host_row_problems(man, [row], root=root, sources=None),
+                         [row[:3] + (row[3] + " does not run it",)])
         # a job under always() runs on every run, and the lint evaluates no condition: it counts as
         # no job for its own steps and for the jobs after it
         self.assertFalse(self._runs(yml % ("    if: false\n", "    needs: build\n    if: always()\n"), test))
