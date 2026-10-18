@@ -189,6 +189,10 @@ HOST_TESTED = [
     # The data and run directories from the environment: the SSH flag in the
     # run directory, written and removed by POST /system/ssh.
     ("forgectrl", "src/paths.h", "forgectrl:tests/host_routes.sh", "forgectrl:.github/workflows/build.yml"),
+    # The one gate the test hooks are read through (the sysfs root, the switch
+    # device and the run directory, honored only in a host-test run): the
+    # daemon started with the hooks set and no gate ignores and names them.
+    ("forgectrl", "src/testhook.h", "forgectrl:tests/host_start.sh", "forgectrl:.github/workflows/build.yml"),
     # The first run in the page's order: the four documents at their hashes,
     # the press step breathing teal, the press taken as the acceptance, the
     # form steps through main.c's hooks; and the on-demand Extensions

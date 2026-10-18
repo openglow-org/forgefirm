@@ -11,4 +11,4 @@ overrides:
     meta-freescale-distro:
       commit: b9d6a5d9931922558046d230c1f5f4ef6ee72345
     meta-openglow:
-      commit: b7626be45c7708a8e71bd03af61ca968796fc8f7
+      commit: c542ce6ec5799df9cf0f689eb883c790c71a414b
