@@ -121,8 +121,9 @@ BEHAVIORAL = [
 # must run the host test: on push or pull request, in a step that runs on
 # every run of the workflow and whose failure fails it (no `if:` other than
 # `true` and no `continue-on-error:` other than `false` on the step or its
-# job, and no key with one stray quote where the lint reads the workflow's
-# keys), under bash or sh, on a line of the step's run text whose failure
+# job, every job the job's `needs:` names one that runs on every run, and
+# no key with one stray quote where the lint reads the workflow's keys),
+# under bash or sh, on a line of the step's run text whose failure
 # ends the step (the command alone on its line, or in a pipeline under
 # pipefail, with errexit set and no line before it that ends the step or
 # opens a compound command: workflow_runs), and name it, or discover it (a
@@ -506,6 +507,56 @@ def workflow_triggers(text):
     return set()
 
 
+def _needs(lines, i):
+    """The job names the `needs:` key at lines[i] names: a flow list
+    (`[build, lint]`), one scalar, or a block list on the lines under
+    it. None for a form the lint does not read (a line under the key
+    that is no list item): a need no job meets."""
+    val = _KEY_RX.match(lines[i]).group(3).strip()
+    if val.startswith("["):
+        return [_scalar(x) for x in val.strip("[]").split(",") if x.strip()]
+    if val:
+        return [_scalar(val)]
+    out = []
+    for ln in lines[i + 1:]:
+        if not ln.strip():
+            continue
+        if _indent(ln) <= _indent(lines[i]):
+            break
+        body = ln.strip()
+        if not body.startswith("- "):
+            return None
+        out.append(_scalar(body[2:]))
+    return out
+
+
+def _needs_run(jobs):
+    """Whether each job's `needs:` are met on every run of the workflow,
+    as "needs_run" on the job's dict: True when every job it needs runs
+    on every run (no `if:` other than the literal true, and its own
+    needs met, transitively), False when one does not, names no job of
+    the workflow, or is in a cycle with it, or when the `needs:` is a
+    form the lint does not read. The lint evaluates no condition, so a
+    job under `always()` counts as no job, as its steps do. A needed
+    job's `continue-on-error:` does not bear: its failure fails neither
+    the run nor the jobs after it."""
+    state = {}
+
+    def runs(name, trail):
+        if name in state:
+            return state[name]
+        job = jobs.get(name)
+        if job is None or name in trail:
+            return False
+        needs = job.get("needs", [])
+        met = needs is not None and all(runs(n, trail | {name}) for n in needs)
+        job["needs_run"] = met
+        state[name] = met and job.get("if", "true").lower() == "true"
+        return state[name]
+    for name in jobs:
+        runs(name, frozenset())
+
+
 def _defaults(lines, i):
     """{"shell": its value} for the `defaults:` key at lines[i] when it
     gives the run steps a shell:, {} when it gives none. A flow mapping
@@ -534,7 +585,9 @@ def workflow_steps(text):
     "working-directory", "with" (a dict), "shell", "if" and
     "continue-on-error" as written; "job": the "if" and
     "continue-on-error" of the job the step is in, when it is in one,
-    and the "shell" its `defaults:` give; and "workflow": the "shell" the
+    its "needs" (_needs) and whether they are met on every run
+    ("needs_run", _needs_run), and the "shell" its `defaults:` give; and
+    "workflow": the "shell" the
     workflow's own `defaults:` give, when they give one (_defaults). YAML
     read by its indentation, as far as these workflows use it; comments,
     whole lines and from ' #' to the end of a line, are not read.
@@ -547,7 +600,7 @@ def workflow_steps(text):
     then carries "unread" and counts as no step."""
     lines = _lines(text)
     steps, i = [], 0
-    in_jobs, job_at, key_at, job = False, None, None, None
+    in_jobs, job_at, key_at, job, jobs = False, None, None, None, {}
     stray, workflow = False, {}
     while i < len(lines):
         km = _KEY_RX.match(lines[i])
@@ -559,10 +612,13 @@ def workflow_steps(text):
                     workflow.update(_defaults(lines, i))
             elif in_jobs and (job_at is None or ind == job_at):
                 job_at, key_at, job = ind, None, {}
+                jobs[key] = job
             elif in_jobs and job_at is not None and ind > job_at and (key_at is None or ind == key_at):
                 key_at = ind
                 if key in _CONDITION_KEYS:
                     job[key] = _scalar(km.group(3))
+                elif key == "needs":
+                    job["needs"] = _needs(lines, i)
                 elif key == "defaults":
                     job.update(_defaults(lines, i))
         elif _stray_key(lines[i]):
@@ -620,6 +676,7 @@ def workflow_steps(text):
         if job is not None:
             step["job"] = job       # the job's own dict: a job key written after its steps counts too
         steps.append(step)
+    _needs_run(jobs)
     for s in steps:
         if stray:
             s["unread"] = True
@@ -632,13 +689,18 @@ def _on_every_run(step):
     """Whether the lint counts a step as one that runs on every run of
     its workflow and fails the run when it fails: neither the step nor
     its job carries an `if:` other than the literal `true` or a
-    `continue-on-error:` other than the literal `false`, and the
-    workflow has no key the lint cannot read ("unread"). The lint
-    evaluates no condition, so a step under `always()` or `success()`
-    counts as no step too."""
+    `continue-on-error:` other than the literal `false`, the job's
+    `needs:` are met on every run (_needs_run: GitHub skips a job whose
+    needed job did not run, unless the job says `always()`, which the
+    lint does not evaluate), and the workflow has no key the lint
+    cannot read ("unread"). The lint evaluates no condition, so a step
+    under `always()` or `success()` counts as no step too."""
     if step.get("unread"):
         return False
-    for d in (step, step.get("job") or {}):
+    job = step.get("job") or {}
+    if not job.get("needs_run", True):
+        return False
+    for d in (step, job):
         if d.get("if", "true").lower() != "true" or d.get("continue-on-error", "false").lower() != "false":
             return False
     return True

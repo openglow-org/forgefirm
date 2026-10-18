@@ -254,6 +254,16 @@ class CoverageReportTests(unittest.TestCase):
         self.assertEqual(m.host_row_problems(man, [manual, soft], root=root, sources=None),
                          [manual[:3] + (manual[3] + ": the lint reads no push or pull_request in its own on:",),
                           soft[:3] + (soft[3] + " does not run it",)])
+        # a step in a job that needs a conditional job does not run it (the checkout in a job of
+        # its own, as the lint reads a checkout for the whole workflow)
+        root = self._root({"scripts/bench/stream_test.py": "",
+                           ".github/workflows/needs.yml": "on: [push]\njobs:\n  lint:\n    steps:\n"
+                           "      - uses: actions/checkout@v4\n  build:\n    if: false\n    steps:\n"
+                           "      - run: make\n  test:\n    needs: build\n    steps:\n"
+                           "      - run: python3 scripts/bench/stream_test.py\n"})
+        needs = runs[:3] + ("forgefirm:.github/workflows/needs.yml",)
+        self.assertEqual(m.host_row_problems(man, [needs], root=root, sources=None),
+                         [needs[:3] + (needs[3] + " does not run it",)])
 
     def _runs(self, yml, path):
         return m.workflow_runs(m.workflow_steps(yml), path)
@@ -395,6 +405,35 @@ class CoverageReportTests(unittest.TestCase):
         yml = "steps:\n  - uses: actions/checkout@v4\n%s    with:\n      path: own\n"
         self.assertEqual(m.checkout_path(m.workflow_steps(yml % ""), "x", True), "own")
         self.assertIsNone(m.checkout_path(m.workflow_steps(yml % "    if: false\n"), "x", True))
+
+    def test_a_job_runs_only_when_every_job_it_needs_runs(self):
+        test = "tests/tray_test.c"
+        # GitHub skips a job whose needed job did not run: a job that needs a conditional job runs
+        # on not every run, however the needs: is written
+        yml = "jobs:\n  build:\n%s    steps:\n      - run: make\n  test:\n%s    steps:\n      - run: ./build/tray_test\n"
+        for needs in ("    needs: build\n", "    needs: [build]\n", "    needs: ['build']\n",
+                      "    needs:\n      - build\n"):
+            self.assertTrue(self._runs(yml % ("", needs), test), needs)
+            self.assertFalse(self._runs(yml % ("    if: false\n", needs), test), needs)
+            self.assertFalse(self._runs(yml % ("    if: github.event_name == 'push'\n", needs), test), needs)
+        # the needed job's continue-on-error: does not bear: its failure fails neither the run nor
+        # the jobs after it
+        self.assertTrue(self._runs(yml % ("    continue-on-error: true\n", "    needs: build\n"), test))
+        # transitively; a job the workflow does not have, a cycle, and a needs: the lint does not
+        # read each fail closed
+        chain = "jobs:\n  a:\n%s    steps:\n      - run: make\n  b:\n    needs: a\n    steps:\n      - run: make\n" \
+                "  c:\n    needs: [b]\n    steps:\n      - run: ./build/tray_test\n"
+        self.assertTrue(self._runs(chain % "", test))
+        self.assertFalse(self._runs(chain % "    if: false\n", test))
+        self.assertFalse(self._runs(yml % ("", "    needs: lint\n"), test))
+        self.assertFalse(self._runs(yml % ("    needs: test\n", "    needs: build\n"), test))
+        self.assertFalse(self._runs(yml % ("", "    needs: test\n"), test))
+        self.assertFalse(self._runs(yml % ("", "    needs:\n      build: true\n"), test))
+        # a job under always() runs on every run, and the lint evaluates no condition: it counts as
+        # no job for its own steps and for the jobs after it
+        self.assertFalse(self._runs(yml % ("    if: false\n", "    needs: build\n    if: always()\n"), test))
+        self.assertFalse(self._runs((chain % "    if: false\n").replace(
+            "  b:\n    needs: a\n", "  b:\n    needs: a\n    if: ${{ always() }}\n"), test))
 
     def test_the_events_a_workflow_runs_on(self):
         self.assertEqual(m.workflow_triggers("on:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  t:\n"),
