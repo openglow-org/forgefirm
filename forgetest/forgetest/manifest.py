@@ -119,7 +119,8 @@ BEHAVIORAL = [
 # "forgefirm" for this repository (the null-sink harnesses under
 # scripts/bench/, which grblhal-glowforge's workflow runs). The workflow
 # must run the host test: on a push or a pull_request with no branches,
-# tags or paths filter under it (one of the two is enough), in a step
+# tags or paths filter under it, and no types under the pull_request
+# (one of the two events is enough), in a step
 # that runs on every run of the workflow and whose failure fails it (no
 # `if:` other than `true` and no `continue-on-error:` other than `false`
 # on the step or its job, every job the job's `needs:` names one that
@@ -509,23 +510,29 @@ def workflow_triggers(text):
 
 
 # What under a push or a pull_request of `on:` keeps the workflow from a
-# run: a ref or a path the event does not match.
+# run: a ref or a path the event does not match, and under a pull_request
+# alone, an activity type the pull request's event is not.
 _FILTER_KEYS = ("branches", "branches-ignore", "tags", "tags-ignore", "paths", "paths-ignore")
+_PULL_REQUEST_FILTER_KEYS = _FILTER_KEYS + ("types",)
 
 
 def workflow_filters(text):
     """The events of a workflow's `on:` block mapping that carry a filter,
     {event: [what]}: each `branches:`, `branches-ignore:`, `tags:`,
-    `tags-ignore:`, `paths:` or `paths-ignore:` key under the event, by
-    name; a value on the event's own line (`push: {branches: [main]}`),
-    which the lint does not read, as "a value the lint does not read";
-    and a key with one stray quote under the event (`paths":`), as "a
-    key the lint does not read". Every filter counts: a push with only
-    a branches or a tags filter runs on no push of the other kind of
-    ref, and a branch it names is one the lint does not know, as the
-    manifest carries no branch. A key deeper than the event's own level
-    (a dispatch's inputs) is no filter. An event of a list or a scalar
-    `on:` carries none."""
+    `tags-ignore:`, `paths:` or `paths-ignore:` key under the event, and
+    under a pull_request a `types:` key too, by name; a value on the
+    event's own line (`push: {branches: [main]}`), which the lint does
+    not read, as "a value the lint does not read"; and a key with one
+    stray quote under the event (`paths":`), as "a key the lint does not
+    read". Every filter counts: a push with only a branches or a tags
+    filter runs on no push of the other kind of ref, and a branch it
+    names is one the lint does not know, as the manifest carries no
+    branch. A pull_request under `types:` runs on the activity types it
+    names and no other, so one under `types: [closed]` runs on no change
+    of a pull request; the lint reads no type, so any `types:` is a
+    filter. A key deeper than the event's own level (a dispatch's
+    inputs) is no filter. An event of a list or a scalar `on:` carries
+    none."""
     lines = _lines(text)
     out = {}
     for i, ln in enumerate(lines):
@@ -555,7 +562,7 @@ def workflow_filters(text):
                     continue
                 if _stray_key(child):
                     out.setdefault(event, []).append("a key the lint does not read")
-                elif km and km.group(2) in _FILTER_KEYS:
+                elif km and km.group(2) in (_PULL_REQUEST_FILTER_KEYS if event == "pull_request" else _FILTER_KEYS):
                     out.setdefault(event, []).append(km.group(2))
         return out
     return out
@@ -1161,10 +1168,11 @@ def host_row_problems(manifest, host=HOST_TESTED, root=REPO_ROOT, sources=SOURCE
     dispatch, a call or a schedule alone, a call not followed to the
     workflow that calls it, and a flow mapping, which names no event),
     one whose every push and pull_request carries a filter
-    (workflow_filters: a branches, tags or paths filter, which the lint
-    does not read, so the workflow runs on not every change of the
-    covered files, or on not every branch; one push or pull_request
-    with no filter makes the workflow run on every change),
+    (workflow_filters: a branches, tags or paths filter, or a types
+    filter on the pull_request, which the lint does not read, so the
+    workflow runs on not every change of the covered files, or on not
+    every branch; one push or pull_request with no filter makes the
+    workflow run on every change),
     one that does not check out the test's repository, or one with no
     step that runs the test on every run (workflow_runs). Whether a
     workflow runs its test is not checked where it cannot be read (see

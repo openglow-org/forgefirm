@@ -482,6 +482,12 @@ class CoverageReportTests(unittest.TestCase):
                          {"push": ["branches-ignore", "paths-ignore"], "pull_request": ["paths"]})
         self.assertEqual(f("on:\n  push:\n    tags: ['v*']\n"), {"push": ["tags"]})
         self.assertEqual(f("on:\n  push:\n    tags-ignore: ['v*']\n"), {"push": ["tags-ignore"]})
+        # a pull_request under types: runs on the activity types it names and no other; the lint
+        # reads no type, so any types: is a filter, on the pull_request alone
+        self.assertEqual(f("on:\n  push:\n  pull_request:\n    types: [closed]\n"), {"pull_request": ["types"]})
+        self.assertEqual(f("on:\n  pull_request:\n    types:\n      - opened\n      - synchronize\n    paths-ignore:\n"
+                           "      - '**.md'\n"), {"pull_request": ["types", "paths-ignore"]})
+        self.assertEqual(f("on:\n  push:\n    types: [x]\n"), {})
         # a value on the event's line, and a key with one stray quote under it, are filters the
         # lint does not read
         self.assertEqual(f("on:\n  push: {branches: [main]}\n"), {"push": ["a value the lint does not read"]})
@@ -495,20 +501,24 @@ class CoverageReportTests(unittest.TestCase):
         self.assertEqual(f("on:\n  - push\n"), {})
         # a row's workflow counts when its push or its pull_request carries no filter: a push to
         # the default branch alone with every pull request does, a push with paths-ignore alone
-        # does not, and nor do a push and a pull request each under a filter
+        # does not, nor do a push and a pull request each under a filter; every push with a pull
+        # request under types: does, a pull request under types: alone does not
         man = helpers.make_manifest()
         job = "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n      - run: python3 scripts/bench/stream_test.py\n"
         root = self._root({"scripts/bench/stream_test.py": "",
                            ".github/workflows/main.yml": "on:\n  push:\n    branches: [main]\n  pull_request:\n" + job,
                            ".github/workflows/docs.yml": "on:\n  push:\n    paths-ignore:\n      - 'docs/**'\n" + job,
                            ".github/workflows/both.yml": "on:\n  push:\n    branches: [main]\n  pull_request:\n"
-                           "    paths:\n      - 'src/**'\n" + job})
+                           "    paths:\n      - 'src/**'\n" + job,
+                           ".github/workflows/push.yml": "on:\n  push:\n  pull_request:\n    types: [closed]\n" + job,
+                           ".github/workflows/closed.yml": "on:\n  pull_request:\n    types: [closed]\n" + job})
         rows = [("grblhal-glowforge", "src/driver.c", "forgefirm:scripts/bench/stream_test.py",
-                 "forgefirm:.github/workflows/%s.yml" % w) for w in ("main", "docs", "both")]
+                 "forgefirm:.github/workflows/%s.yml" % w) for w in ("main", "docs", "both", "push", "closed")]
         filtered = ": every push or pull_request in its own on: carries a filter (%s)"
         self.assertEqual(m.host_row_problems(man, rows, root=root, sources=None),
                          [rows[1][:3] + (rows[1][3] + filtered % "push: paths-ignore",),
-                          rows[2][:3] + (rows[2][3] + filtered % "pull_request: paths; push: branches",)])
+                          rows[2][:3] + (rows[2][3] + filtered % "pull_request: paths; push: branches",),
+                          rows[4][:3] + (rows[4][3] + filtered % "pull_request: types",)])
 
     def test_the_lint_says_when_it_could_not_read_a_workflow(self):
         import contextlib
