@@ -197,9 +197,10 @@ class CoverageReportTests(unittest.TestCase):
                 f.write(text)
         return root
 
-    # A workflow of this repository as the scratch checkouts carry it: it
+    # A workflow of this repository as the scratch checkouts carry it: on
+    # every push, and on the pull requests that touch one bench tool, it
     # checks itself out at the workspace root and runs the one harness.
-    CI_YML = ("on:\n  push:\n    paths:\n      - 'scripts/bench/drill.py'\n"
+    CI_YML = ("on:\n  push:\n  pull_request:\n    paths:\n      - 'scripts/bench/drill.py'\n"
               "jobs:\n  test:\n    steps:\n"
               "      - uses: actions/checkout@v4\n"
               "      # drill.py is a bench tool\n"
@@ -448,6 +449,42 @@ class CoverageReportTests(unittest.TestCase):
         # an event key with one stray quote is no event, and the workflow then names none
         self.assertEqual(m.workflow_triggers("on:\n  push\":\n"), set())
         self.assertEqual(m.workflow_triggers("on:\n  push:\n  'pull_request:\n"), set())
+
+    def test_a_push_or_pull_request_under_a_filter_runs_on_not_every_change(self):
+        f = m.workflow_filters
+        self.assertEqual(f("on:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  t:\n"), {"push": ["branches"]})
+        self.assertEqual(f("on:\n  push:\n    branches-ignore:\n      - wip/*\n    paths-ignore:\n      - 'docs/**'\n"
+                           "  pull_request:\n    paths:\n      - 'src/**'\n"),
+                         {"push": ["branches-ignore", "paths-ignore"], "pull_request": ["paths"]})
+        self.assertEqual(f("on:\n  push:\n    tags: ['v*']\n"), {"push": ["tags"]})
+        self.assertEqual(f("on:\n  push:\n    tags-ignore: ['v*']\n"), {"push": ["tags-ignore"]})
+        # a value on the event's line, and a key with one stray quote under it, are filters the
+        # lint does not read
+        self.assertEqual(f("on:\n  push: {branches: [main]}\n"), {"push": ["a value the lint does not read"]})
+        self.assertEqual(f("on:\n  push:\n    paths\":\n      - x\n"), {"push": ["a key the lint does not read"]})
+        # a filter is read at the event's own level: a dispatch's inputs are none, and an on: list
+        # or scalar carries none
+        self.assertEqual(f("on:\n  workflow_dispatch:\n    inputs:\n      paths:\n        type: string\n  push:\n"),
+                         {})
+        self.assertEqual(f("on: [push, pull_request]\n"), {})
+        self.assertEqual(f("on: push\n"), {})
+        self.assertEqual(f("on:\n  - push\n"), {})
+        # a row's workflow counts when its push or its pull_request carries no filter: a push to
+        # the default branch alone with every pull request does, a push with paths-ignore alone
+        # does not, and nor do a push and a pull request each under a filter
+        man = helpers.make_manifest()
+        job = "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n      - run: python3 scripts/bench/stream_test.py\n"
+        root = self._root({"scripts/bench/stream_test.py": "",
+                           ".github/workflows/main.yml": "on:\n  push:\n    branches: [main]\n  pull_request:\n" + job,
+                           ".github/workflows/docs.yml": "on:\n  push:\n    paths-ignore:\n      - 'docs/**'\n" + job,
+                           ".github/workflows/both.yml": "on:\n  push:\n    branches: [main]\n  pull_request:\n"
+                           "    paths:\n      - 'src/**'\n" + job})
+        rows = [("grblhal-glowforge", "src/driver.c", "forgefirm:scripts/bench/stream_test.py",
+                 "forgefirm:.github/workflows/%s.yml" % w) for w in ("main", "docs", "both")]
+        filtered = ": every push or pull_request in its own on: carries a filter (%s)"
+        self.assertEqual(m.host_row_problems(man, rows, root=root, sources=None),
+                         [rows[1][:3] + (rows[1][3] + filtered % "push: paths-ignore",),
+                          rows[2][:3] + (rows[2][3] + filtered % "pull_request: paths; push: branches",)])
 
     def test_the_lint_says_when_it_could_not_read_a_workflow(self):
         import contextlib

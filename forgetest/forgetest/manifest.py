@@ -118,20 +118,21 @@ BEHAVIORAL = [
 # the manifest (its tests/ and .github/ files are listed there), or
 # "forgefirm" for this repository (the null-sink harnesses under
 # scripts/bench/, which grblhal-glowforge's workflow runs). The workflow
-# must run the host test: on push or pull request, in a step that runs on
-# every run of the workflow and whose failure fails it (no `if:` other than
-# `true` and no `continue-on-error:` other than `false` on the step or its
-# job, every job the job's `needs:` names one that runs on every run, and
-# no key with one stray quote where the lint reads the workflow's keys),
-# under bash or sh, on a line of the step's run text whose failure
-# ends the step (the command alone on its line, or in a pipeline under
-# pipefail, with errexit set and no line before it that ends the step or
-# opens a compound command: workflow_runs), and name it, or discover it (a
-# glob, unittest discover, pytest on its directory). A host-tested path
-# counts as covered in the coverage lint, and like every path no test
-# covers it is in no fingerprint: a change there makes no acceptance run
-# necessary. A path a catalog test exercises on the hardware belongs in
-# that test's covers, not here.
+# must run the host test: on a push or a pull_request with no branches,
+# tags or paths filter under it (one of the two is enough), in a step
+# that runs on every run of the workflow and whose failure fails it (no
+# `if:` other than `true` and no `continue-on-error:` other than `false`
+# on the step or its job, every job the job's `needs:` names one that
+# runs on every run, and no key with one stray quote where the lint
+# reads the workflow's keys), under bash or sh, on a line of the step's
+# run text whose failure ends the step (the command alone on its line,
+# or in a pipeline under pipefail, with errexit set and no line before
+# it that ends the step or opens a compound command: workflow_runs), and
+# name it, or discover it (a glob, unittest discover, pytest on its
+# directory). A host-tested path counts as covered in the coverage lint,
+# and like every path no test covers it is in no fingerprint: a change
+# there makes no acceptance run necessary. A path a catalog test
+# exercises on the hardware belongs in that test's covers, not here.
 HOST_TESTED = [
     # An extension package's holds as the engine reads them (forgeext's
     # holdkeep_test and run_test prove the writer's side).
@@ -470,10 +471,10 @@ def workflow_triggers(text):
     """The events a workflow runs on: the keys of its `on:` mapping, the
     items of its list (`on: [push, pull_request]`, or one per line), or
     its one scalar (`on: push`). What is under an event (its branches,
-    its paths, a dispatch's inputs) is not an event. A flow mapping
-    (`on: {push: ...}`) is not read, and names no event. An event key
-    with one stray quote (`push":`) is no event, and the workflow then
-    reads as one that runs on none."""
+    its paths, a dispatch's inputs) is not an event (workflow_filters
+    reads the filters). A flow mapping (`on: {push: ...}`) is not read,
+    and names no event. An event key with one stray quote (`push":`) is
+    no event, and the workflow then reads as one that runs on none."""
     lines = _lines(text)
     for i, ln in enumerate(lines):
         m = _ON_RX.match(ln) if not _indent(ln) else None
@@ -505,6 +506,59 @@ def workflow_triggers(text):
                     out.add(km.group(2))
         return out
     return set()
+
+
+# What under a push or a pull_request of `on:` keeps the workflow from a
+# run: a ref or a path the event does not match.
+_FILTER_KEYS = ("branches", "branches-ignore", "tags", "tags-ignore", "paths", "paths-ignore")
+
+
+def workflow_filters(text):
+    """The events of a workflow's `on:` block mapping that carry a filter,
+    {event: [what]}: each `branches:`, `branches-ignore:`, `tags:`,
+    `tags-ignore:`, `paths:` or `paths-ignore:` key under the event, by
+    name; a value on the event's own line (`push: {branches: [main]}`),
+    which the lint does not read, as "a value the lint does not read";
+    and a key with one stray quote under the event (`paths":`), as "a
+    key the lint does not read". Every filter counts: a push with only
+    a branches or a tags filter runs on no push of the other kind of
+    ref, and a branch it names is one the lint does not know, as the
+    manifest carries no branch. A key deeper than the event's own level
+    (a dispatch's inputs) is no filter. An event of a list or a scalar
+    `on:` carries none."""
+    lines = _lines(text)
+    out = {}
+    for i, ln in enumerate(lines):
+        m = _ON_RX.match(ln) if not _indent(ln) else None
+        if not m:
+            continue
+        if m.group(1).strip():
+            return out
+        at, event, sub = None, None, None
+        for child in lines[i + 1:]:
+            if not child.strip():
+                continue
+            ind = _indent(child)
+            if ind == 0:
+                break
+            at = ind if at is None else at
+            km = _KEY_RX.match(child)
+            if ind == at:
+                event, sub = None, None
+                if km:
+                    event = km.group(2)
+                    if km.group(3).strip():
+                        out.setdefault(event, []).append("a value the lint does not read")
+            elif event is not None and ind > at:
+                sub = ind if sub is None else sub
+                if ind != sub:
+                    continue
+                if _stray_key(child):
+                    out.setdefault(event, []).append("a key the lint does not read")
+                elif km and km.group(2) in _FILTER_KEYS:
+                    out.setdefault(event, []).append(km.group(2))
+        return out
+    return out
 
 
 def _needs(lines, i):
@@ -1088,6 +1142,11 @@ def host_row_problems(manifest, host=HOST_TESTED, root=REPO_ROOT, sources=SOURCE
     push nor pull_request as the lint reads it (workflow_triggers: a
     dispatch, a call or a schedule alone, a call not followed to the
     workflow that calls it, and a flow mapping, which names no event),
+    one whose every push and pull_request carries a filter
+    (workflow_filters: a branches, tags or paths filter, which the lint
+    does not read, so the workflow runs on not every change of the
+    covered files, or on not every branch; one push or pull_request
+    with no filter makes the workflow run on every change),
     one that does not check out the test's repository, or one with no
     step that runs the test on every run (workflow_runs). Whether a
     workflow runs its test is not checked where it cannot be read (see
@@ -1107,8 +1166,14 @@ def host_row_problems(manifest, host=HOST_TESTED, root=REPO_ROOT, sources=SOURCE
             continue
         if text is None:
             continue
-        if not workflow_triggers(text) & {"push", "pull_request"}:
+        events = workflow_triggers(text) & {"push", "pull_request"}
+        if not events:
             out.append((comp, pat, ref, "%s: the lint reads no push or pull_request in its own on:" % ci))
+            continue
+        filters = workflow_filters(text)
+        if all(e in filters for e in events):
+            out.append((comp, pat, ref, "%s: every push or pull_request in its own on: carries a filter (%s)" % (
+                ci, "; ".join("%s: %s" % (e, ", ".join(filters[e])) for e in sorted(events)))))
             continue
         steps = workflow_steps(text)
         test_repo, _sep, test_path = ref.partition(":")
