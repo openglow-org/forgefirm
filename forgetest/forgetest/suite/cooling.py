@@ -346,7 +346,15 @@ def fail_tier_stop(ctx):
                           "The head moves 20 mm and the controller restarts on its own.")
                 stream(g, ["G91", "G21", "M3 S0", "G4 P1", "G1 X20 F1200", "G1 X-20 F1200", "M5", "G90", "M2"])
                 ctx.arm_press()
-                t_arm = ctx.wait_for(lambda: bool((sample(ctx) or {}).get("armed")), 240)
+                # The window is the engine's armed session. /cool/status's "armed" is
+                # the controller's last report, cleared the moment the supervisor stops
+                # it, and with the thresholds at 1 the abort generator can trip on the
+                # first poll after the watch arms (the head at rest under the run fans):
+                # a window of tens of milliseconds the 0.25 s poll can miss. The engine
+                # logs the watch arming only inside an armed session, so that line is
+                # the window's witness as well.
+                t_arm = ctx.wait_for(lambda: bool((sample(ctx) or {}).get("armed"))
+                                     or bool(_log_lines(FORGECTRL_LOG, off, "crash watch armed")), 240)
                 ctx.clear_notice()
                 ctx.check(t_arm is not None, "the window never opened (arm refused, or no press)")
                 t0 = time.time()
