@@ -9,7 +9,10 @@
 #   release.sh <version> [--publish]   full release: gates, build, pack,
 #                                      sign, checksums, stage, publish cmd
 #                                      (the acceptance gate reads
-#                                      releases/v<version>/acceptance.json)
+#                                      releases/v<version>/acceptance.json);
+#                                      the release publishes the dev image
+#                                      too, as forgefirm-dev.fw (dev key)
+#                                      and its SD card image
 #   release.sh --dev                   build + pack a dev-signed .fw of the dev image for
 #                                      the GUI upload path; no staging
 #
@@ -20,7 +23,9 @@
 #                        key), replicating the factory-compat guarantee
 #   FORGEFIRM_SIGNING_KEY  private key for release mode (REQUIRED - no
 #                        default, so key choice is always deliberate)
-#   FORGEFIRM_DEV_KEY    private key for --dev mode (REQUIRED for --dev)
+#   FORGEFIRM_DEV_KEY    private key for the dev archive: --dev mode, and
+#                        forgefirm-dev.fw of a release (REQUIRED for both;
+#                        never the release key)
 #   RELEASE_STAGING_DIR  where release assets are staged
 #                        (default: <repo>/release-staging)
 #   FORGEFIRM_ACCEPTANCE_SKIP  set to 1 to bypass the acceptance gate
@@ -44,7 +49,7 @@
 #                        documentation. Never the default.
 #
 # The source bundle: a release build merges kas/source-bundle.yml, so the
-# build writes the source of every recipe of the image beside the image.
+# build writes the source of every recipe of both images beside the images.
 # scripts/source-bundle.py packs that source, the license manifests, the
 # license texts and the ForgeFIRM layers into
 # forgefirm-source-v<version>.tar.gz, and refuses to pack a bundle in which
@@ -130,12 +135,21 @@ resolve_ext4 () {
   [ -s "$EXT4" ] || die "release ext4 not found in $DEPLOY"
 }
 
+# The dev rootfs of the same build. One bitbake run stamps both images
+# alike, so the name follows from the release one.
+resolve_dev_ext4 () {
+  DEV_EXT4="${EXT4/forgefirm-image-glowforge/forgefirm-image-dev-glowforge}"
+  [ -s "$DEV_EXT4" ] || die "dev rootfs not found: $DEV_EXT4"
+}
+
+# The dev rootfs is sized and capped like the release one, so both take
+# the same slot size gate.
 check_size () {
-  SZ=$(stat -c%s "$EXT4")
+  SZ=$(stat -c%s "$1")
   [ "$SZ" -lt "$FAIL_BYTES" ] \
-    || die "rootfs is $SZ bytes - too close to the 200 MiB slot"
+    || die "rootfs $(basename "$1") is $SZ bytes - too close to the 200 MiB slot"
   if [ "$SZ" -ge "$WARN_BYTES" ]; then
-    warn "rootfs is $((SZ / 1048576)) MiB - $(( (FAIL_BYTES - SZ) / 1048576 )) MiB of margin left before the release gate"
+    warn "rootfs $(basename "$1") is $((SZ / 1048576)) MiB - $(( (FAIL_BYTES - SZ) / 1048576 )) MiB of margin left before the release gate"
   fi
 }
 
@@ -146,15 +160,12 @@ if [ "$MODE" = "dev" ]; then
   resolve_ext4
   # The dev archive carries the dev image (forgetest, the bench tools), not
   # the release rootfs: what the bench installs is what the bench runs.
-  # The dev rootfs is sized and capped like the release one, so it takes
-  # the same slot size gate.
-  EXT4="${EXT4/forgefirm-image-glowforge/forgefirm-image-dev-glowforge}"
-  [ -f "$EXT4" ] || die "dev rootfs not found: $EXT4"
-  check_size
+  resolve_dev_ext4
+  check_size "$DEV_EXT4"
   REL=$(sed -n 's/^FORGEFIRM_RELEASE ?= "\(.*\)"/\1/p' "$RELEASE_INC")
   DEVVER="v${REL}-dev-$(date +%Y%m%d%H%M%S)"
   OUT="$DEPLOY/forgefirm-dev.fw"
-  "$REPO/scripts/mkfw.sh" "$EXT4" "$DEVVER" "$OUT" "$KEY"
+  "$REPO/scripts/mkfw.sh" "$DEV_EXT4" "$DEVVER" "$OUT" "$KEY"
   echo "== dev archive ready: $OUT ($DEVVER) =="
   exit 0
 fi
@@ -165,6 +176,16 @@ KEY="${FORGEFIRM_SIGNING_KEY:?set FORGEFIRM_SIGNING_KEY to the release signing k
 PUB="${KEY%.priv}.pub"
 [ -f "$KEY" ] || die "signing key '$KEY' not found"
 [ -f "$PUB" ] || die "public key '$PUB' not found"
+# The dev image goes out with the release, signed with the dev key. No
+# machine trusts that key, so the panel installs forgefirm-dev.fw only with
+# the machine button held: an image with an open root login is never one a
+# release-key signature vouches for.
+DEV_KEY="${FORGEFIRM_DEV_KEY:?set FORGEFIRM_DEV_KEY to the dev signing key (it signs forgefirm-dev.fw)}"
+DEV_PUB="${DEV_KEY%.priv}.pub"
+[ -f "$DEV_KEY" ] || die "dev signing key '$DEV_KEY' not found"
+[ -f "$DEV_PUB" ] || die "dev public key '$DEV_PUB' not found"
+[ "$(cat "$DEV_PUB")" != "$(cat "$PUB")" ] \
+  || die "the dev key is the release key - forgefirm-dev.fw must not carry the release signature"
 
 echo "== gates =="
 
@@ -205,7 +226,9 @@ KEY_HEX=$(base64 -d "$PUB" | xxd -p | tr -d '\n')
 
 build_images
 resolve_ext4
-check_size
+check_size "$EXT4"
+resolve_dev_ext4
+check_size "$DEV_EXT4"
 
 # Rootfs version stamp.
 STAMP=$(debugfs -R "cat /etc/forgefirm-version" "$EXT4" 2>/dev/null)
@@ -245,8 +268,10 @@ fi
 SSHD_CONFIG=$(debugfs -R "cat /etc/ssh/sshd_config" "$EXT4" 2>/dev/null)
 [ -n "$SSHD_CONFIG" ] \
   || die "release rootfs carries no /etc/ssh/sshd_config"
+# awk reads to the end: an early exit would SIGPIPE a debugfs still
+# writing, and pipefail would end the release there.
 ROOT_SHADOW=$(debugfs -R "cat /etc/shadow" "$EXT4" 2>/dev/null \
-              | awk -F: '$1=="root"{print; exit}')
+              | awk -F: '$1=="root" && !seen {print; seen=1}')
 [ -n "$ROOT_SHADOW" ] \
   || die "release rootfs has no root entry in /etc/shadow"
 ROOT_PW=$(printf '%s\n' "$ROOT_SHADOW" | awk -F: '{print $2}')
@@ -281,6 +306,7 @@ echo "== pack + sign =="
 STAGE="${RELEASE_STAGING_DIR:-$REPO/release-staging}/v$VERSION"
 mkdir -p "$STAGE"
 "$REPO/scripts/mkfw.sh" "$EXT4" "v$VERSION" "$STAGE/forgefirm.fw" "$KEY"
+"$REPO/scripts/mkfw.sh" "$DEV_EXT4" "v$VERSION-dev" "$STAGE/forgefirm-dev.fw" "$DEV_KEY"
 
 # Factory-era compat verification (fwup 0.14.2 wants raw 32-byte keys).
 if [ -n "${FWUP_COMPAT:-}" ]; then
@@ -300,12 +326,14 @@ fi
 
 echo "== stage assets =="
 cp -L "$DEPLOY/forgefirm-image-glowforge.rootfs.wic.gz" "$STAGE/forgefirm-image-glowforge.rootfs.wic.gz"
+cp -L "${DEV_EXT4%.ext4}.wic.gz" "$STAGE/forgefirm-image-dev-glowforge.rootfs.wic.gz"
 # The acceptance artifact travels with the release (see the site,
 # Developers, "Acceptance") - only when the gate accepted it for THIS
 # rootfs. A skipped gate ships no artifact: an acceptance.json next to a
 # rootfs it never authorized would read as proof. The release says so
 # instead, and goes out as a prerelease.
 ASSETS="forgefirm.fw sha256sums.txt forgefirm-image-glowforge.rootfs.wic.gz"
+ASSETS="$ASSETS forgefirm-dev.fw forgefirm-image-dev-glowforge.rootfs.wic.gz"
 PRERELEASE=""
 rm -f "$STAGE/acceptance.json" "$STAGE/acceptance.md" "$STAGE/NO-ACCEPTANCE.txt"
 if [ "$GATED" = 1 ] && [ -f "$ART" ]; then
@@ -324,14 +352,15 @@ NOTE
   ASSETS="$ASSETS NO-ACCEPTANCE.txt"
   PRERELEASE="--prerelease"
 fi
-# The source bundle. It is packed from the license manifests of THIS
-# rootfs, and source-bundle.py stops the release when a recipe of the image
-# has no source (see the site, Developers, "Release flow").
+# The source bundle. It is packed from the license manifests of THESE two
+# rootfs images, and source-bundle.py stops the release when a recipe of
+# either has no source (see the site, Developers, "Release flow").
 rm -f "$STAGE"/forgefirm-source-v*.tar.gz "$STAGE/NO-SOURCE.txt"
 if [ "$SOURCE_BUNDLE" = 1 ]; then
   echo "== source bundle =="
   python3 "$REPO/scripts/source-bundle.py" "$VERSION" \
       --deploy "$DEPLOY_ROOT" --image-name "$(basename "$EXT4" .ext4)" \
+      --image-name "$(basename "$DEV_EXT4" .ext4)" \
       --out "$STAGE" \
     || die "the source bundle failed"
   ASSETS="$ASSETS forgefirm-source-v$VERSION.tar.gz"
@@ -415,10 +444,24 @@ EOF
 # claim an asset that is not there either.
 if [ "$SOURCE_BUNDLE" = 1 ]; then
   cat >> "$STAGE/notes.md" <<'EOF'
-The source of everything in this image is the `forgefirm-source-v*.tar.gz`
-asset on this release.
+The source of everything in both images of this release is the
+`forgefirm-source-v*.tar.gz` asset.
 EOF
 fi
+# The dev image goes out with every release, and its open root login is
+# said where the download is.
+cat >> "$STAGE/notes.md" <<'EOF'
+
+## The dev image
+
+`forgefirm-dev.fw` and `forgefirm-image-dev-glowforge.rootfs.wic.gz` are the
+dev image of this release: the release image plus the acceptance tool and the
+bench tools. It is for development only. **It starts SSH at every boot, and
+root logs in with no password from anywhere on the machine's network.**
+`forgefirm-dev.fw` is not signed with the release key, so the control panel
+installs it only while the machine button is held. More:
+<https://docs.forgefirm.org/developers/bench/>.
+EOF
 
 cat <<EOF
 

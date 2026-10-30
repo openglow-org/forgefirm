@@ -7,20 +7,21 @@
 # Pack the source bundle of a ForgeFIRM release.
 #
 #   source-bundle.py <version> [--build] [--out DIR] [--deploy DIR]
-#                    [--image-name NAME]
+#                    [--image-name NAME]...
 #
-# The bundle holds the source of the software that the release image
-# carries: the archives that the Yocto archiver writes when the build runs
-# with kas/source-bundle.yml, the license manifests of the image, the
-# license texts, the ForgeFIRM layers, and the kas configuration.
+# The bundle holds the source of the software that the images of the
+# release carry (the release image and the dev image): the archives that
+# the Yocto archiver writes when the build runs with kas/source-bundle.yml,
+# the license manifests of the images, the license texts, the ForgeFIRM
+# layers, and the kas configuration.
 #
-# What the bundle must hold comes from the image itself, not from a list in
-# this file:
+# What the bundle must hold comes from the images themselves, not from a
+# list in this file:
 #
 #   deploy/licenses/<arch>/<image>/license.manifest        root filesystem
 #   deploy/licenses/<arch>/<image>/image_license.manifest  kernel, DTB, U-Boot
 #
-# Every recipe in those two files whose license is in
+# Every recipe in those files whose license is in
 # COPYLEFT_LICENSE_INCLUDE (kas/source-bundle.yml, the list the archiver
 # filters with) must have an archive. A recipe with no archive stops the
 # script, because the release would go out with source missing.
@@ -44,11 +45,11 @@ from fnmatch import fnmatchcase
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KAS_OVERLAY = os.path.join(REPO, "kas", "source-bundle.yml")
 KAS_CONFIG = "kas/forgefirm-glowforge.yml:kas/source-bundle.yml"
-# The targets of the archiver pass. The image pulls in the source of
-# everything in the root filesystem; the boot loader, the kernel and the
+# The targets of the archiver pass. The images pull in the source of
+# everything in their root filesystems; the boot loader, the kernel and the
 # kernel module reach the machine outside the root filesystem, so they are
 # named too. scripts/release.sh builds the same list.
-BUILD_TARGETS = ["forgefirm-image", "u-boot", "virtual/kernel",
+BUILD_TARGETS = ["forgefirm-image", "forgefirm-image-dev", "u-boot", "virtual/kernel",
                  "kernel-module-glowforge"]
 # The layers that ForgeFIRM controls. The bundle carries them whole, because
 # they are the recipes that build the image. The upstream layers are in
@@ -352,7 +353,8 @@ README = """\
 This archive holds the source of the software in ForgeFIRM {version}.
 
 ForgeFIRM is built with the Yocto Project. The archive holds one directory
-for each recipe of the release image:
+for each recipe of the images that the release publishes, the release image
+and the dev image:
 
     sources/<recipe>-<version>-<revision>/
 
@@ -368,14 +370,16 @@ its source from git holds a tar of the checkout at the pinned revision.
 
 | Path | Content |
 |---|---|
-| `sources/` | The source of each recipe of the image. |
-| `licenses/license.manifest` | Every package of the root filesystem with its license. |
+| `sources/` | The source of each recipe of the images. |
+| `licenses/license.manifest` | Every package of the release root filesystem with its license. |
 | `licenses/image_license.manifest` | The kernel, the device tree and the boot loader. |
+| `licenses/<image>/` | The same two manifests of the dev image. |
 | `licenses/texts/` | The license text of each recipe. |
 | `metadata/LAYERS.txt` | Each layer of the build with its remote and its revision. |
-| `metadata/kas/` | The kas configuration that builds the image. |
+| `metadata/kas/` | The kas configuration that builds the images. |
 | `metadata/meta-*.tar.gz` | The ForgeFIRM layers, whole. |
 | `metadata/forgefirm-manifest.json` | The build identity of the release image. |
+| `metadata/<image>.forgefirm-manifest.json` | The build identity of the dev image. |
 | `sha256sums.txt` | The checksum of every file above. |
 
 The archive does not hold the upstream layers (poky, meta-openembedded,
@@ -447,9 +451,10 @@ def main():
                     help="the deploy directory of the build")
     ap.add_argument("--image", default="forgefirm-image-glowforge.rootfs",
                     help="the link name of the release image")
-    ap.add_argument("--image-name",
-                    help="the exact image name (IMAGE_NAME) that the release is "
-                         "cut from; its license manifests decide what the bundle holds")
+    ap.add_argument("--image-name", action="append",
+                    help="the exact image name (IMAGE_NAME) of an image the release "
+                         "publishes, once for each image, the release image first; "
+                         "their license manifests decide what the bundle holds")
     ap.add_argument("--out",
                     help="output directory (default: release-staging/v<version>)")
     args = ap.parse_args()
@@ -464,33 +469,43 @@ def main():
         if subprocess.call(cmd, cwd=REPO) != 0:
             die("the archiver build pass failed")
 
-    # The license manifests must belong to the image that the release
+    # The license manifests must belong to the images that the release
     # carries. The link name follows the last build of any image, so the
-    # exact image name decides.
+    # exact image names decide.
     licroot = os.path.join(args.deploy, "licenses")
     archs = sorted(os.listdir(licroot)) if os.path.isdir(licroot) else []
-    name = args.image_name
-    if not name:
+    names = args.image_name or []
+    if not names:
         for arch in archs:
             cand = os.path.join(licroot, arch, args.image)
             if os.path.islink(cand):
-                name = os.path.basename(os.readlink(cand).rstrip("/"))
+                names = [os.path.basename(os.readlink(cand).rstrip("/"))]
                 break
-        if not name:
+        if not names:
             die("cannot find %s under %s (name the image with --image-name)"
                 % (args.image, licroot))
-    licdir = None
-    for arch in archs:
-        cand = os.path.join(licroot, arch, name)
-        if os.path.isdir(cand) and not os.path.islink(cand):
-            licdir = cand
-            break
-    if not licdir:
-        die("no license manifest directory for image '%s' under %s" % (name, licroot))
-    print("image:    %s" % name)
-    print("licenses: %s" % licdir)
+    licdirs = []
+    for name in names:
+        licdir = None
+        for arch in archs:
+            cand = os.path.join(licroot, arch, name)
+            if os.path.isdir(cand) and not os.path.islink(cand):
+                licdir = cand
+                break
+        if not licdir:
+            die("no license manifest directory for image '%s' under %s" % (name, licroot))
+        licdirs.append(licdir)
+        print("image:    %s" % name)
+        print("licenses: %s" % licdir)
 
-    recipes = image_recipes(licdir)
+    # Every recipe of every image. A recipe on both images comes from the
+    # same build, so it has one version.
+    recipes = {}
+    for licdir in licdirs:
+        for recipe, entry in image_recipes(licdir).items():
+            have = recipes.setdefault(recipe, {"version": entry["version"], "licenses": []})
+            have["licenses"] += [lic for lic in entry["licenses"]
+                                 if lic not in have["licenses"]]
     needed = {}
     for recipe, entry in recipes.items():
         # A recipe with several packages can carry several license
@@ -500,7 +515,7 @@ def main():
         if source_needed(expr, policy) or \
            any(fnmatchcase(recipe, p) for p in policy["COPYLEFT_PN_INCLUDE"]):
             needed[recipe] = dict(entry, license=expr)
-    print("recipes:  %d in the image, %d with source in the bundle"
+    print("recipes:  %d in the images, %d with source in the bundle"
           % (len(recipes), len(needed)))
 
     srcdir = os.path.join(args.deploy, "sources")
@@ -527,7 +542,7 @@ def main():
                         "archives": [os.path.basename(d) for d in dirs],
                         "note": note, "dirs": dirs})
     if missing:
-        print("\nrecipes of the image with no source archive:", file=sys.stderr)
+        print("\nrecipes of the images with no source archive:", file=sys.stderr)
         for recipe, ver, lic in missing:
             print("  %-28s %-18s %s" % (recipe, ver, lic), file=sys.stderr)
         die("%d recipe(s) have no source. Run the build with "
@@ -548,11 +563,13 @@ def main():
                                 % (os.path.basename(d),
                                    os.path.relpath(f, d).replace(os.sep, "/")), f)
 
-    bundle.add_file("licenses/license.manifest",
-                    os.path.join(licdir, "license.manifest"))
-    if os.path.isfile(os.path.join(licdir, "image_license.manifest")):
-        bundle.add_file("licenses/image_license.manifest",
-                        os.path.join(licdir, "image_license.manifest"))
+    # The release image's manifests at the top of licenses/, every other
+    # image's under its name.
+    for i, (name, licdir) in enumerate(zip(names, licdirs)):
+        prefix = "licenses" if i == 0 else "licenses/%s" % name
+        for fn in ("license.manifest", "image_license.manifest"):
+            if os.path.isfile(os.path.join(licdir, fn)):
+                bundle.add_file("%s/%s" % (prefix, fn), os.path.join(licdir, fn))
     for recipe in sorted(recipes):
         for arch in archs:
             texts = os.path.join(licroot, arch, recipe)
@@ -563,14 +580,16 @@ def main():
     for fn in sorted(os.listdir(os.path.join(REPO, "kas"))):
         if fn.endswith(".yml"):
             bundle.add_file("metadata/kas/%s" % fn, os.path.join(REPO, "kas", fn))
-    # The build identity of the image the bundle answers for. Its absence
+    # The build identity of each image the bundle answers for. Its absence
     # means the deploy directory no longer holds that image, so the bundle
     # would speak for a build that is not there.
-    image_manifest = os.path.join(args.deploy, "images", "glowforge",
-                                  name + ".forgefirm-manifest.json")
-    if not os.path.isfile(image_manifest):
-        die("no manifest for image '%s' at %s" % (name, image_manifest))
-    bundle.add_file("metadata/forgefirm-manifest.json", image_manifest)
+    for i, name in enumerate(names):
+        image_manifest = os.path.join(args.deploy, "images", "glowforge",
+                                      name + ".forgefirm-manifest.json")
+        if not os.path.isfile(image_manifest):
+            die("no manifest for image '%s' at %s" % (name, image_manifest))
+        bundle.add_file("metadata/forgefirm-manifest.json" if i == 0
+                        else "metadata/%s.forgefirm-manifest.json" % name, image_manifest)
     layers = layer_records(REPO)
     table = ["%-22s %-56s %-42s %s" % ("CHECKOUT", "URL", "REVISION", "BRANCH")]
     for lay in layers:
@@ -584,7 +603,7 @@ def main():
             die("layer %s is not at %s" % (layer, path))
         bundle.add_bytes("metadata/%s.tar.gz" % layer, tar_tree(layer, path))
 
-    table = ["ForgeFIRM v%s - the source of each recipe of the release image" % version,
+    table = ["ForgeFIRM v%s - the source of each recipe of the release and dev images" % version,
              "",
              "%-28s %-20s %-46s %s" % ("RECIPE", "VERSION", "ARCHIVE", "LICENSE")]
     for rec in records:
@@ -596,7 +615,8 @@ def main():
     bundle.add_bytes("MANIFEST.json", json.dumps({
         "format": 1,
         "release": "v" + version,
-        "image": name,
+        "image": names[0],
+        "images": names,
         "policy": {"license_include": policy["COPYLEFT_LICENSE_INCLUDE"],
                    "license_exclude": policy["COPYLEFT_LICENSE_EXCLUDE"],
                    "recipe_include": policy["COPYLEFT_PN_INCLUDE"],

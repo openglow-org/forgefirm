@@ -23,6 +23,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 SCRIPT = os.path.join(REPO, "scripts", "source-bundle.py")
 META_OPENGLOW = os.path.join(REPO, "..", "meta-openglow")
 IMAGE = "forgefirm-image-glowforge.rootfs-20260101000000"
+DEV_IMAGE = "forgefirm-image-dev-glowforge.rootfs-20260101000000"
 
 
 def load_script():
@@ -43,14 +44,14 @@ def write(path, text):
         f.write(text)
 
 
-def make_deploy(root, packages, archives, image_packages=()):
+def make_deploy(root, packages, archives, image_packages=(), image=IMAGE):
     """A deploy directory with the license manifests of one image and the
     archive directories of the archiver pass."""
-    licdir = os.path.join(root, "licenses", "glowforge", IMAGE)
-    # The bundle answers for one image: its license manifests and its build
+    licdir = os.path.join(root, "licenses", "glowforge", image)
+    # The bundle answers for each image: its license manifests and its build
     # identity must be in the deploy directory.
     write(os.path.join(root, "images", "glowforge",
-                       IMAGE + ".forgefirm-manifest.json"),
+                       image + ".forgefirm-manifest.json"),
           '{"content_sha256": "0"}\n')
     write(os.path.join(licdir, "license.manifest"),
           "".join(package_block(*p) for p in packages))
@@ -74,9 +75,11 @@ class Policy(unittest.TestCase):
         self.assertIn("GPL*", self.policy["COPYLEFT_LICENSE_INCLUDE"])
         self.assertIn("LGPL*", self.policy["COPYLEFT_LICENSE_INCLUDE"])
         self.assertIn("Proprietary", self.policy["COPYLEFT_LICENSE_EXCLUDE"])
-        # The ForgeFIRM components are MIT and travel with the release too.
+        # The ForgeFIRM components are MIT and travel with the release too,
+        # the dev image's forgetest among them.
         self.assertIn("forgectrl", self.policy["COPYLEFT_PN_INCLUDE"])
         self.assertIn("gfcloud", self.policy["COPYLEFT_PN_INCLUDE"])
+        self.assertIn("forgetest", self.policy["COPYLEFT_PN_INCLUDE"])
 
     def test_a_copyleft_license_needs_source(self):
         for expr in ("GPL-2.0-only",
@@ -152,12 +155,13 @@ class Pack(unittest.TestCase):
         self.deploy = os.path.join(self.root, "deploy")
         self.out = os.path.join(self.root, "out")
 
-    def run_main(self, packages, archives, image_packages=()):
+    def run_main(self, packages, archives, image_packages=(), images=(IMAGE,)):
         make_deploy(self.deploy, packages, archives, image_packages)
         import sys
         argv = sys.argv
-        sys.argv = ["source-bundle.py", "0.0.1", "--deploy", self.deploy,
-                    "--image-name", IMAGE, "--out", self.out]
+        sys.argv = ["source-bundle.py", "0.0.1", "--deploy", self.deploy, "--out", self.out]
+        for image in images:
+            sys.argv += ["--image-name", image]
         try:
             return self.mod.main()
         finally:
@@ -204,6 +208,22 @@ class Pack(unittest.TestCase):
         held = sorted(n.split("/", 1)[1] for n in names
                       if n != "forgefirm-source-v0.0.1/sha256sums.txt")
         self.assertEqual(listed, held)
+
+    def test_the_dev_image_needs_its_source_too(self):
+        # The release publishes the dev image as well, so a copyleft recipe
+        # that only the dev image carries travels with the source.
+        make_deploy(self.deploy, [("gdb", "14.2", "GPL-3.0-only")], ["gdb-14.2-r0"],
+                    image=DEV_IMAGE)
+        self.run_main(packages=[("busybox", "1.36.1", "GPL-2.0-only")],
+                      archives=["busybox-1.36.1-r0"], images=(IMAGE, DEV_IMAGE))
+        root = "forgefirm-source-v0.0.1/"
+        with tarfile.open(os.path.join(self.out, "forgefirm-source-v0.0.1.tar.gz")) as tar:
+            names = tar.getnames()
+            manifest = json.loads(tar.extractfile(root + "MANIFEST.json").read().decode())
+        self.assertIn(root + "sources/gdb-14.2-r0/gdb-14.2-r0.tar.gz", names)
+        self.assertIn(root + "licenses/%s/license.manifest" % DEV_IMAGE, names)
+        self.assertIn(root + "metadata/%s.forgefirm-manifest.json" % DEV_IMAGE, names)
+        self.assertEqual(manifest["images"], [IMAGE, DEV_IMAGE])
 
     def test_a_recipe_with_no_source_stops_the_release(self):
         with self.assertRaises(SystemExit) as caught:

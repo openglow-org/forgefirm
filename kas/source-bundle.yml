@@ -48,6 +48,5 @@ local_conf_header:
     COPYLEFT_LICENSE_INCLUDE = "GPL* LGPL* AGPL* MPL* EPL* CDDL* CPL* OSL* EUPL* Artistic*"
     COPYLEFT_LICENSE_EXCLUDE = "CLOSED Proprietary"
     # The ForgeFIRM components are MIT, and the bundle carries their source
-    # too. forgetest is on the dev image only, and the bundle of a release
-    # does not carry it.
-    COPYLEFT_PN_INCLUDE = "forgectrl gfcloud gfhome python3-ffmachine python3-gfhardware python3-gfutilities ffboot slotmigrate forgefirm-users forgefirm-banner forgefirm-logging forgefirm-keys"
+    # too. forgetest is on the dev image, which the release publishes as well.
+    COPYLEFT_PN_INCLUDE = "forgectrl gfcloud gfhome python3-ffmachine python3-gfhardware python3-gfutilities ffboot slotmigrate forgefirm-users forgefirm-banner forgefirm-logging forgefirm-keys forgetest"
