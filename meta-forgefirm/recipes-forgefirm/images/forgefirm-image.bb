@@ -114,15 +114,24 @@ IMAGE_INSTALL:append = " libegl-mesa libgles2-mesa libgbm mesa-megadriver"
 # The SDMA firmware brings its own -license package through linux-firmware.
 IMAGE_INSTALL:append = " firmware-imx-lic"
 
-# The release rootfs must fit a 200 MiB factory eMMC slot (409600 blocks).
-# Sizing: content + 40 MiB working space, hard-capped at the slot size:
-# the build fails rather than emit an unflashable image. The raw ext4 is
-# deployed alongside the wic; scripts/mkfw.sh packs it into the signed
-# .fw release artifact.
+# The rootfs must fit a 200 MiB factory eMMC slot (409600 blocks).
+# Sizing: content + 16 MiB, hard-capped at the slot size: the build fails
+# rather than emit an unflashable image. The rootfs mounts read-only, so
+# the margin is room for mkfs's own metadata (inode tables, journal), which
+# du of the content does not count, and a little slack for a bench hot
+# copy. The journal stays, for that hot copy's writable window. No blocks
+# are reserved for root, who runs everything, and there is one inode per
+# 8 KiB (poky's default of 4 KiB gives about ten times the inodes the
+# content uses). A rootfs that outgrows the margin or the inodes fails in
+# mkfs at build time. The raw ext4 is deployed alongside the wic;
+# scripts/mkfw.sh packs it into the signed .fw release artifact. The SD
+# card wic makes its own filesystem with the same options (glowforge.wks
+# in meta-openglow).
 IMAGE_FSTYPES:append = " ext4"
 IMAGE_OVERHEAD_FACTOR = "1.0"
-IMAGE_ROOTFS_EXTRA_SPACE = "40960"
+IMAGE_ROOTFS_EXTRA_SPACE = "16384"
 IMAGE_ROOTFS_MAXSIZE = "204800"
+EXTRA_IMAGECMD:ext4 = "-i 8192 -m 0"
 
 # The ForgeFIRM mark and the version stamp:
 # /etc/forgefirm-version (machine-readable), and, under the OpenGlow mark

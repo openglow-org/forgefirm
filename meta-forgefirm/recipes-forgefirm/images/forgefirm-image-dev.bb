@@ -40,10 +40,8 @@ IMAGE_FEATURES += " \
 # password over SSH are what debug-tweaks turns on.
 FORGEFIRM_IMAGE_KIND = "dev"
 
-# Dev images boot from SD, never from a 200 MiB eMMC slot: lift the slot
-# ceiling and give the filesystem generous working space instead.
-IMAGE_ROOTFS_MAXSIZE = ""
-IMAGE_ROOTFS_EXTRA_SPACE = "262144"
+# Sizing is the release recipe's: content + 16 MiB, capped at the 200 MiB
+# slot, so the dev rootfs fits a slot too. The bench runs it from SD.
 
 # Dev builds identify by build timestamp (matches the artifact name),
 # tagged so a bench machine is never mistaken for a release.
