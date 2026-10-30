@@ -457,7 +457,9 @@ cat >> "$STAGE/notes.md" <<'EOF'
 `forgefirm-dev.fw` and `forgefirm-image-dev-glowforge.rootfs.wic.gz` are the
 dev image of this release: the release image plus the acceptance tool and the
 bench tools. It is for development only. **It starts SSH at every boot, and
-root logs in with no password from anywhere on the machine's network.**
+root logs in with no password from anywhere on the machine's network.** A
+program that has the control panel's token can also make changes without a
+login. Every page of the control panel shows a red DEVELOPMENT IMAGE bar.
 `forgefirm-dev.fw` is not signed with the release key, so the control panel
 installs it only while the machine button is held. More:
 <https://docs.forgefirm.org/developers/bench/>.
