@@ -1,10 +1,33 @@
 # The ForgeFIRM logging tree: one directory per logger under
 # /data/log/forgefirm, rsyslog the only writer. Size-capped, so a
 # chatty debug level cannot fill /data; rotation renames and HUPs
-# rsyslog (never copytruncate - no lost lines).
-/data/log/forgefirm/*/*.log {
+# rsyslog (never copytruncate - no lost lines). Every logger's
+# directory is named here: a file two stanzas select is an error to
+# logrotate, so the sensors logger's own budget rules out a glob.
+/data/log/forgefirm/forgectrl/*.log /data/log/forgefirm/grblhal/*.log
+/data/log/forgefirm/gfcloud/*.log /data/log/forgefirm/gfhome/*.log
+/data/log/forgefirm/forgeext/*.log /data/log/forgefirm/kernel/*.log
+/data/log/forgefirm/system/*.log /data/log/forgefirm/install/*.log {
     size 2M
     rotate 3
+    nodateext
+    compress
+    missingok
+    notifempty
+    create 0640 root root
+    sharedscripts
+    postrotate
+        pkill -HUP rsyslogd 2>/dev/null || true
+    endscript
+}
+
+# The sensors logger keeps months of records, every one a machine's
+# history: about 1.6 MB a day with four hours of jobs, which gzip takes
+# down about 14 times. A 4 MB file and 25 compressed ones stay under
+# 15 MB on /data at a ratio of 10, and the export carries all of it.
+/data/log/forgefirm/sensors/*.log {
+    size 4M
+    rotate 25
     nodateext
     compress
     missingok

@@ -224,6 +224,14 @@ HOST_TESTED = [
     # The logging tree's paths, the level and target validators, the
     # configured levels.
     ("forgectrl", "src/logs.*", "forgectrl:tests/logs_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The sensors logger's records: the formats against the golden file the
+    # bundle reader parses, the job summary, the flight recorder's window,
+    # the cadence, the clock step.
+    ("forgectrl", "src/senslogfmt.*", "forgectrl:tests/senslog_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The sensors logger's thread: its start records under its own program
+    # name, read through the sysfs root, no serial in them (its 1 Hz reads
+    # are of the sensors the cooling engine's catalog tests already judge).
+    ("forgectrl", "src/senslog.*", "forgectrl:tests/host_start.sh", "forgectrl:.github/workflows/build.yml"),
     # The extension host, each part to the test that drives it (the
     # freeze, the supervisor, the machine client and the groups stay with
     # exthost.armed-freeze, which covers them).
