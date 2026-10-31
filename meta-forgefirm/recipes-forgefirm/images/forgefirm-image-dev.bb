@@ -43,6 +43,49 @@ FORGEFIRM_IMAGE_KIND = "dev"
 # Sizing is the release recipe's: content + 16 MiB, capped at the 200 MiB
 # slot, so the dev rootfs fits a slot too. The bench runs it from SD.
 
+# The SD card image (forgefirm-dev-sd.wks.in, in this layer's wic/): the
+# rootfs in a partition of the slot's size, so a later build's raw ext4
+# can be written into it alone, and a data partition of the card's own.
+# forgefirm-data shows the card's forgefirm/ at /data/forgefirm and its
+# log/ at /data/log/forgefirm on a boot from the card; everything else in
+# /data, the acceptance records among it, stays the eMMC's. The card
+# starts as a finished first run in a known configuration, whatever the
+# bench machine holds: ForgeFIRM's default settings, the account
+# forgefirm with the password forgefirm (the panel refuses a password
+# equal to the name when an account is made there; this one is made
+# here), the intake fan count the setup gate asks for (the default, 2),
+# and setup.seed, which forgectrl turns into the setup record at its
+# first start: the record needs the advisories' hashes and the step
+# versions, which only the running build knows. The import marker at the
+# card's top has forgefirm-data copy the machine's identity (the sshd
+# host keys, the TLS key and certificate, the WiFi region, the last saved
+# time) from the eMMC
+# at the card's first boot. The .fw keeps the eMMC's /data.
+WKS_FILE = "forgefirm-dev-sd.wks.in"
+FORGEFIRM_SD_DATA = "${WORKDIR}/forgefirm-sd-data"
+# openssl passwd -6 -salt forgefirmsdcard forgefirm
+FORGEFIRM_SD_ACCOUNT_HASH = "$6$forgefirmsdcard$y4tKCFpeLtsgRb6hpFu3YvG40VzJF5cGvAw7CHKV3KtHap2DnucjBxgN3trsyhtwpZubJ8YPHt.u5xtf2n3Mt."
+
+# Made in do_image_wic, which runs under pseudo: the files are root's on
+# the card. wic makes the partition with the image's own pseudo database
+# (the directory beside the content, ${WORKDIR}/pseudo).
+forgefirm_sd_data() {
+    d="${FORGEFIRM_SD_DATA}"
+    rm -rf "$d"
+    install -d -m 0755 "$d" "$d/log"
+    install -d -m 0711 "$d/forgefirm"
+    printf 'forgefirm:%s:1000\n' '${FORGEFIRM_SD_ACCOUNT_HASH}' > "$d/forgefirm/users"
+    printf '%s\n' \
+        "# The SD card's settings: ForgeFIRM's defaults, and the intake fan" \
+        "# count the setup gate asks for." \
+        "cool_intake_fans = 2" > "$d/forgefirm/forgefirm.conf"
+    : > "$d/forgefirm/setup.seed"
+    : > "$d/import"
+    chmod 0600 "$d/forgefirm/users" "$d/forgefirm/forgefirm.conf" "$d/forgefirm/setup.seed"
+    chown -R 0:0 "$d"
+}
+do_image_wic[prefuncs] += "forgefirm_sd_data"
+
 # Dev builds identify by build timestamp (matches the artifact name),
 # tagged so a bench machine is never mistaken for a release.
 FORGEFIRM_VERSION_STRING = "${DATETIME} (dev)"

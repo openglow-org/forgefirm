@@ -1,0 +1,20 @@
+# short-description: SD card image of the dev image: the rootfs and the card's own data
+# long-description:
+# Written to an SD card with dd. It carries no bootloader: the factory
+# U-Boot in the eMMC boot area boots it when the saved environment selects
+# the SD card (ffboot sd).
+#
+# p1, the rootfs, is the size of an eMMC slot (IMAGE_ROOTFS_MAXSIZE in
+# forgefirm-image.bb), so the raw ext4 of a later build fits it, and
+# writing that alone to p1 leaves the card's data as it is. Its filesystem
+# options are those of the image's raw ext4 for a slot.
+#
+# p2 holds ForgeFIRM's settings (forgefirm/) and logs (log/) for a boot
+# from the card; forgefirm-data shows them at /data/forgefirm and
+# /data/log/forgefirm. Its content is made by forgefirm-image-dev.bb
+# (forgefirm_sd_data). No mount point here: wic would write one into the
+# rootfs's fstab, and the image's own boot step mounts it.
+part / --source rootfs --ondisk mmcblk --fstype=ext4 --label root --active --align 4096 --fixed-size 200M --mkfs-extraopts "-F -i 8192 -m 0"
+part --source rootfs --rootfs-dir=${FORGEFIRM_SD_DATA} --ondisk mmcblk --fstype=ext4 --label forgefirm-data --align 4096 --fixed-size 1024M --mkfs-extraopts "-F -i 8192 -m 0"
+
+bootloader --ptable msdos

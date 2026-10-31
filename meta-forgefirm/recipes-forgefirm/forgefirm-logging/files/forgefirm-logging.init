@@ -63,7 +63,10 @@ EOF
 # Files written by ForgeFIRM before it logged through syslog. Moved, not
 # deleted, so nothing on the bench is lost; the factory's own
 # /data/glowforge.log and /data/log/glowforge* are not ours and stay.
+# On a boot from an SD card with its own data (forgefirm-data), the
+# folder is the card's: the eMMC's files stay where they are.
 sweep_legacy() {
+    awk '$2 == "/data/forgefirm" { f = 1 } END { exit !f }' /proc/mounts && return 0
     moved=0
     for f in /data/forgectrl.log /data/forgectrl.log.* /data/forgectrl.log-* \
              /data/gfcloud.log /data/gfcloud.log.* /data/gfhome.log /data/gfhome.log.*; do

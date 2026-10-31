@@ -333,6 +333,176 @@ class PackLicensesTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(self.manifest))
 
 
+# forgefirm-data, the layer's boot step after mountall, in a private mount
+# namespace as root: /run a fresh tmpfs and the scratch tree's eMMC data
+# directory over /data (made for the run where the host has none, and
+# removed after). The kernel command line and the card's data partition
+# (an ext4 image file, loop-mounted) are the script's two host-test
+# settings. Then what /data shows, read back as JSON, with the eMMC's own
+# files read beside it from the scratch tree. Exit 97: the namespace could
+# not be set up.
+CARD_DATA = r"""
+T=$1; SCRIPT=$2
+made=
+[ -d /data ] || { mkdir /data && made=1; } || exit 97
+mount --make-rprivate / && mount -t tmpfs tmpfs /run &&
+    mount --bind "$T/emmc" /data || { [ -z "$made" ] || rmdir /data; exit 97; }
+FF_CMDLINE="$T/cmdline" FF_CARD_DEV="$T/card.img" sh "$SCRIPT" start > "$T/script.log" 2>&1
+echo "rc=$?"
+python3 - "$T" <<'PY'
+import errno, json, os, sys
+T = sys.argv[1]
+def read(p):
+    try:
+        return open(p).read()
+    except OSError:
+        return None
+def write(d):
+    try:
+        with open(os.path.join(d, ".w"), "w") as f:
+            f.write("x")
+        os.remove(os.path.join(d, ".w"))
+        return "ok"
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+def mode(p):
+    try:
+        return "%o" % (os.stat(p).st_mode & 0o777)
+    except OSError:
+        return None
+print("probe=" + json.dumps({
+    "state": (read("/run/forgefirm-data.state") or "").strip(),
+    "users": read("/data/forgefirm/users"),
+    "conf": read("/data/forgefirm/forgefirm.conf"),
+    "ssh_key_mode": mode("/data/forgefirm/ssh/ssh_host_ed25519_key"),
+    "cert": read("/data/forgefirm/tls/cert.pem"),
+    "timestamp": read("/data/forgefirm/timestamp"),
+    "archive": read("/data/forgefirm/archive/manifest"),
+    "archive_write": write("/data/forgefirm/archive") if os.path.isdir("/data/forgefirm/archive") else None,
+    "emmc_view_write": write("/run/forgefirm-emmc") if os.path.isdir("/run/forgefirm-emmc/forgefirm") else None,
+    "system_log": read("/data/log/forgefirm/system/system.log"),
+    "results": read("/data/forgetest/results.jsonl"),
+    "wifi": read("/data/etc/wpa_supplicant.conf"),
+    "import_left": os.path.exists("/run/forgefirm-card/import"),
+    "listing": sorted(os.listdir("/data/forgefirm")),
+    "emmc_users": read(T + "/emmc/forgefirm/users"),
+    "emmc_conf": read(T + "/emmc/forgefirm/forgefirm.conf"),
+    "log": read(T + "/script.log"),
+}))
+PY
+cd /
+umount -R /data 2>/dev/null || umount -l /data
+[ -z "$made" ] || rmdir /data
+rm -rf "$T"
+"""
+
+
+@unittest.skipUnless(os.path.isdir(LAYER) and shutil.which("unshare") and shutil.which("mkfs.ext4"),
+                     "needs Linux, mkfs.ext4 and a forgefirm checkout")
+class CardDataTests(unittest.TestCase):
+    """forgefirm-data, the layer's boot step: an SD card's own settings and
+    logs on a boot from the card, /data left as it is on any other boot,
+    and a requested reset."""
+
+    SCRIPT = os.path.join(LAYER, "forgefirm-data", "files", "forgefirm-data")
+
+    def tree(self, root, files):
+        for rel, text in files.items():
+            path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if text is not None:
+                with open(path, "w") as f:
+                    f.write(text)
+                os.chmod(path, 0o600)
+
+    def run_boot(self, cmdline, emmc, card=None):
+        """One boot of the step: the eMMC's /data tree and the card's data
+        partition (None: no partition), as {path: text}. Returns the probe."""
+        t = tempfile.mkdtemp(prefix="forgetest-card.")
+        self.addCleanup(subprocess.run, ["sudo", "-n", "rm", "-rf", t], capture_output=True)
+        self.tree(os.path.join(t, "emmc"), emmc)
+        with open(os.path.join(t, "cmdline"), "w") as f:
+            f.write(cmdline + "\n")
+        if card is not None:
+            src = os.path.join(t, "card")
+            os.makedirs(src)
+            self.tree(src, card)
+            p = subprocess.run(["mkfs.ext4", "-q", "-F", "-d", src, os.path.join(t, "card.img"), "8M"],
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+        try:
+            p = subprocess.run(["sudo", "-n", "unshare", "-m", "sh", "-c", CARD_DATA, "sh", t, self.SCRIPT],
+                               capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            p = None
+        if p is None or "rc=" not in p.stdout:
+            if p is not None and p.returncode == 97:
+                raise AssertionError("the namespace was made but not set up: %s" % p.stderr.strip())
+            self.skipTest("no namespace can be made here (root through sudo -n)")
+        self.assertEqual(field(p.stdout, "rc"), "0", p.stdout + p.stderr)
+        return json.loads(field(p.stdout, "probe"))
+
+    EMMC = {
+        "forgefirm/users": "bench:$6$salt$hash:1000\n",
+        "forgefirm/forgefirm.conf": "wifi_country = DE\next_enabled = 1\n",
+        "forgefirm/ssh/ssh_host_ed25519_key": "KEY\n",
+        "forgefirm/tls/cert.pem": "CERT\n",
+        "forgefirm/timestamp": "202610211901\n",
+        "forgefirm/archive/manifest": "factory-rootfs-1.img.gz\n",
+        "forgetest/results.jsonl": "{}\n",
+        "log/forgefirm/system/system.log": "bench work\n",
+        "etc/wpa_supplicant.conf": "network={}\n",
+    }
+    CARD = {
+        "forgefirm/users": "forgefirm:$6$forgefirmsdcard$x:1000\n",
+        "forgefirm/forgefirm.conf": "cool_intake_fans = 2\n",
+        "forgefirm/setup.seed": "",
+        "log/.keep": "",
+        "import": "",
+    }
+
+    def test_a_card_boot_shows_the_cards_settings_and_logs_and_brings_the_identity_once(self):
+        pr = self.run_boot("console=ttymxc0 root=/dev/mmcblk1p1 rw", self.EMMC, self.CARD)
+        self.assertEqual(pr["state"], "card", pr["log"])
+        self.assertTrue(pr["users"].startswith("forgefirm:"), pr)
+        self.assertIn("cool_intake_fans = 2", pr["conf"])
+        self.assertIn("wifi_country = DE", pr["conf"])
+        self.assertNotIn("ext_enabled", pr["conf"])
+        self.assertEqual((pr["ssh_key_mode"], pr["cert"], pr["timestamp"]), ("600", "CERT\n", "202610211901\n"), pr)
+        self.assertFalse(pr["import_left"], "the import marker stays on the card")
+        # the factory archive is the eMMC's, read-only; the rest of the
+        # eMMC's /data shows as before, the acceptance records among it
+        self.assertEqual((pr["archive"], pr["archive_write"]), ("factory-rootfs-1.img.gz\n", "EROFS"), pr)
+        self.assertEqual((pr["results"], pr["wifi"]), ("{}\n", "network={}\n"), pr)
+        self.assertIsNone(pr["system_log"], "the eMMC's logs show through the card's log folder")
+        self.assertEqual(pr["emmc_view_write"], "EROFS", pr)
+        self.assertEqual(pr["emmc_users"], self.EMMC["forgefirm/users"])
+        self.assertEqual(pr["emmc_conf"], self.EMMC["forgefirm/forgefirm.conf"])
+
+    def test_any_other_boot_leaves_data_as_mountall_made_it(self):
+        not_ours = {"lost+found/.keep": ""}
+        for cmdline, card, state in (("root=/dev/mmcblk2p1 rw", self.CARD, "emmc"),
+                                     ("root=/dev/mmcblk1p1 rw", None, "card-none"),
+                                     ("root=/dev/mmcblk1p1 rw", not_ours, "card-failed")):
+            pr = self.run_boot(cmdline, self.EMMC, card)
+            self.assertEqual(pr["state"], state, pr["log"])
+            self.assertEqual((pr["users"], pr["system_log"]), (self.EMMC["forgefirm/users"], "bench work\n"),
+                             "%s: %s" % (state, pr))
+            self.assertIsNone(pr["emmc_view_write"], state)
+
+    def test_a_requested_reset_clears_the_folder_but_what_an_install_keeps(self):
+        emmc = dict(self.EMMC)
+        emmc.update({"forgefirm/reset-requested": "requested\n", "forgefirm/setup.json": "{}\n",
+                     "forgefirm/tokens": "t\n", "forgefirm/ext/org.example/state": "s\n",
+                     "forgefirm/home/bench/.profile": "p\n", "forgefirm/.hidden": "h\n",
+                     "forgefirm/timestamp": "0\n", "forgefirm/random-seed": "r\n",
+                     "forgefirm/legacy-logs/forgectrl.log": "old\n"})
+        pr = self.run_boot("root=/dev/mmcblk2p2 rw", emmc)
+        self.assertEqual(pr["listing"], ["archive", "legacy-logs", "random-seed", "ssh", "timestamp", "tls"],
+                         pr["log"])
+        self.assertEqual((pr["results"], pr["system_log"]), ("{}\n", "bench work\n"), pr)
+
+
 class RootfsLintTests(unittest.TestCase):
     """rootfs-lint.sh, the image's last rootfs step, on a fixture tree: a
     tree that holds every rule passes, and a drift fails the lint naming

@@ -1,0 +1,175 @@
+#!/bin/sh
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+### BEGIN INIT INFO
+# Provides:          forgefirm-data
+# Required-Start:    mountall
+# Required-Stop:
+# Default-Start:     S
+# Default-Stop:
+# Short-Description: ForgeFIRM data: the SD card's folders, a requested reset
+### END INIT INFO
+#
+# Runs in rcS at S04: mountall (S03) has mounted /data (eMMC p3) and /run,
+# and nothing reads /data/forgefirm before forgefirm-sandbox (S30).
+#
+# 1. The card. Booted from the SD card (root=/dev/mmcblk1p1), and the card
+#    has a second partition (the dev image's SD card image makes one), the
+#    card carries ForgeFIRM's settings and logs: its forgefirm/ shows at
+#    /data/forgefirm and its log/ at /data/log/forgefirm, bind mounts over
+#    the eMMC's folders. The rest of /data stays the eMMC's: the factory
+#    state, the WiFi configuration (/data/etc), and the acceptance records
+#    (/data/forgetest). The eMMC's own ForgeFIRM folders are not written:
+#    /run/forgefirm-emmc shows the eMMC's /data read-only, and its factory
+#    archive is bound read-only into the card's /data/forgefirm/archive, so
+#    a factory restore still finds it. At the card's first boot (the import
+#    marker at the card's top), the machine's identity comes over once, so
+#    a client sees the same machine from either boot: the sshd host keys,
+#    the TLS key and certificate, and the WiFi region; and the last saved
+#    time (timestamp), so the card's first boot sets its clock from it as
+#    an eMMC boot does (bootmisc, S36; the board has no battery-backed
+#    clock). Any other boot (an eMMC slot, or a card with one partition)
+#    leaves /data as mountall made it. The outcome is one word in
+#    /run/forgefirm-data.state, which a dev image's control panel shows in
+#    its development bar: emmc (a boot from an eMMC slot), card
+#    (the card's folders are in use), card-none (a card with no data
+#    partition), card-failed (the card's data partition is there and not
+#    in use: it did not mount, it is not ForgeFIRM's, or its folders could
+#    not be shown; the boot log says which).
+# 2. A reset. forgectrl leaves reset-requested in /data/forgefirm and
+#    reboots (POST /system/reset). Here, before anything reads the folder,
+#    everything in it goes but what an install keeps or the machine itself
+#    is: the factory archive, the sshd host keys, the TLS key and
+#    certificate, the boot state (timestamp, random-seed), and the logs
+#    from before syslog (legacy-logs). The marker goes last, so a wipe cut
+#    short by a power loss runs again at the next boot. forgectrl then
+#    finds no account and no setup record, and the setup runs as after an
+#    install.
+#
+# Host tests set FF_CMDLINE (the kernel command line file) and FF_CARD_DEV
+# (the card's data partition); the image sets neither.
+
+CMDLINE=${FF_CMDLINE:-/proc/cmdline}
+CARD_DEV=${FF_CARD_DEV:-/dev/mmcblk1p2}
+CARD_ROOT=/dev/mmcblk1p1
+STATE=/run/forgefirm-data.state
+CARD=/run/forgefirm-card
+EMMC=/run/forgefirm-emmc
+DATA=/data/forgefirm
+LOGS=/data/log/forgefirm
+RESET=reset-requested
+KEEP="archive ssh tls timestamp random-seed legacy-logs"
+
+log () {
+  echo "forgefirm-data: $*"
+  { echo "forgefirm-data: $*" > /dev/kmsg; } 2>/dev/null
+}
+
+case "$1" in
+  start|"") ;;
+  *) exit 0 ;;
+esac
+
+# is_mounted <path>: a mount sits at path (read from /proc/mounts:
+# mountpoint(1) judges a directory by its device numbers, which a bind of
+# a directory of the same filesystem does not change).
+is_mounted () {
+  awk -v t="$1" '$2 == t { f = 1 } END { exit !f }' /proc/mounts
+}
+
+# The identity the eMMC's ForgeFIRM folder holds, copied once into the
+# card's (src and dst are forgefirm/ folders). A part the eMMC lacks is
+# made fresh on the card by its owner (sshd, forgectrl).
+import_identity () {
+  src=$1
+  dst=$2
+  for d in ssh tls; do
+    if [ -d "$src/$d" ] && [ ! -e "$dst/$d" ]; then
+      cp -pR "$src/$d" "$dst/" && log "the eMMC's $d came over to the card"
+    fi
+  done
+  if [ -f "$src/timestamp" ] && [ ! -e "$dst/timestamp" ]; then
+    cp -p "$src/timestamp" "$dst/" && log "the eMMC's last saved time came over to the card"
+  fi
+  cc=$(sed -n 's/^[[:space:]]*wifi_country[[:space:]]*=[[:space:]]*\([A-Za-z0-9]*\).*/\1/p' \
+         "$src/forgefirm.conf" 2>/dev/null | tail -n 1)
+  if [ -n "$cc" ] && ! grep -q '^[[:space:]]*wifi_country[[:space:]]*=' "$dst/forgefirm.conf" 2>/dev/null; then
+    printf 'wifi_country = %s\n' "$cc" >> "$dst/forgefirm.conf" && chmod 0600 "$dst/forgefirm.conf" \
+      && log "the eMMC's WiFi region ($cc) came over to the card"
+  fi
+}
+
+# Mount the card's data partition and show its folders over the eMMC's.
+# Returns 1, with /data left as mountall made it, when the boot is not a
+# card boot or the card's partition is not usable; OUTCOME says which.
+card () {
+  OUTCOME=emmc
+  root=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' "$CMDLINE" 2>/dev/null)
+  [ "$root" = "$CARD_ROOT" ] || return 1
+  OUTCOME=card-none
+  [ -e "$CARD_DEV" ] || { log "booted from the SD card, which has no data partition: /data stays the eMMC's"; return 1; }
+  OUTCOME=card-failed
+  is_mounted /data || { log "/data is not mounted; the card's folders are not shown"; return 1; }
+  mkdir -p "$CARD" "$EMMC" || return 1
+  if ! mount -t ext4 -o noatime "$CARD_DEV" "$CARD"; then
+    log "the card's data partition ($CARD_DEV) did not mount; /data stays the eMMC's"
+    return 1
+  fi
+  if [ ! -d "$CARD/forgefirm" ] || [ ! -d "$CARD/log" ]; then
+    log "$CARD_DEV is not a ForgeFIRM data partition (no forgefirm/ and log/); /data stays the eMMC's"
+    umount "$CARD"
+    return 1
+  fi
+  mkdir -p "$DATA" "$LOGS" || { umount "$CARD"; return 1; }
+  # The identity comes over before the binds hide the eMMC's folder.
+  if [ -e "$CARD/import" ]; then
+    import_identity "$DATA" "$CARD/forgefirm"
+    rm -f "$CARD/import"
+    sync
+  fi
+  # The eMMC's /data as it is under the binds, read-only, and private, so
+  # the binds below do not show through it where / propagates mounts.
+  if mount --bind /data "$EMMC"; then
+    mount --make-private "$EMMC" 2>/dev/null
+    mount -o remount,bind,ro "$EMMC" || { log "the eMMC view did not go read-only; removed"; umount "$EMMC"; }
+  fi
+  if ! mount --bind "$CARD/forgefirm" "$DATA"; then
+    log "the card's forgefirm folder could not be shown at $DATA; /data stays the eMMC's"
+    is_mounted "$EMMC" && umount "$EMMC"
+    umount "$CARD"
+    return 1
+  fi
+  mount --bind "$CARD/log" "$LOGS" || log "the card's log folder could not be shown at $LOGS"
+  # The factory archive stays the eMMC's, read-only.
+  if is_mounted "$EMMC" && [ -d "$EMMC/forgefirm/archive" ]; then
+    mkdir -p "$DATA/archive" &&
+      mount --bind "$EMMC/forgefirm/archive" "$DATA/archive" &&
+      { mount -o remount,bind,ro "$DATA/archive" || umount "$DATA/archive"; }
+  fi
+  OUTCOME=card
+  log "ForgeFIRM's settings and logs are the SD card's ($CARD_DEV)"
+  return 0
+}
+
+reset () {
+  [ -e "$DATA/$RESET" ] || return 0
+  log "a reset was requested: clearing $DATA (the factory archive, the host keys, the certificate and the boot state stay)"
+  for p in "$DATA"/* "$DATA"/.[!.]* "$DATA"/..?*; do
+    [ -e "$p" ] || [ -L "$p" ] || continue
+    name=${p##*/}
+    case " $KEEP $RESET " in *" $name "*) continue ;; esac
+    is_mounted "$p" && continue
+    rm -rf "$p" || log "could not remove $p"
+  done
+  sync
+  rm -f "$DATA/$RESET"
+  sync
+  log "the reset is done; the setup runs at the next start of the control panel"
+}
+
+card
+echo "$OUTCOME" > "$STATE" 2>/dev/null || log "cannot write $STATE"
+reset
+exit 0

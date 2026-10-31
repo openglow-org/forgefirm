@@ -461,7 +461,19 @@ root logs in with no password from anywhere on the machine's network.** A
 program that has the control panel's token can also make changes without a
 login. Every page of the control panel shows a red DEVELOPMENT IMAGE bar.
 `forgefirm-dev.fw` is not signed with the release key, so the control panel
-installs it only while the machine button is held. More:
+installs it only while the machine button is held.
+
+`forgefirm-image-dev-glowforge.rootfs.wic.gz` is for an SD card, on a
+control board with the SD card slot fitted (the factory leaves it off). The
+card has its own data partition: booted from the card, the machine keeps its
+settings, extensions and logs on the card, and the eMMC's own stay as they
+are. The rest of `/data` is the eMMC's, the WiFi configuration and the
+acceptance records among it. A newly written card starts as a finished setup
+with ForgeFIRM's default settings and the account `forgefirm`, password
+`forgefirm`, and at its first boot it takes the machine's SSH host keys,
+certificate, WiFi region and last saved time from the eMMC. The development bar says where
+the settings are on every boot. `forgefirm-dev.fw` goes into an eMMC slot and
+uses the eMMC's `/data`. More:
 <https://docs.forgefirm.org/developers/bench/>.
 EOF
 

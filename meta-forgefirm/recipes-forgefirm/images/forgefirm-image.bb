@@ -62,7 +62,12 @@ IMAGE_INSTALL:append = " grblhal-glowforge forgectrl gfhome gfcloud v4l-utils fw
 # forgefirm-banner: keeps the control panel addresses in the
 # serial-console banner (/etc/issue).
 # forgefirm-persist: the boot timestamp and the random seed on /data.
-IMAGE_INSTALL:append = " forgefirm-users forgefirm-hostname forgefirm-banner forgefirm-persist"
+# forgefirm-data: right after mountall, shows an SD card's own settings
+# and logs over the eMMC's on a boot from a card that carries a data
+# partition (the dev image's SD card image), and carries out a settings
+# reset the control panel requested, before anything reads
+# /data/forgefirm.
+IMAGE_INSTALL:append = " forgefirm-users forgefirm-hostname forgefirm-banner forgefirm-persist forgefirm-data"
 
 # forgefirm-sandbox: what an extension package is held by, in place before
 # any package exists: the ffx account pool, the cgroup v2 tree with the cpu,
