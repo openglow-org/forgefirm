@@ -56,7 +56,7 @@ def auth(ctx):
     # unauthenticated writes: every one must be refused before it acts
     for path, params in (("/controller/stop", None), ("/controller/start", None),
                          ("/mode", {"controller": "grbl"}), ("/settings", {"ui_units": "mm"}),
-                         ("/diag/flow-verify", None), ("/diag/abort", None),
+                         ("/diag/aa-offset-calibrate", None), ("/diag/abort", None),
                          ("/update/apply", None), ("/boot", {"target": "a"}),
                          ("/update/check", None), ("/update/dismiss", {"version": "v0.0.0"}),
                          ("/system/reboot", None), ("/restore/factory", None),

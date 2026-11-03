@@ -149,25 +149,6 @@ Drills (pass a name):
             says it should be. Samples sysfs at 25 Hz like pcurve;
             JSON record in the bench data directory.
               dpatch [F] [pitch] [length]   e.g. dpatch 1500 0.3 30
-  flowload  Cooling under laser load, one armed run per invocation, the
-            conf keys it writes put back when the run ends; the pump is
-            never commanded off. `t1` reproduces the flow-check trip:
-            the check ON at its defaults (50 s window, 14.4 C limit,
-            150 s re-check) and two 30 x 4 mm serpentine fills at F1500
-            CW starting on the press with no dark dwell, so the tube is
-            lit for about 35 s of the window; reports the engine's own
-            rise/dT verdict beside the 25 Hz trace of both coolant
-            sensors, the current, the digital witness and the heater
-            output, in 5 s bins across the window, and the shape at
-            fire start (a common-mode step is electrical, a lagged ramp
-            is thermal). `t2 <secs> [pct]` turns the check OFF for the
-            run (cool_flow_check_s = 0) and fires one fill of about
-            <secs> lit seconds at CW, or at <pct> density; reports the
-            lag to each sensor, the rise per raw-second of hv_current
-            (k) and what a full 50 s window would add against the 1.6 C
-            margin. `fit` reads every t2 record in the bench data dir
-            and fits rise against dose. JSON records like dpatch.
-              flowload t1 | flowload t2 <secs> [pct] | flowload fit
   senderchg A sender change mid-job: a 20 mm line at F60 lit on the
             press, the connection dropped five seconds in, the job held
             where it stopped, a reconnect, then ~ from the new session,
@@ -196,8 +177,6 @@ Drills (pass a name):
             /data/forgefirm/panel.token when running on the board.
   ctrlstart POST /controller/start after an expstop; no motion, no laser.
 
-The G-4 arm-refuses-when-a-fire-gate-is-active drill is operator-manual
-(kill the pump during the button wait); this harness prints the cue.
 """
 import json
 import math
@@ -361,7 +340,7 @@ def arm_cue():
 
 def run_and_sample(g, gcode_lines, sample_hz=8, overall_timeout=200):
     """Stream gcode; sample forgectrl through the whole arm -> fire ->
-    disarm lifecycle. The arm phase (fan run + flow interrogation) plus
+    disarm lifecycle. The arm phase (fan run) plus
     the operator button wait present grblHAL as Idle, so completion must
     NOT trigger on an early Idle. Complete on one of:
       - real fire captured: emission was seen > 0, then grbl Idle > 3 s;
@@ -1064,7 +1043,7 @@ def pcurve_analyze(samples, rungs, head_trim=PCURVE_TRIM_HEAD_S,
         # last window of a line lands after Idle: look one second past.
         lon = _window(samples, r['t_run0'], r['t_run1'] + 1.0, 'lon')
         # Coolant from the UPSTREAM sensor: water_temp_1 sits downstream of
-        # the flow-check heater and swings with it during a run.
+        # the loop heater.
         wt1 = _stats(_window(samples, r['t_gap0'], r['t_m3'], 'wt2'))
         pt = _stats(_window(samples, r['t_gap0'], r['t_m3'], 'pt'))
         delta = (tp['mean'] - base['mean']
@@ -1404,15 +1383,6 @@ DPATCH_FEED = 1500                       # the reference feed, 25 mm/s
 DPATCH_CW_DOSES = (1.0, 0.8, 0.6, 0.5, 0.35, 0.25)   # row A: S1000 at F600/dose
 DPATCH_DENSITY_PCT = (100, 80, 60, 45, 30)            # row B: at F600
 DPATCH_SETTLE_S = 2.0                    # laser off before each patch
-# The cooling engine interrogates the flow for cool_flow_check_s (50 s)
-# from the moment the window arms, on a heater pulse judged by its rise;
-# a CW patch under that window puts the tube's heat into the same loop
-# and reads as a blocked flow (15.1 C against a 14.4 limit, 2026-08-25),
-# which holds the job. The first patch therefore waits, spindle on and
-# dark, until the check has finished on the heater alone. The mid-run
-# re-check (cool_flow_recheck_s, 150 s by default) has to be pushed past
-# the run's length for the session, or it lands on a patch the same way.
-DPATCH_ARM_DWELL_S = 60.0
 # The thermopile curves, light as a fraction of CW, for the labels: the
 # period-20 density ladder (E3) and the analog duty ladder (E1, whose
 # means above 50 % duty did not settle inside a line, so they are a prior).
@@ -1480,9 +1450,7 @@ def drill_dpatch(g):
     arm_cue()
     print('>>> A fresh area of the stock: %g mm along +X by %g mm along +Y'
           % (n_a * (width + DPATCH_GAP_X), 2 * DPATCH_H + DPATCH_ROW_GAP))
-    print('>>> from the head. After your press the head waits %g s dark while the'
-          % DPATCH_ARM_DWELL_S)
-    print('>>> flow check runs. Row A is CW at full power, up to %.0f s per patch.\n'
+    print('>>> from the head. Row A is CW at full power, up to %.0f s per patch.\n'
           % (n_lines * (width / feed_ref * 60.0 + 0.1)))
     print('G91/G21: %s / %s' % (g.cmd('G91'), g.cmd('G21')))
     sampler.start()
@@ -1500,16 +1468,13 @@ def drill_dpatch(g):
             est_s = n_lines * (width / p['feed'] * 60.0 + 0.25) + 2.0
             time.sleep(DPATCH_SETTLE_S)
             t_m3 = time.time()
-            dwell = ['G4 P%g' % DPATCH_ARM_DWELL_S] if i == 0 else []
-            for ln in ['M3 S%d' % p['s']] + dwell + lines + ['M5']:
+            for ln in ['M3 S%d' % p['s']] + lines + ['M5']:
                 g.s.sendall(ln.encode() + b'\n')
-            # The controller reports Idle inside the dwell, so the first Run
-            # seen after the press is the first line of the first patch, and
-            # the wait covers the button timeout plus the dwell.
+            # The first Run seen after the press is the first line of the
+            # first patch; the wait covers the button timeout.
             if i == 0:
-                print('  waiting for the press, then %g s dark for the flow check'
-                      % DPATCH_ARM_DWELL_S)
-            st = g.wait_state('Run', 300 + DPATCH_ARM_DWELL_S if i == 0 else 60)
+                print('  waiting for the press')
+            st = g.wait_state('Run', PRESS_WAIT_S if i == 0 else 60)
             if not st.startswith('Run'):
                 aborted = ('patch %d never ran (state=%s): arm refused, no press, '
                            'or the controller alarmed' % (i + 1, st))
@@ -1603,50 +1568,15 @@ def drill_dpatch(g):
     return 0
 
 
-# --- cooling under laser load: the flow check with the tube lit --------------
+# --- shared by the live drills below ------------------------------------------
 
-# Test 1 reproduces the 2026-08-25 trip: the arm-time heater check (50 s at
-# cool_flow_heater_pct, judged on the downstream rise against cool_flow_rise)
-# ran while the first dpatch patch fired CW through its window and read 15.1 C
-# against 14.4, a SUSPECT that held the job. The defaults go back into the
-# conf for the run and the burst starts on the press with no dark dwell, so
-# the tube is lit for most of the window. Test 2 turns the check off for the
-# run and fires one burst of a chosen length, so the trace holds the tube's
-# heat alone: the lag to the sensors, the rise per raw-second of hv_current,
-# and its shape (a step at fire start is electrical, a lagged ramp is
-# thermal). Each invocation is ONE armed run; the conf keys it writes are put
-# back when the run ends, and the engine re-reads them at the next run start.
-# The pump is never commanded off here.
-# The burst is a serpentine fill at the dpatch reference dose (25 mm/s, 0.3 mm
-# lines: an engrave, not a burn), sized by the seconds the tube is to be lit.
-FLOWLOAD_FEED = 1500                     # mm/min, the dpatch reference dose
-FLOWLOAD_PITCH = 0.3                     # mm between lines
-FLOWLOAD_W = 30.0                        # mm, the line length (X)
-FLOWLOAD_Y_STEP_S = 0.1                  # about, per pitch step at the edge
-FLOWLOAD_T1_H = 8.0                      # mm: two 30 x 4 mm fills, back to back
-FLOWLOAD_T1_KEYS = (('cool_flow_check_s', '50'), ('cool_flow_rise', '14.4'),
-                    ('cool_recheck_s', '150'))
-FLOWLOAD_T2_KEYS = (('cool_flow_check_s', '0'),)
-FLOWLOAD_T2_SECS = (20, 40, 60)          # the plan's CW bursts
-FLOWLOAD_BASE_S = 15.0                   # baseline before the first emission
-FLOWLOAD_TAIL_S = {'t1': 40.0, 't2': 90.0}   # sampled after the window closes
-FLOWLOAD_BIN_S = 5.0                     # the report's bins
-FLOWLOAD_RESP_BIN_S = 2.0                # the lag search's bins
-FLOWLOAD_RESP_C = 0.3                    # a sensor has responded past this rise
-FLOWLOAD_STEP_S = 4.0                    # a rise inside this of fire start is a step
-FLOWLOAD_MARGIN_C = 1.6                  # healthy max 12.75 C to the 14.4 limit
-FLOWLOAD_NOISE_C = 0.11                  # settled-loop split-half noise
-FLOWLOAD_PRESS_WAIT_S = 300.0            # the operator's button timeout
-FLOWLOAD_CHANNELS = PCURVE_CHANNELS + (('htr', 'thermal/heater_pwm'),)
-# The engine's own verdict lines, as /cool/status "reason" carries them.
-FLOWLOAD_RISE_RE = re.compile(
-    r'heater rise ([0-9.]+) C(?: \(limit ([0-9.]+), dT ([0-9.]+)|, dT ([0-9.]+) C)')
+PRESS_WAIT_S = 300.0                     # the operator's button timeout
 
 
 class CoolPoller:
     """GET /cool/status once a second in a thread: the engine's phase,
-    verdict, hold, reason (its last warning, where a check's rise and dT
-    land) and its own view of both sensors."""
+    verdict, hold, reason (its last warning) and its own view of both
+    sensors."""
 
     def __init__(self):
         import threading
@@ -1681,716 +1611,6 @@ class CoolPoller:
                 time.sleep(delay)
             else:
                 next_t = time.time()
-
-
-def conf_del(key):
-    """Remove one key, preserving every other line."""
-    try:
-        with open(CONF) as f:
-            lines = f.read().splitlines()
-    except OSError:
-        return False
-    out = [ln for ln in lines
-           if not ('=' in ln.split('#', 1)[0]
-                   and ln.split('#', 1)[0].split('=', 1)[0].strip() == key)]
-    try:
-        mode = os.stat(CONF).st_mode & 0o777
-        with open(CONF + '.tmp', 'w') as f:
-            f.write('\n'.join(out) + '\n')
-        os.chmod(CONF + '.tmp', mode)
-        os.replace(CONF + '.tmp', CONF)
-    except OSError:
-        return False
-    return True
-
-
-def conf_push(keys):
-    """Write the (key, value) pairs, returning what stood before so
-    conf_pop can put it back; None when the conf is not ours to write."""
-    prior = []
-    for key, val in keys:
-        prior.append((key, conf_get(key)))
-        if not conf_set(key, val):
-            conf_pop(prior)
-            return None
-    return prior
-
-
-def conf_pop(prior):
-    ok = True
-    for key, val in prior:
-        ok = (conf_del(key) if val is None else conf_set(key, val)) and ok
-    return ok
-
-
-def flowload_burst(secs, feed=FLOWLOAD_FEED, width=FLOWLOAD_W,
-                   pitch=FLOWLOAD_PITCH):
-    """A serpentine fill that keeps the tube lit for about `secs`, and
-    the seconds it should take."""
-    line_s = width / (feed / 60.0) + FLOWLOAD_Y_STEP_S
-    n = max(1, int(round(secs / line_s)))
-    lines, dx, dy = dpatch_gcode(feed, width, pitch, n)
-    return lines, dx, dy, n * line_s
-
-
-def flowload_verdicts(poll):
-    """Every change of the engine's verdict/hold/reason seen in the poll,
-    with the time it first appeared, and the rise, limit and dT parsed
-    where the line carries them."""
-    out, last = [], None
-    for s in poll:
-        if 'verdict' not in s:
-            continue
-        key = (s.get('verdict'), s.get('hold'), s.get('reason'))
-        if key == last:
-            continue
-        last = key
-        ev = {'t': s['t'], 'verdict': s.get('verdict'), 'hold': s.get('hold'),
-              'reason': s.get('reason')}
-        m = FLOWLOAD_RISE_RE.search(s.get('reason') or '')
-        if m:
-            ev['rise'] = float(m.group(1))
-            ev['limit'] = float(m.group(2)) if m.group(2) else None
-            ev['dt'] = float(m.group(3) or m.group(4))
-        out.append(ev)
-    return out
-
-
-FLOWLOAD_STEP_C = 0.45                   # a common-mode level change this big
-FLOWLOAD_STEP_AGREE_C = 0.4              # ... on both sensors, agreeing this well
-FLOWLOAD_STEP_WIN = 12                   # samples (0.5 s at 25 Hz) each side
-FLOWLOAD_STEP_GAP = 2                    # samples skipped around the edge
-
-
-def flowload_steps(tr):
-    """The common-mode steps in the trace: the mean level of BOTH sensors
-    changing by FLOWLOAD_STEP_C or more, the same way and by the same
-    amount, between the half second before a sample and the half second
-    after it. The coolant ADC carries an offset of about 1 C while the
-    run airflow profile is on, stepping in at the session open, out when
-    the fans go idle and toggling in between, on both sensors together.
-    The tube's heat is a ramp a hundred times slower, and the heater's
-    rise reaches one sensor only, so neither passes. Returns
-    [(t, d_down_c, d_up_c)] with the step sizes in degrees."""
-    pts = []
-    for s in tr:
-        if s.get('wt1') is None or s.get('wt2') is None:
-            continue
-        d, u = _degc(s['wt1']), _degc(s['wt2'])
-        if d == d and u == u:
-            pts.append((s['t'], d, u))
-    out = []
-    w, gap = FLOWLOAD_STEP_WIN, FLOWLOAD_STEP_GAP
-    i = w + gap
-    while i < len(pts) - w - gap:
-        pre = pts[i - gap - w:i - gap]
-        post = pts[i + gap:i + gap + w]
-        dd = sum(p[1] for p in post) / w - sum(p[1] for p in pre) / w
-        du = sum(p[2] for p in post) / w - sum(p[2] for p in pre) / w
-        if abs(dd) >= FLOWLOAD_STEP_C and abs(du) >= FLOWLOAD_STEP_C \
-                and (dd > 0) == (du > 0) and abs(dd - du) <= FLOWLOAD_STEP_AGREE_C:
-            out.append((pts[i][0], dd, du))
-            i += w + 2 * gap                # one step per edge
-        else:
-            i += 1
-    return out
-
-
-def flowload_temps(tr, poll, local, steps=None):
-    """(t, down_c, up_c): the sampler's counts through the factory
-    conversion on the board, else the engine's own 1 Hz view. With
-    `steps` (flowload_steps), every step is subtracted from all later
-    samples, so the series carries the thermal signal alone."""
-    if local and _degc(0) is not None:
-        out = []
-        steps = list(steps or [])
-        off_d = off_u = 0.0
-        for s in tr:
-            if s.get('wt1') is None or s.get('wt2') is None:
-                continue
-            d, u = _degc(s['wt1']), _degc(s['wt2'])
-            if d != d or u != u:                # NaN
-                continue
-            while steps and steps[0][0] <= s['t']:
-                _t, dd, du = steps.pop(0)
-                off_d += dd
-                off_u += du
-            out.append((s['t'], d - off_d, u - off_u))
-        if out:
-            return out
-    return [(p['t'], p['down_c'], p['up_c']) for p in poll
-            if p.get('down_c') is not None and p.get('up_c') is not None]
-
-
-def _tmean(series, t0, t1, idx):
-    vals = [s[idx] for s in series if t0 <= s[0] < t1]
-    return sum(vals) / len(vals) if vals else None
-
-
-def _tsd(series, t0, t1, idx):
-    vals = [s[idx] for s in series if t0 <= s[0] < t1]
-    return _stats(vals)['sd'] if len(vals) > 1 else None
-
-
-def flowload_lit(tr):
-    """(first, last) sample time with the tube lit, from the digital
-    witness or a current above the dark ceiling; (None, None) if never."""
-    ts = [s['t'] for s in tr
-          if (s.get('lon') or 0) > 0 or (s.get('hv') or 0) > HV_DARK_MAX]
-    return (ts[0], ts[-1]) if ts else (None, None)
-
-
-def flowload_dose(tr, t0, t1):
-    """The integral of hv_current from t0 to t1 in raw-seconds, and the
-    mean current over the lit samples."""
-    pts = [(s['t'], s['hv']) for s in tr
-           if t0 <= s['t'] <= t1 and s.get('hv') is not None]
-    dose = 0.0
-    for (ta, ha), (tb, hb) in zip(pts, pts[1:]):
-        dose += 0.5 * (ha + hb) * (tb - ta)
-    lit = [h for _t, h in pts if h > HV_DARK_MAX]
-    return dose, (sum(lit) / len(lit) if lit else 0.0)
-
-
-def flowload_response(temps, idx, t_fire0, t_end, base, sd):
-    """How one sensor answered the burst: the lag to its first bin over
-    the response line, the rise inside the step window, the rise at
-    t_end and the peak (value, time) up to the end of the record."""
-    thr = base + max(FLOWLOAD_RESP_C, 3.0 * (sd or 0.0))
-    lag = None
-    t = t_fire0
-    while t < temps[-1][0]:
-        m = _tmean(temps, t, t + FLOWLOAD_RESP_BIN_S, idx)
-        if m is not None and m > thr:
-            lag = t - t_fire0
-            break
-        t += FLOWLOAD_RESP_BIN_S
-    step = _tmean(temps, t_fire0 + 1.0, t_fire0 + FLOWLOAD_STEP_S, idx)
-    at_end = _tmean(temps, t_end - FLOWLOAD_RESP_BIN_S, t_end, idx)
-    at_50 = _tmean(temps, t_fire0 + 48.0, t_fire0 + 50.0, idx)
-    peak, t_peak = None, None
-    t = t_fire0
-    while t < temps[-1][0]:
-        m = _tmean(temps, t, t + FLOWLOAD_RESP_BIN_S, idx)
-        if m is not None and (peak is None or m > peak):
-            peak, t_peak = m, t
-        t += FLOWLOAD_RESP_BIN_S
-    return {
-        'lag_s': lag,
-        'step_c': None if step is None else step - base,
-        'end_c': None if at_end is None else at_end - base,
-        'r50_c': None if at_50 is None else at_50 - base,
-        'peak_c': None if peak is None else peak - base,
-        't_peak_s': None if t_peak is None else t_peak - t_fire0,
-    }
-
-
-def flowload_bins(tr, temps, t0, t1, t_ref):
-    """The report's table: per FLOWLOAD_BIN_S bin, seconds from t_ref,
-    both sensors, dT, the current's mean, the lit fraction, the heater."""
-    print('    t(s)   down C    up C    dT C   hv mean  lit  heater')
-    t = t0
-    while t < t1:
-        d = _tmean(temps, t, t + FLOWLOAD_BIN_S, 1)
-        u = _tmean(temps, t, t + FLOWLOAD_BIN_S, 2)
-        hv = _stats(_window(tr, t, t + FLOWLOAD_BIN_S, 'hv'))['mean']
-        lon = _window(tr, t, t + FLOWLOAD_BIN_S, 'lon')
-        lit = (sum(1 for v in lon if v > 0) / float(len(lon))) if lon else None
-        htr = _stats(_window(tr, t, t + FLOWLOAD_BIN_S, 'htr'))['mean']
-        print('  %6.0f  %7s  %7s  %6s  %7s  %4s  %6s'
-              % (t - t_ref, _fmt(d, 2), _fmt(u, 2),
-                 _fmt(None if d is None or u is None else d - u, 2),
-                 _fmt(hv, 0), '' if lit is None else '%.2f' % lit,
-                 _fmt(None if htr is None else 100.0 * htr / 65535.0, 0)))
-        t += FLOWLOAD_BIN_S
-
-
-FLOWLOAD_RX_MARGIN = 96                  # bytes kept free in the RX buffer
-
-
-def _bf_free(st):
-    """(free planner blocks, free RX characters) from a status report, or
-    (None, None) when it carries no Bf field."""
-    for fld in st.strip('<>').split('|'):
-        if fld.startswith('Bf:'):
-            try:
-                a, b = fld[3:].split(',')
-                return int(a), int(b)
-            except ValueError:
-                return None, None
-    return None, None
-
-
-def flowload_feed(g, pending, free_chars):
-    """Send lines from `pending` while the controller's RX buffer has
-    room for them, and return the room left. A whole fill written at
-    once overruns the 1023-byte RX buffer and loses lines (the 60 s
-    fill ran 46 s), so the job is fed against the Bf field instead."""
-    while pending and free_chars is not None \
-            and free_chars - (len(pending[0]) + 1) >= FLOWLOAD_RX_MARGIN:
-        ln = pending.pop(0)
-        g.s.sendall(ln.encode() + b'\n')
-        free_chars -= len(ln) + 1
-    return free_chars
-
-
-def flowload_watch(g, est_s, pending):
-    """Follow the controller from the press to the end of the burst,
-    feeding `pending` lines as the RX buffer frees. Returns (outcome,
-    timeline): 'done' on Idle after Run with every line sent, 'held'
-    when a Hold or Door interrupted it (the SUSPECT hold looks like
-    this), 'alarm', 'no-run' when the press never came, 'timeout'."""
-    timeline = []
-    last = None
-    t0 = time.time()
-    ran = False
-    t_run0 = None
-    while True:
-        st = g.status()
-        name = st[1:].split('|')[0].split(':')[0] if st else ''
-        flowload_feed(g, pending, _bf_free(st)[1])
-        now = time.time()
-        if name != last:
-            timeline.append({'t': now, 'state': st})
-            last = name
-        if name == 'Run':
-            if not ran:
-                t_run0 = now
-            ran = True
-        elif name in ('Hold', 'Door'):
-            time.sleep(1.0)
-            if g.state().split(':')[0] in ('Hold', 'Door'):
-                return 'held', timeline
-        elif name == 'Alarm':
-            return 'alarm', timeline
-        elif name == 'Idle' and ran and not pending and now - t_run0 > 1.0:
-            time.sleep(0.5)
-            if g.state().startswith('Idle'):
-                return 'done', timeline
-        if not ran and now - t0 > FLOWLOAD_PRESS_WAIT_S + 10:
-            return 'no-run', timeline
-        if ran and now - t_run0 > est_s + 60.0:
-            return 'timeout', timeline
-        time.sleep(0.1)
-
-
-def flowload_run(g, test, secs, pct, keys):
-    """One armed run: conf keys in, baseline, the burst on the press, the
-    window closed on M2, the tail, conf keys back. Returns the record."""
-    model = conf_get('laser_power_model') or 'density'
-    levels, (rpm_max, rpm_min, floor, ceil) = pcurve_levels(g, (pct,))
-    if levels is None:
-        print('PRECONDITION FAILED: cannot read $30/$31/$35/$36 (%s/%s/%s/%s)'
-              % (rpm_max, rpm_min, floor, ceil))
-        return None
-    _pct, s_val, level = levels[0]
-    if pct < 100 and model != 'density':
-        print('a %d %% burst is a density burst; laser_power_model is %s' % (pct, model))
-        return None
-    if test == 't1':
-        n = int(round(FLOWLOAD_T1_H / FLOWLOAD_PITCH))
-        lines, dx, dy = dpatch_gcode(FLOWLOAD_FEED, FLOWLOAD_W, FLOWLOAD_PITCH, n)
-        est_s = n * (FLOWLOAD_W / (FLOWLOAD_FEED / 60.0) + FLOWLOAD_Y_STEP_S)
-        shape = ('two %g x %g mm fills back to back (%d lines at %g mm), about %.0f s lit'
-                 % (FLOWLOAD_W, FLOWLOAD_T1_H / 2, n, FLOWLOAD_PITCH, est_s))
-    else:
-        lines, dx, dy, est_s = flowload_burst(secs)
-        n = len([ln for ln in lines if 'X' in ln])
-        shape = ('a %g x %.1f mm fill (%d lines at %g mm), about %.0f s lit'
-                 % (FLOWLOAD_W, n * FLOWLOAD_PITCH, n, FLOWLOAD_PITCH, est_s))
-    print('=== flowload %s: %s ===' % (test, shape))
-    print('burst: S%d = %s (level %.2f of full, %s model; $30=%g $31=%g $35=%g $36=%g)'
-          % (s_val, 'CW' if pct >= 100 else '%d %% density' % pct, level, model,
-             rpm_max, rpm_min, floor, ceil))
-    prior = conf_push(keys)
-    if prior is None:
-        print('REFUSED: cannot write %s (the check state for this run must be known; '
-              'run on the board)' % CONF)
-        return None
-    print('conf for this run: %s (was: %s)'
-          % (', '.join('%s=%s' % kv for kv in keys),
-             ', '.join('%s=%s' % (k, v if v is not None else '<unset>') for k, v in prior)))
-    sampler = Sampler(PCURVE_SAMPLE_HZ, channels=FLOWLOAD_CHANNELS)
-    poller = CoolPoller()
-    outcome, timeline, aborted = None, [], None
-    t_m3 = t_close = None
-    try:
-        print('connect: %s' % prepare(g))
-        # The driver arms on the first laser-on of a job only while its own
-        # spindle state reads off; a job whose M5 was lost leaves it on and
-        # the next M3 runs unarmed. Spindle off first, and no run against a
-        # window that is still open.
-        print('spindle off: %s' % g.cmd('M5'))
-        pre = sample_forgectrl()
-        print('pre-fire: %s' % pre)
-        if pre is None or pre.get('armed'):
-            print('REFUSED: the armed window is still open (or forgectrl is unreachable); '
-                  'close it before another run')
-            return None
-        sampler.start()
-        poller.start()
-        print('baseline: %g s dark and idle' % FLOWLOAD_BASE_S)
-        time.sleep(FLOWLOAD_BASE_S + 2.0)
-        arm_cue()
-        print('>>> A fresh area of scrap: %g mm along +X by %.1f mm along +Y from'
-              % (FLOWLOAD_W, dy + FLOWLOAD_PITCH))
-        print('>>> the head. The burst starts ON YOUR PRESS with no dark dwell'
-              + (' and the flow check\n>>> runs under it.' if test == 't1'
-                 else ';\n>>> the flow check is OFF for this run.'))
-        print('>>> Up to %.0f s of %s.\n'
-              % (est_s, 'CW at full power' if pct >= 100 else '%d %% density' % pct))
-        print('G91/G21: %s / %s' % (g.cmd('G91'), g.cmd('G21')))
-        t_m3 = time.time()
-        pending = ['M3 S%d' % s_val] + lines + ['M5']
-        n_job = len(pending)
-        flowload_feed(g, pending, _bf_free(g.status())[1])
-        print('  waiting for the press (up to %.0f s), then the burst (%d of %d lines '
-              'queued, the rest fed as the buffer frees)'
-              % (FLOWLOAD_PRESS_WAIT_S, n_job - len(pending), n_job))
-        outcome, timeline = flowload_watch(g, est_s, pending)
-        if pending:
-            print('  %d lines were never sent' % len(pending))
-        if outcome == 'done':
-            g.s.sendall(('G0 X%g Y%g\n' % (-dx, -dy)).encode())   # back to the origin
-            g.wait_state('Idle', 30)
-            if test == 't1':
-                # M2 closes the window and the window's end stops the
-                # check, so a check still running (the heater on) gets
-                # its full window before the M2: the engine's verdict is
-                # what this test is for.
-                limit = time.time() + float(dict(keys)['cool_flow_check_s']) + 20.0
-                print('  burst done; holding the window open until the heater check ends')
-                while time.time() < limit:
-                    smp = sampler.samples[-250:]
-                    if smp and smp[-1].get('htr') == 0 \
-                            and any((x.get('htr') or 0) > 0 for x in smp):
-                        break                       # the check ran and ended
-                    if smp and smp[-1].get('htr') == 0 and time.time() - t_m3 > 20.0 \
-                            and not any((x.get('htr') or 0) > 0 for x in sampler.samples):
-                        break                       # the check never started
-                    time.sleep(0.5)
-                time.sleep(2.0)                     # the verdict's poll after the heater
-            print('  M2: %s' % g.cmd('G90\nM2', timeout=10))      # closes the window
-            t_close = time.time()
-            closed = None
-            for _i in range(15):
-                cs = sample_forgectrl()
-                if cs and not cs.get('armed'):
-                    closed = time.time() - t_close
-                    break
-                time.sleep(1.0)
-            if closed is None:
-                print('  !!! the armed window did NOT close after M2 (armed still true '
-                      'after 15 s): the job did not end as sent')
-            else:
-                print('  window closed %.0f s after M2, sampling the %.0f s tail'
-                      % (closed, FLOWLOAD_TAIL_S[test]))
-        else:
-            cs = sample_forgectrl() or {}
-            aborted = ('%s (state %s; cooling verdict %s, %r); soft reset, no further moves'
-                       % (outcome, timeline[-1]['state'] if timeline else '?',
-                          cs.get('verdict'), cs.get('reason')))
-            g.rt(b'\x18')
-            t_close = time.time()
-            print('  %s' % aborted)
-            print('  sampling the %.0f s tail anyway' % FLOWLOAD_TAIL_S[test])
-        time.sleep(FLOWLOAD_TAIL_S[test])
-    finally:
-        try:
-            g.cmd('M5', timeout=1)
-        except Exception:
-            pass
-        sampler.stop()
-        poller.stop()
-        if conf_pop(prior):
-            print('conf restored')
-        else:
-            print('CONF NOT RESTORED: put back by hand: %s'
-                  % ', '.join('%s=%s' % (k, v if v is not None else '<unset>')
-                              for k, v in prior))
-    tr, poll = sampler.samples, poller.samples
-    g.drain()
-    print('\nsampler: %d samples, %.1f Hz achieved, %d read errors; /cool/status %d polls, %d errors'
-          % (len(tr), sampler.rate(), sampler.errors, len(poll), poller.errors))
-    replies = [(t, ln) for t, ln in g.log if t >= (t_m3 or 0) - 30.0]
-    n_ok = sum(1 for _t, ln in replies if ln == 'ok')
-    print('controller replies since 30 s before M3: %d ok; everything else:' % n_ok)
-    for t, ln in replies:
-        if ln != 'ok' and not re.match(r'\$\d+=', ln):   # not the settings dump
-            print('  %+7.1f s  %s' % (t - (t_m3 or t), ln))
-    return {
-        'replies': replies,
-        'drill': 'flowload', 'test': test, 'date': time.strftime('%Y-%m-%dT%H:%M:%S'),
-        'model': model, 'burst_s': secs if test == 't2' else None, 'pct': pct,
-        's': s_val, 'level': level, 'feed': FLOWLOAD_FEED, 'pitch_mm': FLOWLOAD_PITCH,
-        'width_mm': FLOWLOAD_W, 'lines': n, 'est_lit_s': est_s,
-        'settings': {'$30': rpm_max, '$31': rpm_min, '$35': floor, '$36': ceil},
-        'conf': dict(keys), 'conf_prior': dict(prior),
-        'sampler': {'local': sampler.local, 'hz': sampler.rate(),
-                    'samples': len(tr), 'errors': sampler.errors},
-        't_m3': t_m3, 't_close': t_close, 'outcome': outcome, 'aborted': aborted,
-        'timeline': timeline, 'events': flowload_verdicts(poll),
-        'trace': tr, 'poll': poll,
-    }
-
-
-def flowload_analyze(rec):
-    """Print the run's reading and put the numbers into the record."""
-    tr, poll, test = rec['trace'], rec['poll'], rec['test']
-    steps = flowload_steps(tr) if rec['sampler']['local'] and _degc(0) is not None else []
-    temps = flowload_temps(tr, poll, rec['sampler']['local'], steps)
-    t_fire0, t_fire1 = flowload_lit(tr)
-    rec['offset_steps'] = steps
-    if steps:
-        net_d = sum(dd for _t, dd, _du in steps)
-        print('--- ADC offset steps masked: %d common-mode steps (first %+.2f/%+.2f C at %+.1f s '
-              'from M3, net %+.2f C over the record) ---'
-              % (len(steps), steps[0][1], steps[0][2], steps[0][0] - rec['t_m3'], net_d))
-    print('\n--- engine events (verdict / hold / reason, as /cool/status showed them) ---')
-    for ev in rec['events']:
-        print('  %+7.1f s  %-8s hold=%-5s %s'
-              % (ev['t'] - (t_fire0 or rec['t_m3']), ev['verdict'], ev['hold'],
-                 ev['reason'] or ''))
-    print('--- controller ---')
-    for s in rec['timeline']:
-        print('  %+7.1f s  %s' % (s['t'] - (t_fire0 or rec['t_m3']), s['state']))
-    fans = [p for p in poll if p.get('fan_gates')]
-    if fans:
-        names = list(fans[0]['fan_gates'].keys())
-        print('--- fan gates, reading per 5 s from the session open (floor: %s) ---'
-              % ', '.join('%s %.0f' % (n, fans[0]['fan_gates'][n]['floor']) for n in names))
-        t_open = rec['t_m3']
-        for p in fans[::5]:
-            if p['t'] < t_open - 5:
-                continue
-            print('  %+7.1f s  %s' % (p['t'] - (t_fire0 or t_open), '  '.join(
-                '%s %5.0f %s' % (n[:8], p['fan_gates'][n]['reading'], p['fan_gates'][n]['state'][:4])
-                for n in names)))
-    if not temps:
-        print('no temperature series (no sysfs and no engine readings): nothing to read')
-        return
-    if t_fire0 is None:
-        print('the tube never lit: nothing to read')
-        rec['lit'] = None
-        return
-    lit_s = t_fire1 - t_fire0
-    dose, hv_mean = flowload_dose(tr, t_fire0, t_fire1 + 1.0)
-    # The baseline is the settled loop before anything heated it: before
-    # the heater when the check ran ahead of the fire (t1), else before
-    # the fire.
-    htr_on = [s['t'] for s in tr if (s.get('htr') or 0) > 0]
-    t_base = min(t_fire0, htr_on[0]) if htr_on else t_fire0
-    base = {i: _tmean(temps, t_base - FLOWLOAD_BASE_S, t_base - 0.5, i) for i in (1, 2)}
-    sd = {i: _tsd(temps, t_base - FLOWLOAD_BASE_S, t_base - 0.5, i) for i in (1, 2)}
-    rec['lit'] = {'t_fire0': t_fire0, 't_fire1': t_fire1, 'lit_s': lit_s,
-                  'dose_raw_s': dose, 'hv_mean': hv_mean}
-    rec['baseline'] = {'down_c': base[1], 'up_c': base[2],
-                       'down_sd': sd[1], 'up_sd': sd[2]}
-    print('--- the burst ---')
-    print('  lit %.1f s (first to last lit sample), hv mean %.0f raw, dose %.0f raw-s'
-          % (lit_s, hv_mean, dose))
-    print('  baseline over the %g s before %s: down %s C (sd %s), up %s C (sd %s), dT %s'
-          % (FLOWLOAD_BASE_S, 'the heater' if t_base < t_fire0 else 'fire',
-             _fmt(base[1], 2), _fmt(sd[1], 2), _fmt(base[2], 2),
-             _fmt(sd[2], 2), _fmt(None if None in base.values() else base[1] - base[2], 2)))
-    if None in base.values():
-        print('  no baseline: the series starts after the fire')
-        return
-    resp = {}
-    for i, name in ((1, 'down'), (2, 'up')):
-        resp[name] = flowload_response(temps, i, t_fire0, t_fire1, base[i], sd[i])
-    rec['response'] = resp
-    print('  response:  lag to +%.1f C   rise in %g s   rise at burst end   peak (at)'
-          % (FLOWLOAD_RESP_C, FLOWLOAD_STEP_S))
-    for name in ('down', 'up'):
-        r = resp[name]
-        print('    %-5s  %9s s       %7s C        %7s C        %7s C (%s s)'
-              % (name, _fmt(r['lag_s'], 1), _fmt(r['step_c'], 2), _fmt(r['end_c'], 2),
-                 _fmt(r['peak_c'], 2), _fmt(r['t_peak_s'], 0)))
-    cm_step = [resp[n]['step_c'] for n in ('down', 'up') if resp[n]['step_c'] is not None]
-    if cm_step and min(cm_step) > 1.0:
-        shape = 'STEP on both sensors inside %g s of fire start: electrical, not thermal' % FLOWLOAD_STEP_S
-    elif any(resp[n]['lag_s'] is not None for n in ('down', 'up')):
-        shape = 'lagged ramp: thermal'
-    else:
-        shape = 'no response above the line inside the record'
-    rec['shape'] = shape
-    print('  shape: %s' % shape)
-
-    if test == 't1':
-        if htr_on:
-            t_w0 = htr_on[0]
-            after = [s['t'] for s in tr if s['t'] > t_w0 and s.get('htr') == 0]
-            t_w1 = after[0] if after else tr[-1]['t']
-            src = 'heater output'
-        else:
-            armed = [p['t'] for p in poll if p.get('armed')]
-            t_w0 = armed[0] if armed else t_fire0
-            t_w1 = t_w0 + float(rec['conf'].get('cool_flow_check_s', 50))
-            src = 'the arm time (no heater trace)'
-        lon = _window(tr, t_w0, t_w1, 'lon')
-        lit_frac = (sum(1 for v in lon if v > 0) / float(len(lon))) if lon else None
-        rise = None
-        d0 = _tmean(temps, t_w0, t_w0 + 2.0, 1)
-        d1 = _tmean(temps, t_w1 - 2.0, t_w1, 1)
-        if d0 is not None and d1 is not None:
-            rise = d1 - d0
-        dts = [d - u for t, d, u in temps if t_w0 + 30.0 <= t < t_w1]
-        dt = sum(dts) / len(dts) if dts else None
-        eng = [ev for ev in rec['events'] if 'rise' in ev]
-        rec['window'] = {'t0': t_w0, 't1': t_w1, 'source': src, 'lit_frac': lit_frac,
-                         'trace_rise_c': rise, 'trace_dt_c': dt,
-                         'engine_rise_c': eng[-1]['rise'] if eng else None,
-                         'engine_dt_c': eng[-1]['dt'] if eng else None}
-        print('--- the check window (%s): %.0f s, opened %+.1f s from fire start ---'
-              % (src, t_w1 - t_w0, t_w0 - t_fire0))
-        print('  lit for %s of the window; trace rise (down, last 2 s over first 2 s) %s C, '
-              'dT after 30 s %s C' % ('' if lit_frac is None else '%.0f %%' % (100 * lit_frac),
-                                      _fmt(rise, 1), _fmt(dt, 1)))
-        if eng:
-            print('  the engine read: rise %.1f C (limit %s), dT %.1f C  ->  %s'
-                  % (eng[-1]['rise'], _fmt(eng[-1].get('limit'), 1), eng[-1]['dt'],
-                     eng[-1]['verdict']))
-        else:
-            print('  the engine published no rise line inside the record (check deferred, '
-                  'or the run ended first)')
-        print('--- 5 s bins from 10 s before the window to 30 s after (t from fire start) ---')
-        flowload_bins(tr, temps, t_w0 - 10.0, t_w1 + 30.0, t_fire0)
-        print('--- reading the branch ---')
-        print('  rise 11 to 12 C on all three runs: the check works under load; the '
-              'defect is elsewhere.')
-        print('  about 15 C, common-mode STEP at fire start: electrical (ADC/bias '
-              'under the HV load).')
-        print('  about 15 C, lagged common-mode RAMP: thermal; Test 2 sets k and the '
-              'tracer design applies.')
-        print('  no trip: the 22:11 run\'s own conditions; one trace-only t2 run closes it.')
-    else:
-        k = {}
-        for name in ('down', 'up'):
-            p = resp[name]['peak_c']
-            k[name] = (p / dose) if (p is not None and dose > 0) else None
-        rec['k_c_per_raw_s'] = k
-        print('--- the tube\'s signature ---')
-        for name in ('down', 'up'):
-            if k[name] is None:
-                print('  %s: no k (no peak or no dose)' % name)
-                continue
-            per_cw_s = k[name] * hv_mean
-            print('  %-5s k = %.3g C per raw-s = %.3f C per lit second at hv %.0f; '
-                  'a full 50 s window at this level adds %.2f C against the %.1f C margin'
-                  % (name, k[name], per_cw_s, hv_mean, per_cw_s * 50.0, FLOWLOAD_MARGIN_C))
-        pk = resp['down']['peak_c']
-        if pk is not None:
-            print('  down peak %.2f C at this dose is %.0fx the %.2f C settled noise'
-                  % (pk, pk / FLOWLOAD_NOISE_C, FLOWLOAD_NOISE_C))
-        print('--- 5 s bins from 15 s before fire to the end of the tail (t from fire start) ---')
-        flowload_bins(tr, temps, t_fire0 - 15.0, temps[-1][0], t_fire0)
-        print('  linearity across doses: run 20, 40 and 60 s, then `flowload fit`')
-
-
-def flowload_fit():
-    """Rise against dose across every t2 record in the bench data dir:
-    k through the origin per sensor, and the fit's r2 as the linearity."""
-    import glob
-    ddir = os.environ.get('FORGETEST_BENCH_DATA') or os.getcwd()
-    paths = sorted(glob.glob(os.path.join(ddir, 'flowload_t2_*.json')))
-    if not paths:
-        print('no flowload_t2_*.json under %s' % ddir)
-        return 1
-    import io
-    import contextlib
-    rows = []
-    for p in paths:
-        try:
-            with open(p) as f:
-                r = json.load(f)
-        except (OSError, ValueError) as e:
-            print('skip %s: %s' % (p, e))
-            continue
-        # Re-read every record from its trace, so the offset masking and
-        # the current reading apply to records written before them.
-        with contextlib.redirect_stdout(io.StringIO()):
-            flowload_analyze(r)
-        if not r.get('lit') or not r.get('response') or r['lit']['lit_s'] < 15.0:
-            print('  %s: no usable burst (%s)' % (os.path.basename(p), r.get('outcome')))
-            continue
-        rows.append((os.path.basename(p), r))
-    if not rows:
-        return 1
-    print('  offset steps masked per record; rises are the downstream sensor over its pre-burst baseline')
-    print('  record                                pct   lit s   hv    dose raw-s   +50 s    end    peak (at)    steps')
-    for name, r in rows:
-        d = r['response']['down']
-        print('  %-38s %4d  %6.1f  %4.0f  %10.0f  %6s  %6s  %6s (%3s s)  %3d'
-              % (name, r['pct'], r['lit']['lit_s'], r['lit']['hv_mean'],
-                 r['lit']['dose_raw_s'], _fmt(d['r50_c'], 2), _fmt(d['end_c'], 2),
-                 _fmt(d['peak_c'], 2), _fmt(d['t_peak_s'], 0), len(r.get('offset_steps') or [])))
-    for label, sel in (('CW', lambda r: r['pct'] >= 100), ('density', lambda r: r['pct'] < 100)):
-        pts = [(r['lit']['dose_raw_s'], r['response']['down']['end_c'], r['lit']['lit_s'])
-               for _n, r in rows if sel(r) and r['response']['down']['end_c'] is not None]
-        if not pts:
-            continue
-        sxy = sum(d * c for d, c, _s in pts)
-        sxx = sum(d * d for d, _c, _s in pts)
-        k0 = sxy / sxx if sxx else 0.0
-        hv = sum(r['lit']['hv_mean'] for _n, r in rows if sel(r)) / len([1 for _n, r in rows if sel(r)])
-        line = ('  %s (%d run%s): rise at burst end = %.3g C per raw-s through the origin '
-                '= %.4f C per lit second at hv %.0f; a fully lit 50 s window adds %.2f C '
-                '(margin %.1f)' % (label, len(pts), '' if len(pts) == 1 else 's', k0, k0 * hv,
-                                   hv, k0 * hv * 50.0, FLOWLOAD_MARGIN_C))
-        fit = _linfit([d for d, _c, _s in pts], [c for _d, c, _s in pts]) if len(pts) >= 3 else None
-        if fit:
-            line += '; free fit intercept %.2f C, r2 %.3f' % (fit[0], fit[2])
-        print(line)
-    cw = [r for _n, r in rows if r['pct'] >= 100 and r['response']['down']['end_c']]
-    dn = [r for _n, r in rows if r['pct'] < 100 and r['response']['down']['end_c']]
-    if cw and dn:
-        kc = sum(r['response']['down']['end_c'] / r['lit']['dose_raw_s'] for r in cw) / len(cw)
-        kd = sum(r['response']['down']['end_c'] / r['lit']['dose_raw_s'] for r in dn) / len(dn)
-        print('  density heat per raw-s is %.2f of CW: the current integral overstates '
-              'density heat, one k per model' % (kd / kc))
-    return 0
-
-
-def drill_flowload(g):
-    args = sys.argv[2:]
-    test = args[0] if args else ''
-    if test == 'fit':
-        return flowload_fit()
-    if test == 't1':
-        if len(args) > 1:
-            print('usage: flowload t1')
-            return 2
-        secs, pct, keys = None, 100, FLOWLOAD_T1_KEYS
-    elif test == 't2':
-        try:
-            secs = float(args[1])
-            pct = int(args[2]) if len(args) > 2 else 100
-        except (IndexError, ValueError):
-            secs, pct = 0, 0
-        if not 5.0 <= secs <= 120.0 or not 1 <= pct <= 100:
-            print('usage: flowload t2 <secs 5..120> [density pct 1..100]   e.g. flowload t2 60 45')
-            return 2
-        keys = FLOWLOAD_T2_KEYS
-    else:
-        print('usage: flowload t1 | flowload t2 <secs> [pct] | flowload fit')
-        return 2
-    rec = flowload_run(g, test, secs, pct, keys)
-    if rec is None:
-        return 2
-    flowload_analyze(rec)
-    ddir = os.environ.get('FORGETEST_BENCH_DATA') or ('/tmp' if rec['sampler']['local'] else os.getcwd())
-    ts = time.strftime('%Y%m%d-%H%M%S')
-    stem = ('flowload_t1_%s' % ts if test == 't1'
-            else 'flowload_t2_%ds_%d_%s' % (int(secs), pct, ts))
-    path = os.path.join(ddir, stem + '.json')
-    try:
-        with open(path, 'w') as f:
-            json.dump(rec, f, indent=1)
-        print('record: %s' % path)
-    except OSError as e:
-        print('record not written: %s' % e)
-    return 0 if rec['outcome'] == 'done' else 1
 
 
 # --- a sender change mid-job closes the window; the next laser-on prompts ----
@@ -2446,7 +1666,7 @@ def drill_senderchg(g):
         g.s.sendall(ln.encode() + b'\n')
     prompt1 = senderchg_wait_reply(g, 'press the button', 10)
     print('  first prompt: %s' % prompt1)
-    st = g.wait_state('Run', FLOWLOAD_PRESS_WAIT_S)
+    st = g.wait_state('Run', PRESS_WAIT_S)
     if not st.startswith('Run'):
         print('ABORTED: the first job never ran (%s)' % st)
         g.rt(b'\x18')
@@ -2481,7 +1701,7 @@ def drill_senderchg(g):
                 outcome = 'no-prompt'
                 g2.rt(b'\x18')
             else:
-                st = g2.wait_state('Run', FLOWLOAD_PRESS_WAIT_S)
+                st = g2.wait_state('Run', PRESS_WAIT_S)
                 if not st.startswith('Run'):
                     outcome = 'no-run'
                     g2.rt(b'\x18')
@@ -2583,7 +1803,7 @@ def drill_overrun(g):
         g.s.sendall(ln.encode() + b'\n')
     prompt1 = senderchg_wait_reply(g, 'press the button', 10)
     print('  first prompt: %s' % prompt1)
-    st = g.wait_state('Run', FLOWLOAD_PRESS_WAIT_S)
+    st = g.wait_state('Run', PRESS_WAIT_S)
     if not st.startswith('Run'):
         print('ABORTED: the first job never ran (%s)' % st)
         g.rt(b'\x18')
@@ -2618,7 +1838,7 @@ def drill_overrun(g):
                 outcome = 'no-prompt'
                 g.rt(b'\x18')
             else:
-                st = g.wait_state('Run', FLOWLOAD_PRESS_WAIT_S)
+                st = g.wait_state('Run', PRESS_WAIT_S)
                 if not st.startswith('Run'):
                     outcome = 'no-run'
                     g.rt(b'\x18')
@@ -3394,7 +2614,7 @@ def holdres_pause(g, label, wait_disarm=False):
         if not senderchg_wait_reply(g, 'press the button to resume', 10):
             return 'no resume prompt on ~'
         print('  >>> PRESS the button to resume the job')
-        st = g.wait_state('Run', FLOWLOAD_PRESS_WAIT_S)
+        st = g.wait_state('Run', PRESS_WAIT_S)
         if not st.startswith('Run'):
             return 'no-run after the press (%s)' % st
         if not any('laser armed' in ln for _t, ln in g.log[seen:]):
@@ -3496,7 +2716,7 @@ def main():
               'ircut': drill_ircut,
               'pthresh': drill_pthresh, 'dladder': drill_dladder,
               'pcurve': drill_pcurve, 'm5dark': drill_m5dark,
-              'dpatch': drill_dpatch, 'flowload': drill_flowload,
+              'dpatch': drill_dpatch,
               'm4corner': drill_m4corner, 'm4feeds': drill_m4feeds,
               'xymode': drill_xymode, 'xycircle': drill_xycircle,
               'senderchg': drill_senderchg, 'overrun': drill_overrun,
@@ -3505,7 +2725,7 @@ def main():
     if drill not in drills:
         print(__doc__)
         return 2
-    if drill == 'ctrlstart' or (drill == 'flowload' and sys.argv[2:3] == ['fit']):
+    if drill == 'ctrlstart':
         return drills[drill](None) or 0      # no controller connection needed
     g = Grbl(HOST, PORT)
     try:

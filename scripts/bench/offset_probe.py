@@ -96,8 +96,7 @@ def mean_c(samples, t0, t1, idx):
 
 def toggles(samples, t0, t1):
     """Level steps inside a dwell: both sensors' half-second means moving
-    0.45 C or more the same way, agreeing within 0.4 C (the flowload
-    detector)."""
+    0.45 C or more the same way, agreeing within 0.4 C."""
     pts = [(s[0], degc(s[1]), degc(s[2])) for s in samples
            if t0 <= s[0] < t1 and s[1] is not None and s[2] is not None]
     pts = [p for p in pts if p[1] == p[1] and p[2] == p[2]]

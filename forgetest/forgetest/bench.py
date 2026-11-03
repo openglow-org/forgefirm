@@ -123,30 +123,6 @@ TOOLS = [
                    ["deadman", "rmmod", "decay", "led", "all"])],
      "desc": "Dead-man trip readback, rmmod/modprobe cycles under load, decay/microstep readback, LED sequence."},
     # -- cooling ------------------------------------------------------------------
-    {"id": "flow-confirm", "title": "Coolant flow suspicion/confirmation drill", "script": "flow_confirm_drill.py",
-     "safety": "dry", "where": "board", "ported": True, "args": [],
-     "desc": "One M8 session walks the verdict state machine through real pump-off transients; PASS/FAIL per transition."},
-    {"id": "flow-escalate", "title": "Coolant starved re-check escalation drill", "script": "flow_escalate_drill.py",
-     "safety": "dry", "where": "board", "ported": True,
-     "args": [_arg("budget_s", "int", 60, "cool_confirm_max_s for the drill (60-3600), restored after")],
-     "desc": "With the pump off the job-start check reads SUSPECT and the engine must escalate to FAULT when "
-             "the confirmation budget expires; the budget setting is shortened for the drill and restored."},
-    {"id": "flow-characterize", "title": "Coolant flow characterization", "script": "flow_characterize.py",
-     "safety": "takeover", "where": "board", "ported": True,
-     "args": [_arg("duty", "int", 30, "heater duty percent")],
-     "desc": "Baseline -> flow -> no-flow -> recovery with the factory temperature curve; aborts past 45 C "
-             "downstream. Drives the heater and pump directly (about 9 minutes)."},
-    {"id": "flow-sustained", "title": "Coolant sustained re-check run", "script": "flow_sustained.py",
-     "safety": "dry", "where": "board", "ported": True,
-     "args": [_arg("minutes", "float", 30.0, "how long to hold M8")],
-     "desc": "Long run of the real re-check cadence via M8: verdicts, false faults, loop heat accumulation."},
-    {"id": "flow-warm", "title": "Coolant warm-baseline validation", "script": "flow_warm_validate.py",
-     "safety": "takeover", "where": "board", "ported": True,
-     "args": [_arg("cycles", "int", 3, "cycles per case (flow / no-flow)"),
-              _arg("target_c", "float", 28.0, "warm the upstream sensor to this before each check"),
-              _arg("warm_min", "float", 20.0, "warm-up budget per check, minutes")],
-     "desc": "Runs the real check (40 percent / 50 s, cut-profile fans) from a heater-warmed baseline, alternating "
-             "flow and no-flow; results to the bench data directory. Slow: about 15 minutes per cycle."},
     {"id": "offset-probe", "title": "Coolant-sensor offset probe", "script": "offset_probe.py",
      "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("mode", "choice", "survey", "survey: one actuator at a time; ladder: the air-assist "
@@ -168,25 +144,14 @@ TOOLS = [
      "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("max_seconds", "int", 1200, "give up after this long without CRITICAL", flag="--max-seconds")],
      "desc": "Sets the ceiling, the resume gate and the critical line a few tenths above the live upstream "
-             "reading and lets the engine's own flow-check heater warm the loop through them inside one M8 "
-             "session: OVERTEMP at the ceiling, then CRITICAL (fire blocked, hold, no resume), the fault ending "
-             "with the session; settings restored and re-read. Results to the bench data directory."},
-    {"id": "flow-recheck", "title": "Coolant re-check characterization", "script": "flow_recheck_char.py",
-     "safety": "takeover", "where": "board", "ported": True,
-     "args": [_arg("heater_pct", "int", 50, "heater duty percent"), _arg("window_s", "int", 30, "re-check window")],
-     "desc": "Short in-run re-checks and the differential metric, flow vs no-flow from a settled loop; "
-             "aborts past 45 C downstream (about 5 minutes)."},
-    {"id": "flow-matrix", "title": "Coolant flow-detection design matrix", "script": "flow_matrix.py",
-     "safety": "takeover", "where": "board", "ported": True,
-     "args": [_arg("duties", "str", "10,15,20,30,40,50", "heater duties, percent, comma-separated"),
-              _arg("repeats", "int", 5, "interleaved repeats per case")],
-     "desc": "duty x flow/no-flow x repeats from a common cooled baseline; cost and precision tables and a "
-             "ranked shortlist (the derivation of cool_flow_rise). Very slow: about 1.6 h for the full matrix; "
-             "resumable from the results file in the bench data directory."},
+             "reading, opens one M8 session and runs the loop heater at full duty to warm the loop through "
+             "them: OVERTEMP at the ceiling, then CRITICAL (fire blocked, hold, no resume), the fault ending "
+             "with the session; the heater off at CRITICAL and on every exit; settings restored and re-read. "
+             "Results to the bench data directory."},
     {"id": "flow-sampler", "title": "Coolant sampler", "script": "flow_sampler.py",
      "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("duration_s", "int", 30, "capture length"), _arg("interval_s", "float", 1.0, "sample interval")],
-     "desc": "Prints elapsed,raw_down,raw_up at the interval; the sampler behind the flow tools."},
+     "desc": "Prints elapsed,raw_down,raw_up at the interval: the raw coolant counts, sampled on the board."},
     {"id": "temp-calibrate", "title": "Coolant temperature spot-check", "script": "temp_calibrate.py",
      "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("mode", "choice", "watch", "coolant: watch / point / fit; supply (pic/pwr_temp): "

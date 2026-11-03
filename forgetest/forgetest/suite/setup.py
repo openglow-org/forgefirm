@@ -40,11 +40,11 @@ SSH_FLAG = "ssh-enabled"
 # The first run's form wizards, all at version 1 (wiz.c).
 FORM_WIZARDS = ("advisories", "account", "preferences", "machine", "cloud")
 # The steps the gate requires after the account, all at version 1, in
-# the order the gate's reason names them (setup.c): the form steps, then
-# the coolant flow calibration. The first-run tests seed the checks done,
-# the calibration among them, so the form steps are what they walk.
+# the order the gate's reason names them (setup.c): the form steps. The
+# first-run tests seed the checks done, so the form steps are what they
+# walk.
 REQUIRED_FORM_STEPS = ("preferences", "machine", "cloud")
-REQUIRED_STEPS = REQUIRED_FORM_STEPS + ("cooling.flow",)
+REQUIRED_STEPS = REQUIRED_FORM_STEPS
 # The setting that counts the intake fans: the gate holds without it.
 INTAKE_KEY = "cool_intake_fans"
 SAFETY_PHRASE = "I UNDERSTAND"

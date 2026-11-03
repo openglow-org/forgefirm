@@ -18,7 +18,7 @@ class ArtifactTests(unittest.TestCase):
         self.man = helpers.make_manifest()
         self.core = helpers.make_test("image.health", [("linux-fslc", "**")], always=True)
         self.ui = helpers.make_test("forgectrl.panel", [("forgectrl", "src/ui.c")])
-        self.cool = helpers.make_test("cooling.flow", [("forgectrl", "src/cool.c")])
+        self.cool = helpers.make_test("cooling.aa-offset-calibrate", [("forgectrl", "src/cool.c")])
         self.reg = helpers.registry(self.core, self.ui, self.cool)
         self.tests = list(self.reg.values())
         self.chash = catalog.catalog_hash(self.reg)
@@ -136,7 +136,7 @@ class ArtifactTests(unittest.TestCase):
         body = json.loads(artifact.to_json(art))
         body.pop("sha256")
         for t in body["tests"]:
-            if t["id"] == "cooling.flow":
+            if t["id"] == "cooling.aa-offset-calibrate":
                 t["source_sha"] = "0" * 64
         body["sha256"] = manifest_mod.sha256_text(manifest_mod.canonical(body))
         ok, rows, problems = artifact.verify(body, self.release_manifest(), self.tests, self.chash)

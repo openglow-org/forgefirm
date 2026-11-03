@@ -7,9 +7,8 @@ contributor is welcome to read it too: it is the same set of rules.
 
 ### Safety on the machine
 
-- The laser never fires with the coolant pump deliberately off. The heater-only
-  flow-calibrate and flow-verify tools are the only pump-off state, and the
-  tube stays dark during them.
+- The laser never fires with the coolant pump deliberately off. A tool that
+  stops the pump keeps the tube dark for as long as the pump is off.
 - The 40 V motor rail stays up while the machine is on. Never cycle it for a
   controller handover. A rail glitch can leave the stepper drivers
   unserviceable.

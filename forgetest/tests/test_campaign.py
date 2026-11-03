@@ -26,7 +26,7 @@ class CampaignTests(unittest.TestCase):
         self.man = helpers.make_manifest()
         self.core = helpers.make_test("image.health", [("linux-fslc", "**")], always=True)
         self.ui = helpers.make_test("forgectrl.panel", [("forgectrl", "src/ui.c")])
-        self.cool = helpers.make_test("cooling.flow", [("forgectrl", "src/cool.c")])
+        self.cool = helpers.make_test("cooling.aa-offset-calibrate", [("forgectrl", "src/cool.c")])
         self.live = helpers.make_test("laser.witness", [("grblhal-glowforge", "src/**")],
                                       requires=("forgectrl.panel",), kind="live")
         self.reg = helpers.registry(self.core, self.ui, self.cool, self.live)

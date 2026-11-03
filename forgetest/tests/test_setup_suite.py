@@ -35,8 +35,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(setup.FORM_WIZARDS, ("advisories", "account", "preferences", "machine", "cloud"))
         # in the order the gate's reason names them
         self.assertEqual(setup.REQUIRED_FORM_STEPS, ("preferences", "machine", "cloud"))
-        self.assertEqual(setup.REQUIRED_STEPS, ("preferences", "machine", "cloud", "cooling.flow"))
-        self.assertIn("cooling.flow", setup.REQUIRED_STEPS)
+        self.assertEqual(setup.REQUIRED_STEPS, ("preferences", "machine", "cloud"))
 
     def test_the_intake_tests_start_from_a_count(self):
         reg = self.reg
@@ -96,10 +95,9 @@ class RecordTests(unittest.TestCase):
         rec["wizards"]["switches"] = {"version": 1}
         rec["flags"] = {"machine": {"reason": "the head was replaced"}}
         out = setup.record_with_required_steps(rec)
-        self.assertEqual(sorted(out["wizards"]), ["cloud", "cooling.flow", "machine", "preferences"])
+        self.assertEqual(sorted(out["wizards"]), ["cloud", "machine", "preferences"])
         self.assertEqual(out["wizards"]["machine"]["result"], {"model": "basic"})     # kept from the record
         self.assertEqual(out["wizards"]["preferences"]["version"], 1)               # written at version 1
-        self.assertEqual(out["wizards"]["cooling.flow"]["version"], 1)
         self.assertEqual(out["flags"], {})
         self.assertEqual(out["account"], rec["account"])
         self.assertIn("switches", rec["wizards"])                                   # a copy

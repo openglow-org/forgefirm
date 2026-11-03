@@ -3,22 +3,24 @@
 # Written by Scott Wiederhold
 # https://community.openglow.org
 # SPDX-License-Identifier:    MIT
-"""Coolant critical-tier drill: the loop warmed through the lines by the
-engine itself, inside one run session.
+"""Coolant critical-tier drill: the loop warmed through the lines inside
+one run session.
 
 The loop heater reaches the high twenties at most, so the drill sets the
 coolant ceiling, the resume gate and the critical line a few tenths above
-the live upstream reading and lets the engine's own flow-check heater
-(duty 100 percent, 300 s windows, rechecks every 30 s, the suspect
-threshold parked at its top so the warm-up is not read as a flow fault)
-carry the coolant through them during a bare M8 session. Expected, in
-order: OVERTEMP at the ceiling (the pause tier), CRITICAL at the critical
-line (the fail tier: fire blocked, hold, no resume), the fault ending with
-the session and the ceiling's hold standing after it. The settings are
-restored at the end and a short session makes the engine re-read them.
+the live upstream reading, opens a bare M8 session, and runs the loop
+heater at full duty itself (the engine writes the heater only for a cold
+start's warm-up, so the drill's duty stands) to carry the coolant through
+them. Expected, in order: OVERTEMP at the ceiling (the pause tier),
+CRITICAL at the critical line (the fail tier: fire blocked, hold, no
+resume), the fault ending with the session and the ceiling's hold standing
+after it. The heater goes off at CRITICAL, past 45 C downstream, when the
+sensors read SENSOR, if anything else writes it, and on every exit. The
+settings are restored at the end and a short session makes the engine
+re-read them.
 
-No laser, no motion, nothing armed. Runs on the board (the bench page) or
-from a LAN host (gfbench: GF_HOST). Results as JSON in the bench data
+No laser, no motion, nothing armed. Runs on the board (the bench page): it
+writes the heater through sysfs. Results as JSON in the bench data
 directory.
 
 Usage: critical_tier_drill.py [--max-seconds N]    (default 1200)
@@ -30,11 +32,21 @@ import time
 
 from gfbench import HOST, data_path, forgectrl_get, forgectrl_post
 
-KEYS = ("cool_temp_max", "cool_temp_resume", "cool_temp_critical_c",
-        "cool_flow_heater_pct", "cool_flow_check_s", "cool_recheck_s", "cool_flow_rise")
+KEYS = ("cool_temp_max", "cool_temp_resume", "cool_temp_critical_c")
 ABOVE = {"cool_temp_max": 0.4, "cool_temp_resume": 0.2, "cool_temp_critical_c": 0.7}
-HEAT = {"cool_flow_heater_pct": "100", "cool_flow_check_s": "300", "cool_recheck_s": "30",
-        "cool_flow_rise": "40"}
+HEATER = "/sys/glowforge/thermal/heater_pwm"
+HEATER_FULL = 65535
+ABORT_DOWN_C = 45.0
+
+
+def heater(value):
+    with open(HEATER, "w") as f:
+        f.write(str(value))
+
+
+def heater_now():
+    with open(HEATER) as f:
+        return int(f.read().strip())
 
 
 class Grbl:
@@ -108,7 +120,6 @@ def main(argv):
         return 2
     t0_up = c["up_c"]
     lines = {k: "%.1f" % (t0_up + d) for k, d in ABOVE.items()}
-    lines.update(HEAT)
     print("upstream %.2f C; drill settings: %s" % (t0_up, lines))
     st, body = forgectrl_post("/settings", params=lines)
     if st != 200:
@@ -121,6 +132,9 @@ def main(argv):
     try:
         g = Grbl()
         print("M8 -> %s" % g.cmd("M8"))
+        time.sleep(2)
+        heater(HEATER_FULL)
+        print("heater at full duty")
         t0 = time.time()
         last = None
         crit_at = None
@@ -128,6 +142,16 @@ def main(argv):
             time.sleep(1)
             c = cool()
             t = time.time() - t0
+            if crit_at is None:
+                hp = heater_now()
+                why = ("the heater was written by someone else (%d)" % hp if hp != HEATER_FULL
+                       else "the sensors read SENSOR" if c["verdict"] == "SENSOR"
+                       else "downstream %.1f C" % c["down_c"] if c["down_c"] >= ABORT_DOWN_C else None)
+                if why:
+                    heater(0)
+                    print("heater off: %s" % why)
+                    result["aborted"] = why
+                    break
             key = (c["verdict"], c["fire_ok"], c["hold"])
             if key != last or int(t) % 15 == 0:
                 print(row(c, t))
@@ -138,6 +162,8 @@ def main(argv):
             if c["verdict"] == "CRITICAL" and crit_at is None:
                 crit_at = t
                 result["critical_s"] = round(t)
+                heater(0)
+                print("heater off at CRITICAL")
             if crit_at is not None and t - crit_at >= 10:
                 break
         if crit_at is None:
@@ -148,6 +174,7 @@ def main(argv):
         result["after_session"] = {k: c.get(k) for k in ("phase", "verdict", "fire_ok", "hold", "reason", "up_c")}
         rc = 0 if crit_at is not None else 1
     finally:
+        heater(0)
         if g:
             try:
                 g.cmd("M9")
