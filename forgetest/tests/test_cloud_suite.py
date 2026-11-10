@@ -12,7 +12,8 @@ pause, the run loop's lines as its host test emits them on the print
 skeleton of that excerpt.
 
 What is proven here: each test fails when the machine did the unsafe
-thing - a dark print with the latch open at the button wait, a lid stop
+thing - a dark print whose press is asked for with the latch still locked,
+a print the kernel plays with the hardware button latch set, a lid stop
 that is polled rather than edge-driven, and a resume the kernel refused."""
 import contextlib
 import os
@@ -26,6 +27,7 @@ import unittest
 import helpers
 from forgetest.runner import Context, Failed, Run
 from forgetest.suite import cloud
+from forgetest.suite import cloudlatch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures")
@@ -341,7 +343,7 @@ class CloudSuiteTests(unittest.TestCase):
         self.assertFails(cloud.lid_interlock_abort, "not edge-driven",
                          hooks=self.abort_hooks(pre, lid_tail, ilk_stop, ilk_park, []))
 
-    # -- the dark print exthost.armed-freeze runs: locked at the button --------
+    # -- the dark print exthost.armed-freeze runs: unlocked at the button ------
     def dark_parts(self):
         """(the print prologue through the button prompt, the run and the
         print's end with no pause in it)."""
@@ -352,13 +354,51 @@ class CloudSuiteTests(unittest.TestCase):
         run = [l for l in run if "paus" not in l and "resum" not in l]
         return pre, run
 
-    def test_dark_print_fails_when_the_latch_is_open_at_the_button(self):
+    def test_dark_print_fails_when_the_latch_is_locked_at_the_button(self):
+        # The press is asked for with the lock still held (setUp's state):
+        # the hardware would not count it.
         self.in_offline()
         pre, run = self.dark_parts()
-        self._attr("cnc/interlock_circuit", "37")          # unlocked before the press
         self.offline_print_hooks(pre)
         hooks = {"press it. The print runs dark": lambda: self.append(run, delay=0.05)}
-        self.assertFails(dark_print, "the latch is unlocked at the button wait", hooks=hooks)
+        self.assertFails(dark_print, "the latch is locked at the button wait", hooks=hooks)
+
+    def test_dark_print_fails_when_the_latch_is_unlocked_before_the_print(self):
+        self.in_offline()
+        pre, run = self.dark_parts()
+        self._attr("cnc/interlock_circuit", "37")          # unlocked with no print asked for
+        self.offline_print_hooks(pre)
+        hooks = {"press it. The print runs dark": lambda: self.append(run, delay=0.05)}
+        self.assertFails(dark_print, "the latch is unlocked before the print", hooks=hooks)
+
+    # -- cloud.button-latch: the hardware latch while the kernel plays -----------
+    def test_button_latch_fails_when_the_print_runs_with_the_hardware_latch_set(self):
+        # The lock is released for the press and through the run, as it
+        # should be, but the hardware's own latch never clears: a press the
+        # chain did not count. The kernel plays the job all the same.
+        self.in_offline()
+        pre, run = self.dark_parts()
+        self._attr("cnc/button_latch", "1")
+        self._attr("cnc/state", "idle")
+        self.offline_print_hooks(pre)
+        landed = FakeOffline.on_send
+
+        def on_send(msg):
+            if msg["action_type"] == "print" and msg["status"] == "ready":
+                self._attr("cnc/interlock_circuit", "37")  # the client unlocks, then asks for the press
+            landed(msg)
+        FakeOffline.on_send = on_send
+        saved = cloudlatch.SAMPLE_S
+        cloudlatch.SAMPLE_S = 0.02
+        self.addCleanup(setattr, cloudlatch, "SAMPLE_S", saved)
+
+        def pressed():
+            self.append(run, delay=0.05)
+            self._attr("cnc/state", "running")
+            threading.Timer(2.5, lambda: self._attr("cnc/state", "idle")).start()
+        hooks = {"press it once. The print runs dark": pressed}
+        self.assertFails(cloudlatch.button_latch_print,
+                         "the hardware button latch read set while the kernel ran", hooks=hooks)
 
 
 if __name__ == "__main__":

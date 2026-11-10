@@ -58,7 +58,15 @@ from .log import now_ts
 # ramp, both derived from the XY microstep mode (the values here are the
 # x8 base; fixed_sysfs() gives the mode's); streaming is only ever 1
 # inside a live job; the head white LED is a camera lamp, off at idle; the
-# loop heater and TEC are the diagnostics' tools, off at idle.
+# TEC is the diagnostics' tool, off at idle. The loop heater is not here: the
+# coolant flow watch, when an owner turns it on, holds it at idle (see
+# Baseline._heater_side).
+HEATER_ATTR = "thermal/heater_pwm"
+# How far the heater may sit from the duty the coolant flow watch reports
+# while it holds, in counts (2 % of 65535): the hold moves its duty a little
+# every half second, and the heater and the watch are read apart.
+FLOW_HEATER_TOL = 1311
+
 FIXED_SYSFS = [
     ("cnc/motor_lock", "0"),
     ("cnc/x_mode", "8"),
@@ -71,7 +79,6 @@ FIXED_SYSFS = [
     ("pic/x_step_current", "33"),
     ("pic/y_step_current", "5"),
     ("head/white_led", "0"),
-    ("thermal/heater_pwm", "0"),
     ("thermal/tec_on", "0"),
     # Purge air runs continuously, as on the factory machine: the engine
     # turns it on at start and only a listening (the quiet hold) switches
@@ -227,7 +234,23 @@ def read_led(name, attr="target"):
     return None
 
 
+def read_led_attr(name, attr):
+    """One attribute of a button LED, or None (no fallback)."""
+    try:
+        with open(leds_root() + name + "/" + attr) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
 def write_led(name, value):
+    # The LED trigger keeps a pulse going under a new target, so it stops first.
+    for attr in ("pulse_on", "pulse_off"):
+        try:
+            with open(leds_root() + name + "/" + attr, "w") as f:
+                f.write("0")
+        except OSError:
+            pass
     with open(leds_root() + name + "/target", "w") as f:
         f.write(str(value))
 
@@ -312,6 +335,13 @@ def read_program_total():
 EXT_STOP_S = 8
 
 
+def notice_marks(notices):
+    """{seq: (at, times)} for the cooling engine's notices: which fault
+    each one is (its sequence number and the time it began; the numbers
+    start over with the daemon) and how many times it has been counted."""
+    return {n.get("seq"): (n.get("at"), n.get("times")) for n in notices or [] if isinstance(n, dict)}
+
+
 class Leftover:
     def __init__(self, item, found, expected, action):
         self.item = item
@@ -339,6 +369,7 @@ class Baseline:
         self.captured = None
         self.forgectrl = None
         self.mode = None            # the controller mode in force (per enforce)
+        self.run_notices = []       # the cooling notices the run made (per post pass)
 
     def log(self, msg):
         self._log("baseline: " + msg)
@@ -486,9 +517,14 @@ class Baseline:
     def capture(self):
         """Record the preserved state before a run."""
         cap = {"sysfs": {}, "position": read_position(), "frame": counter_frame(),
-               "settings": None, "mode": None}
+               "settings": None, "mode": None, "notices": None}
         for attr in PRESERVED_SYSFS:
             cap["sysfs"][attr] = hw.sysfs_read(attr)
+        # The cooling notices that stand before the run: the post pass tells
+        # the run's own from them (None: not read, so none can be told).
+        st, body = self.fc_get("/cool/status")
+        if st == 200 and isinstance(body, dict):
+            cap["notices"] = notice_marks(body.get("notices"))
         st, body = self.fc_get("/settings")
         if st == 200 and isinstance(body, dict):
             cap["settings"] = {k: v for k, v in body.items()
@@ -506,6 +542,7 @@ class Baseline:
         preserved state to hand back (post) - None compares nothing."""
         left = []
         self.mode = None
+        self._phase = phase
         # the counters' scale is the mode the run counted under, read
         # before the kernel side puts the settings' mode back
         self._counter_spm = counter_steps_per_mm()
@@ -656,13 +693,70 @@ class Baseline:
                 except OSError as e:
                     act = "failed: %s" % e
                 left.append(Leftover("laser_locked", False, True, act))
-        self._cool_side(left)
+        self._cool_side(left, captured)
 
-    def _cool_side(self, left):
+    def _run_notices(self, notices, before):
+        """The notices of faults that cleared on their own, after a run.
+        Those that appeared during it, or were counted another time, are the
+        run's: each is named in the log and kept in run_notices, with
+        times_before when it stood before the run. `before` is the capture's
+        marks (notice_marks). The engine dismisses by sequence number, every
+        notice up to one, so the run's go only when none from before the run
+        stands; the earlier ones (the owner's own use among them) are never
+        the run's to clear. With no capture nothing can be told apart, and
+        every notice stands."""
+        self.run_notices = []
+        if not notices:
+            return
+        if before is None:
+            self.log("cool: %d notice(s) stand and none was read before the run; left standing: %s"
+                     % (len(notices), [(n.get("seq"), n.get("verdict")) for n in notices]))
+            return
+        earlier = 0
+        for n in notices:
+            mark = before.get(n.get("seq"))
+            if mark is not None and mark[0] == n.get("at"):
+                earlier += 1
+                if mark[1] == n.get("times"):
+                    continue
+                self.run_notices.append(dict(n, times_before=mark[1]))
+            else:
+                self.run_notices.append(dict(n))
+        if not self.run_notices:
+            return
+        dismissed = False
+        if earlier:
+            fate = "left standing with the %d from before the run" % earlier
+        else:
+            st, _ = self.fc_post("/cool/notices/dismiss",
+                                 params={"upto": str(max(n.get("seq") or 0 for n in self.run_notices))})
+            dismissed = st == 200
+            fate = "dismissed" if dismissed else "not dismissed (%s)" % st
+        for n in self.run_notices:
+            n["dismissed"] = dismissed
+            again = " (%s before the run)" % n["times_before"] if "times_before" in n else ""
+            self.log("cool: a notice of the run: seq %s %s (%s), at %s, cleared at %s, %s time(s)%s; %s"
+                     % (n.get("seq"), n.get("verdict"), n.get("reason"), n.get("at"), n.get("cleared_at"),
+                        n.get("times"), again, fate))
+
+    def _cool_side(self, left, captured=None):
         """The cooling engine idle, unarmed, holding nothing."""
         st, c = self.fc_get("/cool/status")
         if st != 200 or not isinstance(c, dict):
             return
+        # A failure a run left unacknowledged blocks the next job.
+        a = c.get("attention") or {}
+        if a.get("standing") and not a.get("live"):
+            st, _ = self.fc_post("/cool/attention/ack")
+            left.append(Leftover("attention", a.get("verdict"), "nothing to acknowledge",
+                                 "restored (acknowledged)" if st == 200 else "failed: %s" % st))
+            if st == 200:
+                time.sleep(1.5)        # the engine releases its red flash at its next tick
+        # A fault that cleared on its own blocks nothing, and its notice is no
+        # leftover. After a run the run's own notices are recorded; before a
+        # test the panel's notices (the owner's own use among them) stand.
+        if getattr(self, "_phase", "post") == "post":
+            self._run_notices(c.get("notices") or [], (captured or {}).get("notices"))
         if c.get("phase") == "idle" and not c.get("armed") and not c.get("hold"):
             return
         found = "%s/armed=%s/hold=%s" % (c.get("phase"), c.get("armed"), c.get("hold"))
@@ -783,6 +877,42 @@ class Baseline:
                 return True, last
         return False, last
 
+    def _flow_status(self):
+        st, c = self.fc_get("/cool/flow")
+        return c if st == 200 and isinstance(c, dict) else {}
+
+    @staticmethod
+    def _flow_holds(fs, got):
+        """Whether the heater reading @got is the coolant flow watch's own:
+        the watch holding, at the duty it reports."""
+        duty = fs.get("duty")
+        if fs.get("watch") != "hold" or not isinstance(duty, (int, float)):
+            return False
+        try:
+            return abs(int(got) - round(duty * 65535 / 100)) <= FLOW_HEATER_TOL
+        except ValueError:
+            return False
+
+    def _heater_side(self, left):
+        """The loop heater off at idle, unless the coolant flow watch holds
+        it, and then at the duty the watch reports. Resting, given way, off,
+        or not there at all, the watch leaves it at 0. The watch is read on
+        both sides of the heater, so a hold that starts between the reads is
+        not taken for a leftover."""
+        before = self._flow_status()
+        got = hw.sysfs_read(HEATER_ATTR)
+        if got is None or got == "0":
+            return
+        if self._flow_holds(before, got) or self._flow_holds(self._flow_status(), got):
+            return
+        try:
+            hw.sysfs_write(HEATER_ATTR, "0")
+            back = hw.sysfs_read(HEATER_ATTR)
+            act = "restored" if back == "0" else "failed: reads %s" % back
+        except OSError as e:
+            act = "failed: %s" % e
+        left.append(Leftover(HEATER_ATTR, got, "0", act))
+
     def _kernel_side(self, left):
         if hw.sysfs_read("cnc/state") is None:
             self.log("kernel sysfs not present - kernel-side checks skipped")
@@ -816,9 +946,27 @@ class Baseline:
             except OSError as e:
                 act = "failed: %s" % e
             left.append(Leftover(attr, got, want, act))
+        self._heater_side(left)
+        # A fault that still stands keeps the engine's red flash up: that is
+        # the machine's own state, not a leftover (the attention check above
+        # names the fault).
+        st, c = self.fc_get("/cool/status")
+        red_standing = st == 200 and isinstance(c, dict) and (c.get("attention") or {}).get("standing")
         for name in BUTTON_LEDS:
             got = read_led(name)
-            if got is not None and got != "0":
+            pulse = read_led_attr(name, "pulse_on")
+            if red_standing:
+                continue
+            if pulse not in (None, "0"):
+                # A pulsing LED swings its target between 0 and its level:
+                # the pulse is what says it was left on.
+                try:
+                    write_led(name, 0)
+                    act = "restored"
+                except OSError as e:
+                    act = "failed: %s" % e
+                left.append(Leftover("leds/" + name, "pulse %s" % pulse, "0", act))
+            elif got is not None and got != "0":
                 try:
                     write_led(name, 0)
                     act = "restored"

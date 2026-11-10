@@ -1111,8 +1111,8 @@ OFFLINE_STEP = ("The machine in cloud mode under the OFFLINE service (the test s
                 "mode; the next test that needs the service, a mode switch, or a controller "
                 "restart brings the service back.")
 ARM_STEP = ("Press the physical button when it lights white (the arm) - once per print. The "
-            "latch unlocks for the run, so the test is a live one even though the job carries "
-            "no laser command.")
+            "latch is unlocked from then to the end of the run, so the test is a live one even "
+            "though the job carries no laser command.")
 
 CANCELLED = 'finished with event ":cancelled"'
 COMPLETED = 'finished with event ":completed"'
@@ -1265,10 +1265,18 @@ def lid_interlock_abort_body(ctx, ev, off, job, offset):
 # ---------------------------------------------------------------- the dark print (exthost.armed-freeze)
 
 def dark_print_body(ctx, ev, off, job, offset, fc):
+    # Before the print the latch is locked. At the button wait the armed
+    # session is open, the cooling verdict has passed and the client has
+    # released the lock: the hardware's own button latch clears only on a
+    # press taken with the lock released, so a lock still held here means a
+    # press that could not count.
+    ev["latch_locked_before"] = latch_locked()
+    ctx.check(ev["latch_locked_before"], "the latch is unlocked before the print")
     off.print_ready(9005, job)
     wait_button_wait(ctx, offset, 120)
     ev["latch_locked_at_button"] = latch_locked()
-    ctx.check(ev["latch_locked_at_button"], "the latch is unlocked at the button wait")
+    ctx.check(ev["latch_locked_at_button"] is False,
+              "the latch is locked at the button wait: the press could not count")
     ctx.act("button", "press", text="The button is lit: press it. The print runs dark and finishes.",
             until=lambda: wait_print_running(ctx, offset, 0.1) is not None, timeout=PRESS_TIMEOUT_S)
     run = wait_print_running(ctx, offset, 60)
@@ -1285,7 +1293,8 @@ def dark_print_body(ctx, ev, off, job, offset, fc):
     ev["latch_locked_after"] = latch_locked()
     ctx.check(ev["latch_locked_after"], "the latch is unlocked after the print")
     ev["events"] = offline_events(off)
-    ctx.log("PASS: locked at the button, unlocked for the run, locked after it; the print completed")
+    ctx.log("PASS: locked before the print, unlocked at the button and through the run, locked after it; "
+            "the print completed")
 
 
 @test("cloud.pause-resume", title="Button pauses and resumes a cloud print (factory backtrack + lead)",

@@ -78,6 +78,26 @@ reported messages:
      in Alarm, and after $X a Z jog is still refused (error 15) with MPos
      Z unmoved, while a program Z move hits the pinned lens's soft limit
      (ALARM:2)
+ 19. a window does not outlive its job: a job that leaves M4 modal (no
+     M5, no M2) is disarmed laser_disarm_s after its last move, the
+     parser's M4 goes with the window, and the next job's identical M4
+     prompts; a sender change at Idle with M4 modal does the same, so the
+     new sender's M4 prompts and its job is cut, not moved dark
+ 20. the re-arm of a held job waits for the engine: a press that lands
+     before the engine has acknowledged the job is taken, the job stays
+     held and unarmed meanwhile, and the acknowledgment arms it once and
+     resumes it
+ 21. a resume under a standing pause-tier verdict with the window closed
+     is refused and the job stays held, with no alarm; the same resume
+     re-arms it once the verdict has cleared
+ 22. a manual $H closes an open window at once (the provider never enters
+     the homing state), and the next job prompts
+ 23. a stalled job does not run on dark: a job whose sender stopped for
+     longer than laser_disarm_s with M4 modal has lost its window and its
+     M4; its next feed move with an S word ends it (the reason reported
+     once, ALARM:3, no step of that move shipped), and started again its
+     own M4 prompts; a feed move with no S word after the same stall is a
+     dry run and moves with no alarm
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -106,6 +126,9 @@ DISARMED = "laser disarmed - latch locked"
 BLOCKED = "laser fire blocked"
 PROMPT = "press the button to start the laser job"
 RESUME_PROMPT = "press the button to resume the laser job"
+MODAL_OFF = "the next M3 or M4 asks for the button"
+STAYS_HELD = "the job stays held"
+STALLED = "the laser window closed while the job waited"
 LID_CANCEL = "lid opened during arm - job canceled"
 LOOP_CANCEL = "interlock open during arm - job canceled"
 
@@ -1224,9 +1247,232 @@ def test_sender_change_during_rearm_cancels():
         s.close()
 
 
+def arm_by_press(s, tag, line="M4 S100"):
+    """Send a laser-on line, wait for its prompt, press, wait for the arm."""
+    prompts, armed = s.count(PROMPT), s.armed_count()
+    s.send_raw(line)
+    if not wait_for_new(s.log, PROMPT, prompts, 5, s.sock):
+        fail("[%s] %r did not prompt for the button" % (tag, line))
+    s.press_button()
+    if not wait_for_new(s.log, ARMED, armed, 5, s.sock):
+        fail("[%s] the press did not arm" % tag)
+
+
+def test_window_does_not_outlive_its_job():
+    """Rule 19: M4 left modal at Idle. The grace closes the window, the
+    parser's M4 goes with it, and the next identical M4 prompts; a sender
+    change at Idle does the same for the new sender's first M4."""
+    s = Session("modal-idle-grace", disarm_s=2, switches=SW_CLOSED)
+    try:
+        arm_by_press(s, "modal-idle-grace")
+        send_line(s.sock, "G1 X2 F600", s.log)      # the job: one short move, no M5, no M2
+        wait_idle(s.sock, s.log)
+        if not wait_for(s.log, DISARMED, 6, s.sock):
+            fail("[modal-idle-grace] the window outlived the job with M4 modal")
+        if not wait_for(s.log, MODAL_OFF, 2, s.sock):
+            fail("[modal-idle-grace] the parser kept its M4 after the window closed")
+        arm_by_press(s, "modal-idle-grace")         # the next job's identical M4 prompts
+        send_line(s.sock, "G1 X4 F600", s.log)
+        send_line(s.sock, "M5", s.log)
+        send_line(s.sock, "M2", s.log)
+        print("PASS [modal-idle-grace]: the grace closed the window under a modal M4 and the "
+              "next M4 prompted")
+    finally:
+        s.close()
+    s = Session("modal-sender-change", disarm_s=60, switches=SW_CLOSED)
+    try:
+        arm_by_press(s, "modal-sender-change")
+        send_line(s.sock, "G1 X2 F600", s.log)
+        wait_idle(s.sock, s.log)
+        s.sock.close()                              # at Idle, M4 modal: the window closes
+        time.sleep(0.5)
+        s.sock = s.connect()
+        arm_by_press(s, "modal-sender-change")      # the new sender's first line is the same M4
+        send_line(s.sock, "G1 X4 F600", s.log)
+        wait_idle(s.sock, s.log)
+        if s.count("laser fire suppressed") != 0:
+            fail("[modal-sender-change] the new sender's job moved with its fire suppressed")
+        send_line(s.sock, "M5", s.log)
+        print("PASS [modal-sender-change]: a sender change at Idle with M4 modal closed the "
+              "window, and the new sender's M4 prompted")
+    finally:
+        s.close()
+
+
+def hold_past_the_grace(s, tag):
+    """An armed move, held by the sender, left in the hold until the grace
+    has closed its window."""
+    arm_by_press(s, tag)
+    send_line(s.sock, "G1 X5 F60", s.log)           # 5 s of motion
+    time.sleep(1.0)
+    s.sock.sendall(b"!")
+    if not wait_for(s.log, DISARMED, 10, s.sock):
+        fail("[%s] the window did not close in the hold" % tag)
+
+
+def test_rearm_waits_for_the_engine():
+    """Rule 20: the press of a re-arm lands before the engine has
+    acknowledged the job. The press is taken, nothing is armed or resumed
+    until the acknowledgment, and then the job is armed once and finishes."""
+    s = Session("rearm-late-ack", disarm_s=2, switches=SW_CLOSED)
+    try:
+        hold_past_the_grace(s, "rearm-late-ack")
+        s.verdict["armed_ack"] = False              # the engine has not taken the next window
+        time.sleep(1.2)                             # past one publish and one read
+        before = s.armed_count()
+        s.sock.sendall(b"~")
+        if not wait_for(s.log, RESUME_PROMPT, 5, s.sock):
+            fail("[rearm-late-ack] the resume did not prompt for the button")
+        s.press_button()
+        read_avail(s.sock, s.log, 1.5)
+        if s.armed_count() != before or not s.state().startswith("Hold"):
+            fail("[rearm-late-ack] armed or resumed before the engine took the job "
+                 "(armed %d -> %d, state %s)" % (before, s.armed_count(), s.state()))
+        s.verdict["armed_ack"] = True               # the engine takes it
+        end = time.time() + 4
+        while time.time() < end and s.armed_count() != before + 1:
+            read_avail(s.sock, s.log, 0.2)
+        if s.armed_count() != before + 1:
+            fail("[rearm-late-ack] the acknowledgment did not arm the held job (armed %d -> %d)"
+                 % (before, s.armed_count()))
+        wait_idle(s.sock, s.log)
+        x_end = s.mpos_x()
+        if x_end is None or abs(x_end - 5.0) > 0.01:
+            fail("[rearm-late-ack] the resumed job did not finish the move (MPos X %s)" % x_end)
+        if s.armed_count() != before + 1 or "ALARM" in "".join(s.log):
+            fail("[rearm-late-ack] the resumed job was armed again or alarmed")
+        send_line(s.sock, "M5", s.log)
+        print("PASS [rearm-late-ack]: the press was taken before the acknowledgment, and the "
+              "acknowledgment armed the job once and resumed it to X=%.3f" % x_end)
+    finally:
+        s.close()
+
+
+def test_resume_under_a_pause_verdict_stays_held():
+    """Rule 21: the window closed, a pause-tier verdict standing. The ~ is
+    refused with no alarm and the job stays held; once the verdict has
+    cleared the same ~ prompts and the press resumes the job."""
+    s = Session("held-under-verdict", disarm_s=2, switches=SW_CLOSED)
+    try:
+        hold_past_the_grace(s, "held-under-verdict")
+        s.set_verdict("OVERTEMP", fire_ok=False, hold=True, resume_ok=False)
+        time.sleep(1.2)
+        prompts = s.count(RESUME_PROMPT)
+        s.sock.sendall(b"~")
+        if not wait_for(s.log, STAYS_HELD, 3, s.sock):
+            fail("[held-under-verdict] the refused resume did not say the job stays held")
+        read_avail(s.sock, s.log, 0.5)
+        if not s.state().startswith("Hold") or "ALARM" in "".join(s.log):
+            fail("[held-under-verdict] the job did not stay held (state %s)" % s.state())
+        if s.count(RESUME_PROMPT) != prompts:
+            fail("[held-under-verdict] the resume prompted under the standing verdict")
+        s.set_verdict()                             # the verdict clears
+        time.sleep(1.2)
+        before = s.armed_count()
+        s.sock.sendall(b"~")
+        if not wait_for_new(s.log, RESUME_PROMPT, prompts, 5, s.sock):
+            fail("[held-under-verdict] the resume did not prompt once the verdict had cleared")
+        s.press_button()
+        end = time.time() + 10
+        while time.time() < end and s.armed_count() != before + 1:
+            read_avail(s.sock, s.log, 0.2)
+        if s.armed_count() != before + 1:
+            fail("[held-under-verdict] the press did not re-arm the held job")
+        wait_idle(s.sock, s.log)
+        send_line(s.sock, "M5", s.log)
+        print("PASS [held-under-verdict]: the resume under OVERTEMP was refused with the job "
+              "held, and it re-armed once the verdict had cleared")
+    finally:
+        s.close()
+
+
+def test_manual_home_closes_the_window():
+    """Rule 22: a manual home runs at Idle, so the poll's homing-state
+    close never sees it; the home itself closes the window."""
+    s = Session("manual-home-closes", disarm_s=60, switches=SW_CLOSED,
+                conf_extra="homing_mode = manual\n")
+    try:
+        arm_by_press(s, "manual-home-closes")
+        send_line(s.sock, "G1 X2 F600", s.log)
+        send_line(s.sock, "M5", s.log)
+        wait_idle(s.sock, s.log)
+        if s.disarmed_count() != 0:
+            fail("[manual-home-closes] the window closed before the home, so the case proves nothing")
+        send_line(s.sock, "$H", s.log)
+        if not wait_for(s.log, DISARMED, 2, s.sock):
+            fail("[manual-home-closes] the manual home left the armed window open")
+        arm_by_press(s, "manual-home-closes")       # the next job asks for its own press
+        send_line(s.sock, "M5", s.log)
+        print("PASS [manual-home-closes]: a manual $H closed the open window, and the next "
+              "laser-on prompted")
+    finally:
+        s.close()
+
+
+def stall_past_the_grace(s, tag):
+    """An armed job that cuts one move and then stops sending, M4 still
+    modal, until the grace has closed its window and taken its M4."""
+    arm_by_press(s, tag)
+    send_line(s.sock, "G1 X2 F600", s.log)
+    wait_idle(s.sock, s.log)
+    if not wait_for(s.log, MODAL_OFF, 6, s.sock):
+        fail("[%s] the stall did not close the window and take the parser's M4" % tag)
+
+
+def test_stalled_job_does_not_run_on_dark():
+    """Rule 23: after the stall the job's next cutting move ends it before
+    it moves; a move with no S word is a dry run and is left alone."""
+    s = Session("stalled-job", disarm_s=2, switches=SW_CLOSED, dump=True)
+    try:
+        stall_past_the_grace(s, "stalled-job")
+        steps = s.shipped_x_steps()
+        s.send_raw("G1 X6 S100")                    # the job carries on with a cutting move
+        if not wait_for(s.log, STALLED, 3, s.sock):
+            fail("[stalled-job] the stalled job's cutting move was not stopped")
+        if not wait_for(s.log, "ALARM:3", 3, s.sock) or s.wait_state("Alarm", 3) is None:
+            fail("[stalled-job] the stopped job did not end in ALARM:3 (state %s)" % s.state())
+        time.sleep(0.3)
+        if s.shipped_x_steps() != steps:
+            fail("[stalled-job] the stopped move shipped %d X steps"
+                 % (s.shipped_x_steps() - steps))
+        if s.count(STALLED) != 1:
+            fail("[stalled-job] the reason was reported %d times" % s.count(STALLED))
+        send_line(s.sock, "$X", s.log)
+        arm_by_press(s, "stalled-job")              # started again: its own M4 prompts
+        send_line(s.sock, "G1 X6 F600", s.log)
+        wait_idle(s.sock, s.log)
+        x_end = s.mpos_x()
+        if x_end is None or abs(x_end - 6.0) > 0.01:
+            fail("[stalled-job] the job started again did not run (MPos X %s)" % x_end)
+        send_line(s.sock, "M5", s.log)
+        print("PASS [stalled-job]: the stalled job's next cutting move ended it with no step "
+              "shipped, and started again it prompted and ran")
+    finally:
+        s.close()
+    s = Session("stalled-dry-run", disarm_s=2, switches=SW_CLOSED)
+    try:
+        stall_past_the_grace(s, "stalled-dry-run")
+        send_line(s.sock, "G1 X6 F600", s.log)      # no S word: a dry run
+        wait_idle(s.sock, s.log)
+        x_end = s.mpos_x()
+        if x_end is None or abs(x_end - 6.0) > 0.01:
+            fail("[stalled-dry-run] the dry move did not run (MPos X %s)" % x_end)
+        if s.count(STALLED) != 0 or "ALARM" in "".join(s.log):
+            fail("[stalled-dry-run] a move with no S word was stopped")
+        print("PASS [stalled-dry-run]: a feed move with no S word after the stall moved with "
+              "no alarm")
+    finally:
+        s.close()
+
+
 def main():
     if not os.path.isfile(BIN):
         fail("controller binary not found at %s" % BIN)
+    test_stalled_job_does_not_run_on_dark()
+    test_manual_home_closes_the_window()
+    test_window_does_not_outlive_its_job()
+    test_rearm_waits_for_the_engine()
+    test_resume_under_a_pause_verdict_stays_held()
     test_sender_change_during_rearm_cancels()
     test_status_files()
     test_laser_keys_reload()

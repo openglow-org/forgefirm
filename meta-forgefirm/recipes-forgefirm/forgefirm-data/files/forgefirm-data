@@ -36,23 +36,36 @@
 #    its development bar: emmc (a boot from an eMMC slot), card
 #    (the card's folders are in use), card-none (a card with no data
 #    partition), card-failed (the card's data partition is there and not
-#    in use: it did not mount, it is not ForgeFIRM's, or its folders could
-#    not be shown; the boot log says which).
+#    in use: it did not mount, it mounted read-only, it is not ForgeFIRM's,
+#    or its folders could not be shown; the boot log says which). A
+#    card-failed boot does not fall back to the eMMC's folders: they are
+#    shown read-only, and the boot's logs go to RAM, so a dev image booted
+#    from a card never writes the eMMC's ForgeFIRM settings or logs; its
+#    control panel holds the controllers and says why. The card branch is
+#    the dev image's: a release image booted from a card leaves /data as
+#    mountall made it.
 # 2. A reset. forgectrl leaves reset-requested in /data/forgefirm and
 #    reboots (POST /system/reset). Here, before anything reads the folder,
 #    everything in it goes but what an install keeps or the machine itself
 #    is: the factory archive, the sshd host keys, the TLS key and
 #    certificate, the boot state (timestamp, random-seed), and the logs
-#    from before syslog (legacy-logs). The marker goes last, so a wipe cut
-#    short by a power loss runs again at the next boot. forgectrl then
-#    finds no account and no setup record, and the setup runs as after an
-#    install.
+#    from before syslog (legacy-logs). The marker goes last, and only when
+#    everything else went: a wipe cut short by a power loss keeps it and
+#    runs again at the next boot. One in which a removal failed keeps it
+#    too, and forgectrl withdraws it when it starts and logs that, so a
+#    request no boot carried out is never left for a later one. After a
+#    whole wipe forgectrl finds no account and no setup record, and the
+#    setup runs as after an install. A card-failed boot runs no reset: the
+#    folder it shows is the eMMC's, read-only, and not this boot's to
+#    clear, so a marker there waits for a boot that uses the eMMC's folder.
 #
-# Host tests set FF_CMDLINE (the kernel command line file) and FF_CARD_DEV
-# (the card's data partition); the image sets neither.
+# Host tests set FF_CMDLINE (the kernel command line file), FF_CARD_DEV
+# (the card's data partition) and FF_DEV_MARKER (the dev image's marker);
+# the image sets none of them.
 
 CMDLINE=${FF_CMDLINE:-/proc/cmdline}
 CARD_DEV=${FF_CARD_DEV:-/dev/mmcblk1p2}
+DEV_MARKER=${FF_DEV_MARKER:-/etc/forgefirm-dev}
 CARD_ROOT=/dev/mmcblk1p1
 STATE=/run/forgefirm-data.state
 CARD=/run/forgefirm-card
@@ -109,16 +122,26 @@ card () {
   root=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' "$CMDLINE" 2>/dev/null)
   [ "$root" = "$CARD_ROOT" ] || return 1
   OUTCOME=card-none
+  [ -e "$DEV_MARKER" ] || { log "a release image booted from the SD card: /data stays the eMMC's"; return 1; }
   [ -e "$CARD_DEV" ] || { log "booted from the SD card, which has no data partition: /data stays the eMMC's"; return 1; }
   OUTCOME=card-failed
   is_mounted /data || { log "/data is not mounted; the card's folders are not shown"; return 1; }
   mkdir -p "$CARD" "$EMMC" || return 1
-  if ! mount -t ext4 -o noatime "$CARD_DEV" "$CARD"; then
-    log "the card's data partition ($CARD_DEV) did not mount; /data stays the eMMC's"
+  # errors=remount-ro: a filesystem error found while the card is in use
+  # stops the writes to it, whatever the card's superblock asks for.
+  if ! mount -t ext4 -o noatime,errors=remount-ro "$CARD_DEV" "$CARD"; then
+    log "the card's data partition ($CARD_DEV) did not mount"
+    return 1
+  fi
+  # A write-protected card, or an ext4 error, mounts read-only: no use.
+  if awk -v t="$CARD" '$2 == t { split($4, o, ","); for (i in o) if (o[i] == "ro") f = 1 } END { exit !f }' \
+      /proc/mounts; then
+    log "the card's data partition ($CARD_DEV) mounted read-only (write-protected, or a filesystem error)"
+    umount "$CARD"
     return 1
   fi
   if [ ! -d "$CARD/forgefirm" ] || [ ! -d "$CARD/log" ]; then
-    log "$CARD_DEV is not a ForgeFIRM data partition (no forgefirm/ and log/); /data stays the eMMC's"
+    log "$CARD_DEV is not a ForgeFIRM data partition (no forgefirm/ and log/)"
     umount "$CARD"
     return 1
   fi
@@ -136,12 +159,18 @@ card () {
     mount -o remount,bind,ro "$EMMC" || { log "the eMMC view did not go read-only; removed"; umount "$EMMC"; }
   fi
   if ! mount --bind "$CARD/forgefirm" "$DATA"; then
-    log "the card's forgefirm folder could not be shown at $DATA; /data stays the eMMC's"
+    log "the card's forgefirm folder could not be shown at $DATA"
     is_mounted "$EMMC" && umount "$EMMC"
     umount "$CARD"
     return 1
   fi
-  mount --bind "$CARD/log" "$LOGS" || log "the card's log folder could not be shown at $LOGS"
+  if ! mount --bind "$CARD/log" "$LOGS"; then
+    log "the card's log folder could not be shown at $LOGS"
+    umount "$DATA"
+    is_mounted "$EMMC" && umount "$EMMC"
+    umount "$CARD"
+    return 1
+  fi
   # The factory archive stays the eMMC's, read-only.
   if is_mounted "$EMMC" && [ -d "$EMMC/forgefirm/archive" ]; then
     mkdir -p "$DATA/archive" &&
@@ -153,23 +182,66 @@ card () {
   return 0
 }
 
+# A card boot whose data partition is there and not in use: the eMMC's
+# folders are shown read-only and the boot's logs go to RAM, so nothing of
+# this boot lands in the eMMC's ForgeFIRM folders.
+fail_closed () {
+  mkdir -p "$DATA" "$LOGS"
+  if [ -z "$(ls -A "$DATA" 2>/dev/null)" ]; then
+    # An eMMC that never ran ForgeFIRM: nothing to keep, and a read-only
+    # empty folder would leave no host keys, certificate or log rules. The
+    # boot's folder is in RAM instead, gone at the next boot.
+    if mount -t tmpfs -o size=16m,mode=0700 tmpfs "$DATA"; then
+      log "the eMMC has no ForgeFIRM folder: this boot's is in RAM"
+    else
+      log "the boot's ForgeFIRM folder could not go to RAM"
+    fi
+  elif mount --bind "$DATA" "$DATA" && mount -o remount,bind,ro "$DATA"; then
+    log "the eMMC's ForgeFIRM folder is read-only this boot"
+  else
+    log "the eMMC's ForgeFIRM folder could not be made read-only"
+  fi
+  if mount -t tmpfs -o size=32m,mode=0755 tmpfs "$LOGS"; then
+    log "this boot's ForgeFIRM logs are in RAM: they go at the next boot"
+  else
+    log "the logs could not go to RAM"
+  fi
+}
+
 reset () {
   [ -e "$DATA/$RESET" ] || return 0
   log "a reset was requested: clearing $DATA (the factory archive, the host keys, the certificate and the boot state stay)"
+  left=0
   for p in "$DATA"/* "$DATA"/.[!.]* "$DATA"/..?*; do
     [ -e "$p" ] || [ -L "$p" ] || continue
     name=${p##*/}
     case " $KEEP $RESET " in *" $name "*) continue ;; esac
     is_mounted "$p" && continue
-    rm -rf "$p" || log "could not remove $p"
+    rm -rf "$p" || { log "could not remove $p"; left=1; }
   done
   sync
-  rm -f "$DATA/$RESET"
+  # The marker goes only after a whole wipe. One that left something
+  # behind keeps it, and forgectrl withdraws it when it starts.
+  if [ "$left" = 1 ]; then
+    log "the reset is not complete: the request stays, and the control panel withdraws it when it starts"
+    return 0
+  fi
+  if ! rm -f "$DATA/$RESET"; then
+    log "the reset request could not be removed: the control panel withdraws it when it starts, or logs why it cannot"
+    return 0
+  fi
   sync
   log "the reset is done; the setup runs at the next start of the control panel"
 }
 
 card
+[ "$OUTCOME" = card-failed ] && fail_closed
 echo "$OUTCOME" > "$STATE" 2>/dev/null || log "cannot write $STATE"
-reset
+if [ "$OUTCOME" = card-failed ]; then
+  # The folder shown is the eMMC's, read-only (or this boot's own, in RAM):
+  # nothing in it is this boot's to clear.
+  [ ! -e "$DATA/$RESET" ] || log "a reset was requested: not run on this boot, which shows the eMMC's folder read-only; a boot that uses the eMMC's folder runs it"
+else
+  reset
+fi
 exit 0

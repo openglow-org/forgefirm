@@ -97,75 +97,90 @@ def drill_deadman():
              'head/air_assist_pwm', 'head/white_led']
     before = {a: rd(a) for a in watch}
     print('resting: %s' % before)
-    # Known pre-trip posture (all harmless for a few seconds).
-    wr('thermal/heater_pwm', 30)
-    wr('thermal/tec_on', 1)
-    wr('thermal/water_pump_on', 1)
-    wr('thermal/exhaust_pwm', 40)
-    wr('thermal/intake_pwm', 40)
-    wr('head/air_assist_pwm', 40)
-    wr('head/measure_laser', 20)
-    wr('head/uv_led', 20)
-    wr('head/z_enable', 1)
-    time.sleep(0.3)
-    armed = {a: rd(a) for a in watch}
-    print('pre-trip: %s' % armed)
-
-    fd = open_pulsedev()
-    t_mark = uptime()
-    wr('cnc/motor_lock', 15)
-    wr('cnc/laser_latch', 1)
-    wr('cnc/step_freq', TICK_HZ)
-    os.lseek(fd, 1, os.SEEK_SET)          # clear ring + counters
-    os.write(fd, POWER0 + PAD * (TICK_HZ * 6))   # 6 s of pads
-    wr('cnc/run', 1)
-    st = wait_state('running', 2)
-    print('run: state=%s' % st)
-    time.sleep(1.0)
-    print('closing the flock\'d fd mid-program (dead-man trip)')
-    os.close(fd)
-    time.sleep(0.5)
-    after = {a: rd(a) for a in watch}
-    print('post-trip: state=%s %s' % (rd('cnc/state'), after))
-    for ln in dmesg_since(t_mark):
-        if 'glowforge' in ln:
-            print('  dmesg: %s' % ln)
-
+    # The heater's lease (heater_lease_ms, 5 s) also turns it off: the count
+    # of lapses must not move, so the dead-man is what turned it off.
+    try:
+        lapses = rd('thermal/heater_lapses')
+    except OSError:
+        lapses = None                     # a kernel module with no lease
     ok = True
-    def expect(attr, val):
-        nonlocal ok
-        got = after[attr]
-        good = got == str(val)
-        ok &= good
-        print('  %-24s %s (want %s) %s' % (attr, got, val, 'ok' if good else 'FAIL'))
-    def unchanged(attr):
-        nonlocal ok
-        good = after[attr] == armed[attr]
-        ok &= good
-        print('  %-24s %s (want unchanged %s) %s'
-              % (attr, after[attr], armed[attr], 'ok' if good else 'FAIL'))
-    print('--- heat sources off:')
-    expect('thermal/heater_pwm', 0)
-    expect('thermal/tec_on', 0)
-    print('--- head safe:')
-    expect('head/measure_laser', 0)
-    expect('head/uv_led', 0)
-    expect('head/z_enable', 0)
-    print('--- airflow and circulation left to the engine:')
-    unchanged('thermal/water_pump_on')
-    unchanged('thermal/exhaust_pwm')
-    unchanged('thermal/intake_pwm')
-    unchanged('head/air_assist_pwm')
-    stopped = rd('cnc/state') != 'running'
-    ok &= stopped
-    print('  run stopped: %s' % stopped)
-    # Restore the resting posture we found.
-    for a, v in before.items():
-        try:
-            wr(a, v)
-        except OSError:
-            pass
-    wr('cnc/motor_lock', 0)
+    try:
+        # Known pre-trip posture (all harmless for a few seconds).
+        wr('thermal/heater_pwm', 30)
+        wr('thermal/tec_on', 1)
+        wr('thermal/water_pump_on', 1)
+        wr('thermal/exhaust_pwm', 40)
+        wr('thermal/intake_pwm', 40)
+        wr('head/air_assist_pwm', 40)
+        wr('head/measure_laser', 20)
+        wr('head/uv_led', 20)
+        wr('head/z_enable', 1)
+        time.sleep(0.3)
+        armed = {a: rd(a) for a in watch}
+        print('pre-trip: %s' % armed)
+
+        fd = open_pulsedev()
+        t_mark = uptime()
+        wr('cnc/motor_lock', 15)
+        wr('cnc/laser_latch', 1)
+        wr('cnc/step_freq', TICK_HZ)
+        os.lseek(fd, 1, os.SEEK_SET)          # clear ring + counters
+        os.write(fd, POWER0 + PAD * (TICK_HZ * 6))   # 6 s of pads
+        wr('cnc/run', 1)
+        st = wait_state('running', 2)
+        print('run: state=%s' % st)
+        time.sleep(1.0)
+        print('closing the flock\'d fd mid-program (dead-man trip)')
+        os.close(fd)
+        time.sleep(0.5)
+        after = {a: rd(a) for a in watch}
+        if lapses is not None:
+            after['thermal/heater_lapses'] = rd('thermal/heater_lapses')
+        print('post-trip: state=%s %s' % (rd('cnc/state'), after))
+        for ln in dmesg_since(t_mark):
+            if 'glowforge' in ln:
+                print('  dmesg: %s' % ln)
+
+        def expect(attr, val):
+            nonlocal ok
+            got = after[attr]
+            good = got == str(val)
+            ok &= good
+            print('  %-24s %s (want %s) %s' % (attr, got, val, 'ok' if good else 'FAIL'))
+        def unchanged(attr):
+            nonlocal ok
+            good = after[attr] == armed[attr]
+            ok &= good
+            print('  %-24s %s (want unchanged %s) %s'
+                  % (attr, after[attr], armed[attr], 'ok' if good else 'FAIL'))
+        print('--- heat sources off:')
+        expect('thermal/heater_pwm', 0)
+        if lapses is not None:
+            expect('thermal/heater_lapses', lapses)
+        expect('thermal/tec_on', 0)
+        print('--- head safe:')
+        expect('head/measure_laser', 0)
+        expect('head/uv_led', 0)
+        expect('head/z_enable', 0)
+        print('--- airflow and circulation left to the engine:')
+        unchanged('thermal/water_pump_on')
+        unchanged('thermal/exhaust_pwm')
+        unchanged('thermal/intake_pwm')
+        unchanged('head/air_assist_pwm')
+        stopped = rd('cnc/state') != 'running'
+        ok &= stopped
+        print('  run stopped: %s' % stopped)
+    except Exception as e:
+        ok = False
+        print('DEADMAN drill error: %r' % (e,))
+    finally:
+        # Restore the resting posture we found, whatever happened above.
+        for a, v in before.items():
+            try:
+                wr(a, v)
+            except OSError:
+                pass
+        wr('cnc/motor_lock', 0)
     print('DEADMAN %s' % ('PASS' if ok else 'FAIL'))
     return 0 if ok else 1
 

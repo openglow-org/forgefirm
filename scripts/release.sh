@@ -57,7 +57,17 @@
 #
 # Version contract: <version> == FORGEFIRM_RELEASE in forgefirm-release.inc
 # == /etc/forgefirm-version ("v<version>") in the built rootfs == .fw
-# meta-version ("v<version>") == release tag ("v<version>").
+# meta-version ("v<version>") == release tag ("v<version>"). With --publish
+# the tag must exist and name HEAD: the release is attached to it, and gh
+# creates none (--verify-tag).
+#
+# Keys: the signing key's public half must be the release key the image
+# trusts (meta-forgefirm/recipes-forgefirm/forgefirm-keys/files/
+# forgefirm-release.pub) and the one the installer embeds.
+#
+# Staging: the assets are made in <staging>/v<version>.tmp and renamed to
+# <staging>/v<version> when every gate has passed, so a release that a gate
+# stopped leaves nothing where the publish command looks.
 
 set -euo pipefail
 
@@ -135,11 +145,35 @@ resolve_ext4 () {
   [ -s "$EXT4" ] || die "release ext4 not found in $DEPLOY"
 }
 
-# The dev rootfs of the same build. One bitbake run stamps both images
-# alike, so the name follows from the release one.
+# The dev rootfs, through the dev image's own deploy link. Each image is
+# stamped when it is itself made, so neither name follows from the other.
 resolve_dev_ext4 () {
-  DEV_EXT4="${EXT4/forgefirm-image-glowforge/forgefirm-image-dev-glowforge}"
-  [ -s "$DEV_EXT4" ] || die "dev rootfs not found: $DEV_EXT4"
+  DEV_EXT4=$(readlink -f "$DEPLOY/forgefirm-image-dev-glowforge.rootfs.ext4")
+  [ -s "$DEV_EXT4" ] || die "dev rootfs not found in $DEPLOY"
+}
+
+# The two rootfs images are one build: what binds them is the manifest each
+# carries (/etc/forgefirm-manifest.json), not a file name. Their identities
+# must be equal: every component at its revision with its files, the dev
+# image's own components left out, plus the platform
+# (forgetest/forgetest/manifest.py, identity_sha). A dev rootfs left by an
+# earlier build of other sources stops the release here, before
+# forgefirm-dev.fw and the source bundle would speak for it.
+same_build () {
+  REL_M=$(mktemp)
+  DEV_M=$(mktemp)
+  debugfs -R "cat /etc/forgefirm-manifest.json" "$1" > "$REL_M" 2>/dev/null || true
+  debugfs -R "cat /etc/forgefirm-manifest.json" "$2" > "$DEV_M" 2>/dev/null || true
+  SAME=0
+  python3 -B -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from forgetest.manifest import Manifest
+a, b = (Manifest.load(p).identity_sha() for p in sys.argv[2:4])
+sys.exit(0 if a == b else 1)' "$REPO/forgetest" "$REL_M" "$DEV_M" || SAME=1
+  rm -f "$REL_M" "$DEV_M"
+  [ "$SAME" = 0 ] \
+    || die "the dev rootfs $(basename "$2") is not the build of the release rootfs $(basename "$1"): their manifests differ, or one carries none"
 }
 
 # The dev rootfs is sized and capped like the release one, so both take
@@ -153,9 +187,34 @@ check_size () {
   fi
 }
 
+# The release public key every machine trusts (the image carries it). A dev
+# signing key is refused when its public half is this one: an image with an
+# open root login is never one a release-key signature vouches for.
+TRUSTED_PUB="$REPO/meta-forgefirm/recipes-forgefirm/forgefirm-keys/files/forgefirm-release.pub"
+
+# The key a public key file holds, as hex. Keys are compared by their bytes:
+# two files that hold one key differ as text by a line ending. A file that
+# does not hold a 32-byte key stops the script.
+key_hex () {
+  HEX=$(tr -d '[:space:]' < "$1" | base64 -d 2>/dev/null | xxd -p | tr -d '\n') || HEX=""
+  [ "${#HEX}" = 64 ] || die "'$1' does not hold a 32-byte public key"
+  printf '%s' "$HEX"
+}
+
+refuse_release_key () {
+  [ -f "$TRUSTED_PUB" ] || die "the trusted release key '$TRUSTED_PUB' is missing"
+  [ -f "$1" ] || die "dev public key '$1' not found"
+  A=$(key_hex "$1") || exit 1
+  B=$(key_hex "$TRUSTED_PUB") || exit 1
+  [ "$A" != "$B" ] \
+    || die "the dev key is the release key - forgefirm-dev.fw must not carry the release signature"
+}
+
 # --- dev mode -----------------------------------------------------------------
 if [ "$MODE" = "dev" ]; then
   KEY="${FORGEFIRM_DEV_KEY:?set FORGEFIRM_DEV_KEY to the dev signing key}"
+  [ -f "$KEY" ] || die "dev signing key '$KEY' not found"
+  refuse_release_key "${KEY%.priv}.pub"
   build_images
   resolve_ext4
   # The dev archive carries the dev image (forgetest, the bench tools), not
@@ -176,6 +235,14 @@ KEY="${FORGEFIRM_SIGNING_KEY:?set FORGEFIRM_SIGNING_KEY to the release signing k
 PUB="${KEY%.priv}.pub"
 [ -f "$KEY" ] || die "signing key '$KEY' not found"
 [ -f "$PUB" ] || die "public key '$PUB' not found"
+# The signing key is the key the image trusts: a machine verifies an update
+# against the release key its own image carries, so an archive signed with
+# any other key is one no machine installs as a release.
+[ -f "$TRUSTED_PUB" ] || die "the trusted release key '$TRUSTED_PUB' is missing"
+KEY_HEX=$(key_hex "$PUB") || exit 1
+TRUSTED_HEX=$(key_hex "$TRUSTED_PUB") || exit 1
+[ "$KEY_HEX" = "$TRUSTED_HEX" ] \
+  || die "the signing key is not the release key the image trusts ($TRUSTED_PUB)"
 # The dev image goes out with the release, signed with the dev key. No
 # machine trusts that key, so the panel installs forgefirm-dev.fw only with
 # the machine button held: an image with an open root login is never one a
@@ -184,19 +251,35 @@ DEV_KEY="${FORGEFIRM_DEV_KEY:?set FORGEFIRM_DEV_KEY to the dev signing key (it s
 DEV_PUB="${DEV_KEY%.priv}.pub"
 [ -f "$DEV_KEY" ] || die "dev signing key '$DEV_KEY' not found"
 [ -f "$DEV_PUB" ] || die "dev public key '$DEV_PUB' not found"
-[ "$(cat "$DEV_PUB")" != "$(cat "$PUB")" ] \
+DEV_HEX=$(key_hex "$DEV_PUB") || exit 1
+[ "$DEV_HEX" != "$KEY_HEX" ] \
   || die "the dev key is the release key - forgefirm-dev.fw must not carry the release signature"
+refuse_release_key "$DEV_PUB"
 
 echo "== gates =="
 
-# Repo state (informational when the build tree is not a git checkout).
+# Repo state. Staging may run from an rsynced build tree (a warning); a
+# release that is published may not: what it builds must be the pushed,
+# clean commit its tag names, or the tag and the binaries disagree and an
+# untracked file (a bench tool, say) rides into the dev image.
 if git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
   [ -z "$(git -C "$REPO" status --porcelain)" ] \
     || die "working tree is dirty - release from a clean tree"
   if ! git -C "$REPO" diff --quiet "@{upstream}" 2>/dev/null; then
+    [ "$PUBLISH" = 1 ] && die "HEAD differs from upstream - push before publishing"
     warn "HEAD differs from upstream - push before publishing"
   fi
+  # The release is attached to the tag v<version>, and the tag must name the
+  # commit this build is made from. Checked here, before the build and the
+  # signature: gh is told to create no tag of its own (--verify-tag).
+  if [ "$PUBLISH" = 1 ]; then
+    TAG_REV=$(git -C "$REPO" rev-parse -q --verify "v$VERSION^{commit}" 2>/dev/null) \
+      || die "no tag v$VERSION in $REPO - tag the release commit and push the tag before publishing"
+    [ "$TAG_REV" = "$(git -C "$REPO" rev-parse HEAD)" ] \
+      || die "tag v$VERSION names $TAG_REV, not HEAD - the release must be built from the commit its tag names"
+  fi
 else
+  [ "$PUBLISH" = 1 ] && die "$REPO is not a git checkout - a published release builds from a clean checkout"
   warn "$REPO is not a git checkout - repo-state gates skipped (rsynced build tree)"
 fi
 
@@ -204,6 +287,15 @@ fi
 BB_REL=$(sed -n 's/^FORGEFIRM_RELEASE ?= "\(.*\)"/\1/p' "$RELEASE_INC")
 [ "$BB_REL" = "$VERSION" ] \
   || die "FORGEFIRM_RELEASE in forgefirm-release.inc is '$BB_REL', not '$VERSION'"
+
+# The assets are staged beside their place and renamed into it when the last
+# gate has passed, so a run that a gate stops leaves no signed archive where
+# the publish command looks. A stage an earlier run left for this version
+# goes now, for the same reason: from here on the place holds the assets of
+# this run or nothing.
+STAGED="${RELEASE_STAGING_DIR:-$REPO/release-staging}/v$VERSION"
+STAGE="$STAGED.tmp"
+rm -rf "$STAGED" "$STAGE"
 
 # The beta rule: every release below 0.1.0 is a beta, and 0.1.0 is the
 # first release that is not. While the README carries the beta banner, a
@@ -219,7 +311,6 @@ fi
 # The installer must embed the pubkey matching the signing key, or every
 # install will refuse the published archive.
 INST_HEX=$(sed -n "s/^PUBKEY='\(.*\)'$/\1/p" "$INSTALLER" | tr -d '\\x')
-KEY_HEX=$(base64 -d "$PUB" | xxd -p | tr -d '\n')
 [ -n "$INST_HEX" ] || die "cannot extract the embedded pubkey from the installer"
 [ "$INST_HEX" = "$KEY_HEX" ] \
   || die "installer's embedded pubkey does not match the signing key - update install-forgefirm.sh"
@@ -229,6 +320,7 @@ resolve_ext4
 check_size "$EXT4"
 resolve_dev_ext4
 check_size "$DEV_EXT4"
+same_build "$EXT4" "$DEV_EXT4"
 
 # Rootfs version stamp.
 STAMP=$(debugfs -R "cat /etc/forgefirm-version" "$EXT4" 2>/dev/null)
@@ -303,7 +395,9 @@ fi
 echo "kas config gate OK (no debug-tweaks in the shared config)"
 
 echo "== pack + sign =="
-STAGE="${RELEASE_STAGING_DIR:-$REPO/release-staging}/v$VERSION"
+# Staged beside its place (see the version check above): three gates run
+# after the signatures (the factory-era verification, whose input is the
+# signed archive, the source bundle, and the documentation).
 mkdir -p "$STAGE"
 "$REPO/scripts/mkfw.sh" "$EXT4" "v$VERSION" "$STAGE/forgefirm.fw" "$KEY"
 "$REPO/scripts/mkfw.sh" "$DEV_EXT4" "v$VERSION-dev" "$STAGE/forgefirm-dev.fw" "$DEV_KEY"
@@ -311,7 +405,7 @@ mkdir -p "$STAGE"
 # Factory-era compat verification (fwup 0.14.2 wants raw 32-byte keys).
 if [ -n "${FWUP_COMPAT:-}" ]; then
   RAW=$(mktemp)
-  base64 -d "$PUB" > "$RAW"
+  tr -d '[:space:]' < "$PUB" | base64 -d > "$RAW"
   "$FWUP_COMPAT" -V -i "$STAGE/forgefirm.fw" -p "$RAW" \
     || { rm -f "$RAW"; die "factory-era fwup rejects the archive"; }
   rm -f "$RAW"
@@ -333,7 +427,7 @@ cp -L "${DEV_EXT4%.ext4}.wic.gz" "$STAGE/forgefirm-image-dev-glowforge.rootfs.wi
 # rootfs it never authorized would read as proof. The release says so
 # instead, and goes out as a prerelease.
 ASSETS="forgefirm.fw sha256sums.txt forgefirm-image-glowforge.rootfs.wic.gz"
-ASSETS="$ASSETS forgefirm-dev.fw forgefirm-image-dev-glowforge.rootfs.wic.gz"
+DEV_ASSETS="forgefirm-dev.fw forgefirm-image-dev-glowforge.rootfs.wic.gz"
 PRERELEASE=""
 rm -f "$STAGE/acceptance.json" "$STAGE/acceptance.md" "$STAGE/NO-ACCEPTANCE.txt"
 if [ "$GATED" = 1 ] && [ -f "$ART" ]; then
@@ -382,7 +476,7 @@ fi
 
 # Every attached file is bound to the release by the sums, the artifact
 # included.
-( cd "$STAGE" && sha256sum $(echo "$ASSETS" | tr ' ' '\n' | grep -v '^sha256sums.txt$') > sha256sums.txt )
+( cd "$STAGE" && sha256sum $(echo "$ASSETS $DEV_ASSETS" | tr ' ' '\n' | grep -v '^sha256sums.txt$') > sha256sums.txt )
 ls -la "$STAGE"
 
 # --- the documentation tag ----------------------------------------------------
@@ -401,6 +495,12 @@ else
   [ -z "$(git -C "$DOCS_DIR" status --porcelain)" ] \
     || die "forgefirm-docs has uncommitted changes; commit them before a release"
   if git -C "$DOCS_DIR" rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null 2>&1; then
+    # A tag an earlier run made names the documentation of that run. It
+    # must be the documentation this release ships with.
+    DOCS_TAG_REV=$(git -C "$DOCS_DIR" rev-parse "refs/tags/v$VERSION^{commit}")
+    DOCS_HEAD=$(git -C "$DOCS_DIR" rev-parse HEAD)
+    [ "$DOCS_TAG_REV" = "$DOCS_HEAD" ] \
+      || die "forgefirm-docs tag v$VERSION names $DOCS_TAG_REV, not HEAD ($DOCS_HEAD): remove the stale tag or check out the commit it names"
     echo "docs: tag v$VERSION already exists in $DOCS_DIR"
   else
     git -C "$DOCS_DIR" tag -a "v$VERSION" -m "ForgeFIRM v$VERSION" \
@@ -448,34 +548,15 @@ The source of everything in both images of this release is the
 `forgefirm-source-v*.tar.gz` asset.
 EOF
 fi
-# The dev image goes out with every release, and its open root login is
-# said where the download is.
-cat >> "$STAGE/notes.md" <<'EOF'
+# The dev image goes out with every release. Its words stay out of the
+# release body, which every machine's update notice shows: the two dev
+# assets carry a label on the release page, and the docs site's bench page
+# says the rest.
+DEV_LABEL="development only: root SSH open, not release-signed (docs.forgefirm.org/developers/bench)"
 
-## The dev image
-
-`forgefirm-dev.fw` and `forgefirm-image-dev-glowforge.rootfs.wic.gz` are the
-dev image of this release: the release image plus the acceptance tool and the
-bench tools. It is for development only. **It starts SSH at every boot, and
-root logs in with no password from anywhere on the machine's network.** A
-program that has the control panel's token can also make changes without a
-login. Every page of the control panel shows a red DEVELOPMENT IMAGE bar.
-`forgefirm-dev.fw` is not signed with the release key, so the control panel
-installs it only while the machine button is held.
-
-`forgefirm-image-dev-glowforge.rootfs.wic.gz` is for an SD card, on a
-control board with the SD card slot fitted (the factory leaves it off). The
-card has its own data partition: booted from the card, the machine keeps its
-settings, extensions and logs on the card, and the eMMC's own stay as they
-are. The rest of `/data` is the eMMC's, the WiFi configuration and the
-acceptance records among it. A newly written card starts as a finished setup
-with ForgeFIRM's default settings and the account `forgefirm`, password
-`forgefirm`, and at its first boot it takes the machine's SSH host keys,
-certificate, WiFi region and last saved time from the eMMC. The development bar says where
-the settings are on every boot. `forgefirm-dev.fw` goes into an eMMC slot and
-uses the eMMC's `/data`. More:
-<https://docs.forgefirm.org/developers/bench/>.
-EOF
+# Every gate has passed: the assets go to their place.
+mv "$STAGE" "$STAGED"
+STAGE="$STAGED"
 
 cat <<EOF
 
@@ -488,9 +569,11 @@ Pre-publish checklist (docs.forgefirm.org, Developers, "Release flow"):
 
 Publish (from a directory with an authenticated gh):
   cd "$STAGE"
-  gh release create "v$VERSION" --repo openglow-org/forgefirm \\
+  gh release create "v$VERSION" --repo openglow-org/forgefirm --verify-tag \\
     --title "ForgeFIRM v$VERSION" $NOTES_OPT $PRERELEASE \\
-    $ASSETS
+    $ASSETS \\
+    "forgefirm-dev.fw#forgefirm-dev.fw ($DEV_LABEL)" \\
+    "forgefirm-image-dev-glowforge.rootfs.wic.gz#forgefirm-image-dev-glowforge.rootfs.wic.gz ($DEV_LABEL)"
 
 Push the documentation tag with it:
   $DOCS_TAG_CMD
@@ -498,9 +581,11 @@ EOF
 
 if [ "$PUBLISH" = "1" ]; then
   command -v gh >/dev/null || die "--publish requested but gh is not on PATH"
-  ( cd "$STAGE" && gh release create "v$VERSION" --repo openglow-org/forgefirm \
+  ( cd "$STAGE" && gh release create "v$VERSION" --repo openglow-org/forgefirm --verify-tag \
       --title "ForgeFIRM v$VERSION" $NOTES_OPT $PRERELEASE \
-      $ASSETS ) \
+      $ASSETS \
+      "forgefirm-dev.fw#forgefirm-dev.fw ($DEV_LABEL)" \
+      "forgefirm-image-dev-glowforge.rootfs.wic.gz#forgefirm-image-dev-glowforge.rootfs.wic.gz ($DEV_LABEL)" ) \
     || die "gh release create failed"
   echo "== published v$VERSION =="
 fi

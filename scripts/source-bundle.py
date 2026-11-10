@@ -51,13 +51,41 @@ KAS_CONFIG = "kas/forgefirm-glowforge.yml:kas/source-bundle.yml"
 # named too. scripts/release.sh builds the same list.
 BUILD_TARGETS = ["forgefirm-image", "forgefirm-image-dev", "u-boot", "virtual/kernel",
                  "kernel-module-glowforge"]
+
+
+def bsp_checkout(repo):
+    """The meta-openglow checkout the build reads: the path the kas config's
+    meta-openglow entry names (the pinned clone, layers/meta-openglow, for a
+    release; the sibling ../meta-openglow in the development form), relative
+    to this repository. Read from the config, not guessed, so the bundle
+    carries the BSP that built the binaries."""
+    path = None
+    inside = False
+    with open(os.path.join(repo, "kas", "forgefirm-glowforge.yml"), encoding="utf-8") as f:
+        for line in f:
+            if line.lstrip().startswith("#") or not line.strip():
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent == 2 and line.strip() == "meta-openglow:":
+                inside = True
+                continue
+            if inside and indent <= 2:
+                break
+            if inside and indent == 4 and line.strip().startswith("path:"):
+                path = line.split(":", 1)[1].strip()
+    if not path:
+        sys.exit("source-bundle: the kas config names no path for meta-openglow")
+    return os.path.normpath(os.path.join(repo, path))
+
+
+BSP = bsp_checkout(REPO)
 # The layers that ForgeFIRM controls. The bundle carries them whole, because
 # they are the recipes that build the image. The upstream layers are in
 # metadata/LAYERS.txt with their revisions.
 FORGEFIRM_LAYERS = [
     ("meta-forgefirm", os.path.join(REPO, "meta-forgefirm")),
-    ("meta-glowforge-bsp", os.path.join(REPO, "..", "meta-openglow", "meta-glowforge-bsp")),
-    ("meta-openglow-core", os.path.join(REPO, "..", "meta-openglow", "meta-openglow-core")),
+    ("meta-glowforge-bsp", os.path.join(BSP, "meta-glowforge-bsp")),
+    ("meta-openglow-core", os.path.join(BSP, "meta-openglow-core")),
 ]
 # A recipe whose source is in the archive of another recipe. The archiver
 # skips these by design (archiver.bbclass, include_package).
@@ -242,13 +270,12 @@ def git_out(args, cwd):
 def layer_records(repo):
     """Every layer checkout of the build, with its remote and its
     revision."""
-    roots = [("forgefirm", repo),
-             ("meta-openglow", os.path.join(repo, "..", "meta-openglow"))]
+    roots = [("forgefirm", repo), ("meta-openglow", BSP)]
     layers_dir = os.path.join(repo, "layers")
     if os.path.isdir(layers_dir):
         for name in sorted(os.listdir(layers_dir)):
             path = os.path.join(layers_dir, name)
-            if os.path.isdir(os.path.join(path, ".git")):
+            if os.path.normpath(path) != BSP and os.path.isdir(os.path.join(path, ".git")):
                 roots.append((name, path))
     out = []
     for name, path in roots:

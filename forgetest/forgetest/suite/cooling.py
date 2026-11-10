@@ -15,12 +15,14 @@ from ..catalog import test
 from .. import hw
 
 _COOL_COVERS = [("forgectrl", "src/cool.*"), ("forgectrl", "src/coolfmt.*"), ("forgectrl", "src/diag.*"),
+                ("forgectrl", "src/led.*"),
                 ("forgectrl", "src/gates.*"), ("forgectrl", "src/airflow.*"),
                 ("forgectrl", "src/accel.*"),
                 ("forgectrl", "src/settings.*"),
                 ("forgectrl", "src/status.*"), ("forgectrl", "src/ui/**"),
                 ("grblhal-glowforge", "src/glowforge_cooling.*"),
                 ("kernel-module-glowforge", "src/thermal*"),
+                ("kernel-module-glowforge", "src/heater_lease.h"),
                 ("kernel-module-glowforge", "src/pic*")]
 
 
@@ -193,6 +195,20 @@ def fail_tier_stop(ctx):
         ctx.log("the crash fault ended with the run session after %s s: %s", cleared,
                 {k: _cool(fc).get(k) for k in ("phase", "verdict", "hold", "armed")})
         ctx.check(cleared is not None, "the crash fault did not end with the run session: %s", _cool(fc))
+        # It blocks the next job until the operator has seen it.
+        cs = _cool(fc)
+        ev["result"]["after_session"] = {k: cs.get(k) for k in ("verdict", "fire_ok", "attention")}
+        ctx.check(cs.get("verdict") == "ACK" and cs.get("fire_ok") is False,
+                  "the crash fault does not block the next job: %s", cs)
+        red = hw.button_pulses()
+        ev["result"]["button_pulses"] = red
+        ctx.check(red[0] and not red[1] and not red[2], "the button is not flashing red: %s", red)
+        st, _ = fc.post("/cool/attention/ack")
+        ctx.check(st == 200, "the acknowledgment was refused: %s", st)
+        freed = ctx.wait_for(lambda: _cool(fc).get("verdict") == "OK", 5)
+        ctx.check(freed is not None, "the acknowledgment did not free the machine: %s", _cool(fc))
+        ctx.check(ctx.wait_for(lambda: hw.button_lit() is False, 5) is not None,
+                  "the button is still lit after the acknowledgment")
     finally:
         fc.wait_idle(30, abort=ctx.aborted)
         st, body = fc.post("/settings", params=orig)

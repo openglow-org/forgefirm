@@ -304,13 +304,37 @@ def button_leds():
     return out
 
 
+def button_pulses():
+    """The three button LEDs' pulse_on in milliseconds, or None where
+    unreadable. A pulsing LED's target swings between 0 and 255, so this is what
+    tells a pattern."""
+    out = []
+    for name in BUTTON_LEDS:
+        try:
+            with open(leds_root() + name + "/pulse_on") as f:
+                out.append(int(f.read().strip()))
+        except (OSError, ValueError):
+            out.append(None)
+    return out
+
+
 def button_lit():
-    """True when any button LED is on, False when all three read 0, None
-    when none is readable."""
-    vals = [v for v in button_leds() if v is not None]
+    """True when any button LED is on or pulsing, False when all three read
+    0, None when none is readable."""
+    vals = [v for v in button_leds() + button_pulses() if v is not None]
     if not vals:
         return None
     return any(v > 0 for v in vals)
+
+
+def button_asks():
+    """True when the button breathes white, which a controller does only while
+    a job waits for the press; False in any other pattern, solid white under a
+    moving machine among them; None when no LED's pattern is readable."""
+    vals = button_pulses()
+    if all(v is None for v in vals):
+        return None
+    return all(v is not None and v > 0 for v in vals)
 
 
 # ----------------------------------------------------------- the button

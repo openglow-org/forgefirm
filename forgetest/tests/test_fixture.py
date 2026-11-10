@@ -501,8 +501,8 @@ class RoutingTests(unittest.TestCase):
         self.runner.probe_fixture(force=True)
         self.stub.arm_press = False
         run.fixture_takeover = True
-        saved = runner_mod.hw.button_lit
-        runner_mod.hw.button_lit = lambda: True
+        saved = runner_mod.hw.button_asks
+        runner_mod.hw.button_asks = lambda: True
         try:
             self.assertTrue(ctx.arm_press())
             deadline = time.time() + 5
@@ -510,7 +510,7 @@ class RoutingTests(unittest.TestCase):
                 time.sleep(0.05)
             self.assertIn(("button", "press"), self.stub.acts)
         finally:
-            runner_mod.hw.button_lit = saved
+            runner_mod.hw.button_asks = saved
 
     def test_an_actuator_lost_after_the_takeover_is_said_out_loud(self):
         """Falling back to the operator without a word is how one dropped
@@ -539,8 +539,8 @@ class RoutingTests(unittest.TestCase):
         # opted in: the press waits for the button to light
         self.stub.arm_press = True
         lit = {"v": False}
-        saved = runner_mod.hw.button_lit
-        runner_mod.hw.button_lit = lambda: lit["v"]
+        saved = runner_mod.hw.button_asks
+        runner_mod.hw.button_asks = lambda: lit["v"]
         try:
             seen[:] = []
             self.assertTrue(ctx.arm_press())
@@ -554,7 +554,7 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(run.evidence["actions"][1]["by"], "fixture")
             self.assertEqual(seen, [])                              # no notice went up
         finally:
-            runner_mod.hw.button_lit = saved
+            runner_mod.hw.button_asks = saved
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a FIFO for the switches' event device")
     def test_ready_reads_a_short_press_as_an_edge(self):
@@ -596,8 +596,8 @@ class RoutingTests(unittest.TestCase):
         ctx = Context(run, self.runner, self.reg["r.live"])
         self.runner.probe_fixture(force=True)
         lit = {"v": False}
-        saved = runner_mod.hw.button_lit
-        runner_mod.hw.button_lit = lambda: lit["v"]
+        saved = runner_mod.hw.button_asks
+        runner_mod.hw.button_asks = lambda: lit["v"]
         try:
             self.assertFalse(ctx.arm_press())            # the operator's press
             self.assertIsNotNone(run.notice)
@@ -709,7 +709,7 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(ctx.evidence["actions"][-1]["by"], "operator")
             self.assertIsNone(run.notice)
         finally:
-            runner_mod.hw.button_lit = saved
+            runner_mod.hw.button_asks = saved
 
 
 if __name__ == "__main__":

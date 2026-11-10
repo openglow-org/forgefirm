@@ -18,6 +18,7 @@ from . import laser      # noqa: F401,E402
 from . import camera     # noqa: F401,E402
 from . import update     # noqa: F401,E402
 from . import cloud      # noqa: F401,E402
+from . import cloudlatch  # noqa: F401,E402
 # Last: it stands on the setup record's consent and on the cloud suite's dark print.
 from . import exthost    # noqa: F401,E402
 from . import homeoff    # noqa: F401,E402

@@ -21,7 +21,6 @@ import helpers  # noqa: F401  (sys.path)
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCRIPT = os.path.join(REPO, "scripts", "source-bundle.py")
-META_OPENGLOW = os.path.join(REPO, "..", "meta-openglow")
 IMAGE = "forgefirm-image-glowforge.rootfs-20260101000000"
 DEV_IMAGE = "forgefirm-image-dev-glowforge.rootfs-20260101000000"
 
@@ -78,6 +77,7 @@ class Policy(unittest.TestCase):
         # The ForgeFIRM components are MIT and travel with the release too,
         # the dev image's forgetest among them.
         self.assertIn("forgectrl", self.policy["COPYLEFT_PN_INCLUDE"])
+        self.assertIn("forgeext", self.policy["COPYLEFT_PN_INCLUDE"])
         self.assertIn("gfcloud", self.policy["COPYLEFT_PN_INCLUDE"])
         self.assertIn("forgetest", self.policy["COPYLEFT_PN_INCLUDE"])
 
@@ -142,10 +142,50 @@ class Manifests(unittest.TestCase):
         return d
 
 
-@unittest.skipUnless(os.path.isdir(META_OPENGLOW),
-                     "the meta-openglow sibling checkout is not here")
+class Bsp(unittest.TestCase):
+    """The bundle carries the meta-openglow checkout the kas config builds
+    from: the pinned clone for a release, the sibling in the development form."""
+
+    def kas(self, text):
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        write(os.path.join(d, "kas", "forgefirm-glowforge.yml"), text)
+        return d
+
+    def test_the_pinned_clone_for_a_release(self):
+        d = self.kas("\n".join([
+            "repos:",
+            "  # meta-openglow:",
+            "  #   path: ../meta-openglow",
+            "  meta-openglow:",
+            "    url: https://example.org/meta-openglow.git",
+            "    branch: scarthgap",
+            "    path: layers/meta-openglow",
+            "    layers:",
+            "      meta-glowforge-bsp:",
+            "  poky:",
+            "    path: layers/poky",
+            ""]))
+        self.assertEqual(load_script().bsp_checkout(d),
+                         os.path.normpath(os.path.join(d, "layers/meta-openglow")))
+
+    def test_the_sibling_in_the_development_form(self):
+        d = self.kas("\n".join([
+            "repos:",
+            "  meta-openglow:",
+            "    path: ../meta-openglow",
+            "    layers:",
+            "      meta-glowforge-bsp:",
+            ""]))
+        self.assertEqual(load_script().bsp_checkout(d),
+                         os.path.normpath(os.path.join(d, "..", "meta-openglow")))
+
+
 class Pack(unittest.TestCase):
-    """The bundle end to end, on a deploy directory of made-up recipes."""
+    """The bundle end to end, on a deploy directory of made-up recipes and a
+    made-up meta-openglow checkout: the script reads the BSP's place from the
+    kas config, and a test run has no build's checkout there."""
 
     def setUp(self):
         import tempfile
@@ -154,6 +194,14 @@ class Pack(unittest.TestCase):
         self.addCleanup(__import__("shutil").rmtree, self.root, True)
         self.deploy = os.path.join(self.root, "deploy")
         self.out = os.path.join(self.root, "out")
+        bsp = os.path.join(self.root, "meta-openglow")
+        for layer in ("meta-glowforge-bsp", "meta-openglow-core"):
+            write(os.path.join(bsp, layer, "conf", "layer.conf"),
+                  'BBFILE_COLLECTIONS += "%s"\n' % layer)
+        self.mod.BSP = bsp
+        self.mod.FORGEFIRM_LAYERS = [
+            (name, path if name == "meta-forgefirm" else os.path.join(bsp, name))
+            for name, path in self.mod.FORGEFIRM_LAYERS]
 
     def run_main(self, packages, archives, image_packages=(), images=(IMAGE,)):
         make_deploy(self.deploy, packages, archives, image_packages)
@@ -195,6 +243,7 @@ class Pack(unittest.TestCase):
         for name in ("README.md", "SOURCES.txt", "MANIFEST.json",
                      "licenses/license.manifest", "licenses/image_license.manifest",
                      "metadata/LAYERS.txt", "metadata/meta-forgefirm.tar.gz",
+                     "metadata/meta-glowforge-bsp.tar.gz", "metadata/meta-openglow-core.tar.gz",
                      "metadata/kas/source-bundle.yml"):
             self.assertIn("forgefirm-source-v0.0.1/" + name, names)
         self.assertEqual(manifest["release"], "v0.0.1")

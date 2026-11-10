@@ -13,6 +13,7 @@ import sys
 import time
 
 from ..catalog import test
+from .. import hw
 from .forgectrl import lan_ip
 from .image import kernel_config
 from .cloud import OFFLINE_STEP, Offline, dark_print_body, enter_offline, latch_locked, offline_cleanup, offline_job
@@ -856,12 +857,13 @@ def _frozen(id_):
              "when it lights."],
       description="The reference package runs, its heartbeat advancing twice a second, and a dark "
                   "cloud print opens a real armed window over it: the cloud suite's dark-print "
-                  "helper, whose latch checks still run (locked at the button, unlocked for the run, "
-                  "locked after it), and the print completes. Sampled five times a second from before the button to after the end: the "
+                  "helper, whose latch checks still run (locked before the print, unlocked at the button "
+                  "and through the run, locked after it), and the print completes. Sampled five times a second from before the button to after the end: the "
                   "engine's armed flag, the group's frozen state as the kernel reports it, and the "
                   "heartbeat. The window is open for at least 10 s. From 2 s after it opens to its "
                   "close the group reads frozen in every sample and the heartbeat does not move, the "
-                  "freeze is in place before the run starts (the latch unlocks only for the run), and "
+                  "freeze is in place before the run starts (the kernel's first running sample; how "
+                  "far it led the latch's unlock for the press is recorded), and "
                   "within 3 s of the close the group is thawed and the heartbeat advances again. The "
                   "service is the same process throughout. A background capture is refused in words "
                   "while the window is open and served again once it closes, which is the other half "
@@ -895,7 +897,8 @@ def armed_freeze(ctx):
             st_, cool = fc.get("/cool/status")
             armed = bool(cool.get("armed")) if st_ == 200 and isinstance(cool, dict) else None
             samples.append((time.time(), armed, _frozen(REF_ID), _read(beat_path).strip(),
-                            (_svc(REF_ID) or {}).get("pid"), latch_locked()))
+                            (_svc(REF_ID) or {}).get("pid"), latch_locked(),
+                            (hw.sysfs_read("cnc/state") or "").startswith("running")))
             # One background capture from inside the window. The refusal is
             # decided before any frame is taken, so it costs the cut nothing;
             # if it were served instead, that is what this case is here to
@@ -946,13 +949,19 @@ def armed_freeze(ctx):
                   "(the first %.1f s after it opened)", len(thawed), len(inside), (thawed[0][0] - t_open) if thawed else 0)
         beats = {x[3] for x in inside}
         ctx.check(len(beats) == 1, "the heartbeat moved inside the armed window: %s", sorted(beats)[:6])
-        # the latch unlocks only for the run: its first unlocked sample is the run's start
-        run_start = next((x[0] for x in samples if x[5] is False), None)
-        ctx.check(run_start is not None, "the latch never read unlocked: the print did not run under the samples")
+        # The freeze has to be in place before the run starts: the first sample in which the
+        # kernel plays the job. The client unlocks the latch earlier, once the cooling verdict
+        # has passed and before it asks for the press; nothing moves or fires between that
+        # unlock and the run, and how far the freeze led the unlock is kept as evidence.
+        unlocked = next((x[0] for x in samples if x[5] is False), None)
+        ctx.check(unlocked is not None, "the latch never read unlocked: the print did not arm under the samples")
+        run_start = next((x[0] for x in samples if x[0] >= t_open and x[6]), None)
+        ctx.check(run_start is not None, "the kernel never read running: the print did not run under the samples")
         ctx.check(first_frozen is not None and first_frozen <= run_start,
-                  "the run started before the freeze was in place (frozen %s, the latch unlocked %s after the window opened)",
+                  "the run started before the freeze was in place (frozen %s, running %s after the window opened)",
                   None if first_frozen is None else round(first_frozen - t_open, 2), round(run_start - t_open, 2))
         ev["freeze_led_the_run_s"] = round(run_start - first_frozen, 2)
+        ev["freeze_led_the_unlock_s"] = round(unlocked - first_frozen, 2)
         after = [x for x in samples if x[0] >= t_close + 3.0]
         ctx.check(after and all(x[2] is False for x in after), "3 s after the close the group is not thawed: %s",
                   [x[2] for x in after][:8])
@@ -976,9 +985,11 @@ def armed_freeze(ctx):
                   "a background capture after the window -> %s (%d bytes)", st, len(after_body or b""))
         ctx.log("a background capture inside the window -> %s (%s); after it -> %s, %d bytes", cam_st, words, st,
                 len(after_body or b""))
-        ctx.log("the armed window was open %.1f s; frozen %.2f s after it opened and %.2f s before the latch unlocked "
-                "for the run, in every one of %d samples from 2 s in to the close, the heartbeat still; thawed %.2f s "
-                "after the close", ev["window_s"], ev["freeze_lag_s"], ev["freeze_led_the_run_s"], len(inside),
+        ctx.log("the armed window was open %.1f s; frozen %.2f s after it opened, %.2f s before the run started "
+                "(%.2f s against the latch's unlock for the press), in every one of %d samples from 2 s in to the close, "
+                "the heartbeat still; thawed %.2f s "
+                "after the close", ev["window_s"], ev["freeze_lag_s"], ev["freeze_led_the_run_s"],
+                ev["freeze_led_the_unlock_s"], len(inside),
                 ev["thaw_lag_s"] if ev["thaw_lag_s"] is not None else -1)
     finally:
         _put_back(ctx, fc, work, prior, etag, raw, dir_mode)

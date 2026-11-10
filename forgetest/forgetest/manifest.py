@@ -228,6 +228,15 @@ HOST_TESTED = [
     # bundle reader parses, the job summary, the flight recorder's window,
     # the cadence, the clock step.
     ("forgectrl", "src/senslogfmt.*", "forgectrl:tests/senslog_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The coolant flow watch: its arithmetic and its watch on a model of the
+    # flow board, then its heater writer on a fake clock and sysfs tree (the
+    # kernel lease, the engine's yields, a stale engine, the readings
+    # corrected). No catalog test turns the watch on, so none covers it.
+    ("forgectrl", "src/flowcalc.*", "forgectrl:tests/flowwatch_test.c", "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "src/flowwatch.*", "forgectrl:tests/flowwatch_test.c", "forgectrl:.github/workflows/build.yml"),
+    ("forgectrl", "src/flowrun.*", "forgectrl:tests/flowrun_test.c", "forgectrl:.github/workflows/build.yml"),
+    # What the slot inventory says about the next boot (the reset's gate).
+    ("forgectrl", "src/slotcalc.*", "forgectrl:tests/slotcalc_test.c", "forgectrl:.github/workflows/build.yml"),
     # The sensors logger's thread: its start records under its own program
     # name, read through the sysfs root, no serial in them (its 1 Hz reads
     # are of the sensors the cooling engine's catalog tests already judge).

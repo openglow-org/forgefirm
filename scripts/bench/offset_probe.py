@@ -29,9 +29,11 @@ Usage: offset_probe.py [repeat]   (repeats of the exhaust-run edge, default 2)
                                    35 mm +X and 10 mm +Y free; no laser, no press)
 Record: FORGETEST_BENCH_DATA or /tmp, offset_probe_<stamp>.json (jog: offset_jog_<stamp>.json)
 """
+import atexit
 import json
 import math
 import os
+import signal
 import sys
 import threading
 import time
@@ -50,7 +52,7 @@ ADC_F = 1024.0 * 1.3
 RINF = 10000.0 * math.exp(-3380.0 / 298.15)
 
 
-from gfbench import degc
+from gfbench import degc, forgectrl_get, forgectrl_post
 
 
 def rd(path):
@@ -353,7 +355,42 @@ def run_armed():
     return 0 if not lit else 1
 
 
+def flow_watch_off():
+    """The coolant flow watch, when an owner has it on, holds the loop heater
+    at idle and writes it every second: the probe's heater and pump steps want
+    the heater its own. The watch goes off for the run and comes back at exit
+    (a SIGTERM or a lost terminal included). Returns False when it would not
+    turn off."""
+    st, s = forgectrl_get('/settings')
+    if st != 200 or not isinstance(s, dict):
+        return True                    # no forgectrl: no watch either
+    was = s.get('cool_flow_watch', '')
+    if was in ('', '0'):
+        return True
+    st, _ = forgectrl_post('/settings', params={'cool_flow_watch': '0'})
+    if st != 200:
+        print('REFUSED: the coolant flow watch could not be turned off (%s)' % st)
+        return False
+    atexit.register(lambda: forgectrl_post('/settings', params={'cool_flow_watch': was}))
+    # Only "off" is the watch out of the heater's way: "wait" is a watch that
+    # has not begun, and one that begins may hold the loop.
+    for _ in range(15):                # it reads its setting every 5 s
+        st, fw = forgectrl_get('/cool/flow')
+        if st == 200 and isinstance(fw, dict) and fw.get('watch') == 'off':
+            print('the coolant flow watch is off for the probe')
+            return True
+        time.sleep(1)
+    print('REFUSED: the coolant flow watch did not turn off in 15 s')
+    return False
+
+
+def stop_on_signal(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main():
+    signal.signal(signal.SIGTERM, stop_on_signal)
+    signal.signal(signal.SIGHUP, stop_on_signal)
     if len(sys.argv) > 1 and sys.argv[1] == 'jog':
         return run_jog()
     if len(sys.argv) > 1 and sys.argv[1] == 'armed':
@@ -370,6 +407,8 @@ def main():
         'tec': SYSFS + 'thermal/tec_on',
         'lid_led': LEDS + 'lid_led/brightness',
     }
+    if not flow_watch_off():
+        return 2
     orig = {k: rd(p) for k, p in attrs.items()}
     print('start values: %s' % orig)
     if orig['pump'] != '1' or orig['heater'] not in ('0', None):
@@ -422,7 +461,16 @@ def main():
                 print('  %+7.1f s  %s' % (t - edges[0][0], label), flush=True)
             else:
                 edges.append((time.time(), label))
-            time.sleep(dwell)
+            if key == 'heater' and val:
+                # The kernel holds a heater write above zero only for its
+                # lease (heater_lease_ms, 5 s): written again every second.
+                end = time.time() + dwell
+                while time.time() < end:
+                    time.sleep(min(1.0, max(0.0, end - time.time())))
+                    if time.time() < end:
+                        wr(attrs[key], val)
+            else:
+                time.sleep(dwell)
     finally:
         for k, p in attrs.items():
             if orig[k] is not None:

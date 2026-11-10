@@ -504,7 +504,7 @@ class Context:
         or a failed connect the box made no press, and the record stays as
         it was: the press was a person's. A button still lit, or
         unreadable, is False: the operator is asked."""
-        if hw.button_lit() is not False:
+        if hw.button_asks() is not False:
             return False
         if getattr(err, "sent", False):
             rec["by"] = "fixture"
@@ -537,12 +537,12 @@ class Context:
 
         def watch():
             t0 = time.time()
-            while hw.button_lit() is not True:
+            while hw.button_asks() is not True:
                 if not standing() or time.time() - t0 > lit_timeout:
                     return
                 if run.aborted.wait(0.05):
                     return
-            while hw.button_lit() is not False:
+            while hw.button_asks() is not False:
                 if not standing() or time.time() - t0 > lit_timeout + ARM_PRESS_WAIT_S:
                     return
                 if run.aborted.wait(0.05):
@@ -588,7 +588,7 @@ class Context:
         self.log("ARM: the fixture presses when the button lights (the bench's arm_press opt-in)")
 
         def press():
-            lit = self.wait_for(hw.button_lit, lit_timeout)
+            lit = self.wait_for(hw.button_asks, lit_timeout)
             if lit is None:
                 self.log("ARM: the button never lit within %d s - asking the operator", lit_timeout)
                 self.notice(text)

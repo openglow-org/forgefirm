@@ -34,7 +34,8 @@ job after it.
      jogs, and the panel operations (the tray's mode among them) add steps
      to the shipped stream and not one FIRE tick. A jog block carries the modal spindle state, so the
      stream's mask on jogging is the only thing that keeps a jog dark, and
-     this is what holds the port to it
+     this is what holds the port to it. The window stays open through
+     every one of them up to the home, and the home closes it
   9. "sender out" keeps senders from the network out, and only on an idle
      machine with a quiet sender: it is refused while a sender line runs
      (a dwell), within 2 s of the sender's last line, and while a program
@@ -561,6 +562,8 @@ def test_port_dark():
             replies["jog " + words] = s.port.request("jog " + words)
         replies["release"] = s.port.request("release")      # refused: a laser job is armed
         replies["energize"] = s.port.request("energize")
+        time.sleep(0.3)
+        closed_before_home = s.sender.saw("laser disarmed")
         replies["home"] = s.port.request("home")            # manual: declares X0 Y0, moves nothing
         replies["tray out"] = s.port.request("tray out")    # the Z frame moves, the head does not
         replies["tray in"] = s.port.request("tray in")
@@ -575,8 +578,10 @@ def test_port_dark():
             fail("[dark] the tray op under the open window was refused: %r" % replies)
         if steps1 <= steps0:
             fail("[dark] the port jogs shipped no step: the case would prove nothing")
-        if s.sender.saw("laser disarmed"):
-            fail("[dark] the armed window closed during the case: %r" % replies)
+        if closed_before_home:
+            fail("[dark] the armed window closed before the home: %r" % replies)
+        if not s.sender.saw("laser disarmed"):
+            fail("[dark] the home left the armed window open: %r" % replies)
         if fire1 != fire0:
             fail("[dark] port operations under an open window with M3 S500 shipped %d FIRE ticks: %r"
                  % (fire1 - fire0, replies))

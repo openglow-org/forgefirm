@@ -3,8 +3,10 @@
 # https://community.openglow.org
 # SPDX-License-Identifier:    MIT
 
+import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -14,8 +16,8 @@ import unittest
 from forgetest.suite import image
 
 # The layer's scripts, when the tests run from a checkout of forgefirm.
-LAYER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                     "meta-forgefirm", "recipes-forgefirm")
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+LAYER = os.path.join(REPO, "meta-forgefirm", "recipes-forgefirm")
 # The BSP layer's interfaces file, from the meta-openglow checkout beside
 # forgefirm's (forgetest-ci checks out its scarthgap branch there).
 BSP_INTERFACES = os.path.join(
@@ -338,7 +340,9 @@ class PackLicensesTests(unittest.TestCase):
 # directory over /data (made for the run where the host has none, and
 # removed after). The kernel command line and the card's data partition
 # (an ext4 image file, loop-mounted) are the script's two host-test
-# settings. Then what /data shows, read back as JSON, with the eMMC's own
+# settings. A directory named in the scratch tree's busy file (one path
+# under /data to a line) gets a mount of its own first, so it cannot be
+# removed. Then what /data shows, read back as JSON, with the eMMC's own
 # files read beside it from the scratch tree. Exit 97: the namespace could
 # not be set up.
 CARD_DATA = r"""
@@ -347,7 +351,13 @@ made=
 [ -d /data ] || { mkdir /data && made=1; } || exit 97
 mount --make-rprivate / && mount -t tmpfs tmpfs /run &&
     mount --bind "$T/emmc" /data || { [ -z "$made" ] || rmdir /data; exit 97; }
-FF_CMDLINE="$T/cmdline" FF_CARD_DEV="$T/card.img" sh "$SCRIPT" start > "$T/script.log" 2>&1
+if [ -f "$T/busy" ]; then
+    while read -r d; do
+        mount -t tmpfs tmpfs "/data/$d" || { umount -R /data; [ -z "$made" ] || rmdir /data; exit 97; }
+    done < "$T/busy"
+fi
+FF_CMDLINE="$T/cmdline" FF_CARD_DEV="$T/card.img" FF_DEV_MARKER="$T/dev-marker" \
+    sh "$SCRIPT" start > "$T/script.log" 2>&1
 echo "rc=$?"
 python3 - "$T" <<'PY'
 import errno, json, os, sys
@@ -379,6 +389,8 @@ print("probe=" + json.dumps({
     "timestamp": read("/data/forgefirm/timestamp"),
     "archive": read("/data/forgefirm/archive/manifest"),
     "archive_write": write("/data/forgefirm/archive") if os.path.isdir("/data/forgefirm/archive") else None,
+    "data_write": write("/data/forgefirm"),
+    "logs_write": write("/data/log/forgefirm"),
     "emmc_view_write": write("/run/forgefirm-emmc") if os.path.isdir("/run/forgefirm-emmc/forgefirm") else None,
     "system_log": read("/data/log/forgefirm/system/system.log"),
     "results": read("/data/forgetest/results.jsonl"),
@@ -415,12 +427,22 @@ class CardDataTests(unittest.TestCase):
                     f.write(text)
                 os.chmod(path, 0o600)
 
-    def run_boot(self, cmdline, emmc, card=None):
+    def run_boot(self, cmdline, emmc, card=None, dev=True, busy=()):
         """One boot of the step: the eMMC's /data tree and the card's data
-        partition (None: no partition), as {path: text}. Returns the probe."""
+        partition (None: no partition), as {path: text}, on a dev image or a
+        release one; busy names directories under /data that cannot be
+        removed (each has a mount of its own). Returns the probe."""
         t = tempfile.mkdtemp(prefix="forgetest-card.")
+        # Root's files go through sudo; where there is no root (the boot did
+        # not run) the tree is this user's own.
+        self.addCleanup(shutil.rmtree, t, ignore_errors=True)
         self.addCleanup(subprocess.run, ["sudo", "-n", "rm", "-rf", t], capture_output=True)
         self.tree(os.path.join(t, "emmc"), emmc)
+        if busy:
+            with open(os.path.join(t, "busy"), "w") as f:
+                f.write("".join(d + "\n" for d in busy))
+        if dev:
+            open(os.path.join(t, "dev-marker"), "w").close()
         with open(os.path.join(t, "cmdline"), "w") as f:
             f.write(cmdline + "\n")
         if card is not None:
@@ -438,7 +460,13 @@ class CardDataTests(unittest.TestCase):
         if p is None or "rc=" not in p.stdout:
             if p is not None and p.returncode == 97:
                 raise AssertionError("the namespace was made but not set up: %s" % p.stderr.strip())
-            self.skipTest("no namespace can be made here (root through sudo -n)")
+            why = "no namespace can be made here (root through sudo -n)"
+            # A hosted runner has root through sudo: there, a boot that did
+            # not run is a hang or a broken harness, never a skip.
+            if os.environ.get("GITHUB_ACTIONS"):
+                self.fail("%s: %s" % (why, "the boot did not finish in 120 s" if p is None
+                                      else "status %s, %s" % (p.returncode, p.stderr.strip())))
+            self.skipTest(why)
         self.assertEqual(field(p.stdout, "rc"), "0", p.stdout + p.stderr)
         return json.loads(field(p.stdout, "probe"))
 
@@ -480,15 +508,35 @@ class CardDataTests(unittest.TestCase):
         self.assertEqual(pr["emmc_conf"], self.EMMC["forgefirm/forgefirm.conf"])
 
     def test_any_other_boot_leaves_data_as_mountall_made_it(self):
-        not_ours = {"lost+found/.keep": ""}
-        for cmdline, card, state in (("root=/dev/mmcblk2p1 rw", self.CARD, "emmc"),
-                                     ("root=/dev/mmcblk1p1 rw", None, "card-none"),
-                                     ("root=/dev/mmcblk1p1 rw", not_ours, "card-failed")):
-            pr = self.run_boot(cmdline, self.EMMC, card)
+        for cmdline, card, dev, state in (("root=/dev/mmcblk2p1 rw", self.CARD, True, "emmc"),
+                                          ("root=/dev/mmcblk1p1 rw", None, True, "card-none"),
+                                          ("root=/dev/mmcblk1p1 rw", self.CARD, False, "card-none")):
+            pr = self.run_boot(cmdline, self.EMMC, card, dev=dev)
             self.assertEqual(pr["state"], state, pr["log"])
             self.assertEqual((pr["users"], pr["system_log"]), (self.EMMC["forgefirm/users"], "bench work\n"),
                              "%s: %s" % (state, pr))
             self.assertIsNone(pr["emmc_view_write"], state)
+            self.assertEqual(pr["data_write"], "ok", state)
+
+    def test_a_card_whose_data_partition_cannot_be_used_fails_closed(self):
+        # Not ForgeFIRM's: the eMMC's settings are shown, read-only, and the
+        # boot's logs go to RAM, so the dev image never writes the eMMC's.
+        pr = self.run_boot("root=/dev/mmcblk1p1 rw", self.EMMC, {"lost+found/.keep": ""})
+        self.assertEqual(pr["state"], "card-failed", pr["log"])
+        self.assertEqual(pr["users"], self.EMMC["forgefirm/users"], pr)
+        self.assertEqual(pr["data_write"], "EROFS", pr)
+        self.assertIsNone(pr["system_log"], "the eMMC's logs show under the boot's RAM logs")
+        self.assertEqual(pr["logs_write"], "ok", pr)
+        self.assertEqual(pr["emmc_conf"], self.EMMC["forgefirm/forgefirm.conf"])
+
+    def test_a_failed_card_on_an_emmc_with_no_forgefirm_folder_runs_from_ram(self):
+        # Nothing on the eMMC to keep: the boot's folder is in RAM, writable,
+        # so the host keys, the certificate and the log rules can be made.
+        emmc = {"etc/wpa_supplicant.conf": "network={}\n"}
+        pr = self.run_boot("root=/dev/mmcblk1p1 rw", emmc, {"lost+found/.keep": ""})
+        self.assertEqual(pr["state"], "card-failed", pr["log"])
+        self.assertEqual((pr["data_write"], pr["logs_write"]), ("ok", "ok"), pr)
+        self.assertIsNone(pr["emmc_users"], "nothing lands on the eMMC")
 
     def test_a_requested_reset_clears_the_folder_but_what_an_install_keeps(self):
         emmc = dict(self.EMMC)
@@ -501,6 +549,83 @@ class CardDataTests(unittest.TestCase):
         self.assertEqual(pr["listing"], ["archive", "legacy-logs", "random-seed", "ssh", "timestamp", "tls"],
                          pr["log"])
         self.assertEqual((pr["results"], pr["system_log"]), ("{}\n", "bench work\n"), pr)
+
+    def test_a_reset_that_could_not_remove_everything_keeps_its_request(self):
+        # The package's directory cannot be removed: the rest goes, and the
+        # request stays for the next boot.
+        emmc = dict(self.EMMC)
+        emmc.update({"forgefirm/reset-requested": "requested\n", "forgefirm/setup.json": "{}\n",
+                     "forgefirm/ext/org.example/state": "s\n"})
+        pr = self.run_boot("root=/dev/mmcblk2p2 rw", emmc, busy=["forgefirm/ext/org.example"])
+        self.assertEqual(pr["listing"], ["archive", "ext", "reset-requested", "ssh", "timestamp", "tls"],
+                         pr["log"])
+
+    def test_a_failed_card_boot_runs_no_reset(self):
+        # The folder shown is the eMMC's, read-only: the request waits, and
+        # nothing tries the folder (a removal tried there is refused, and the
+        # refusal names the file).
+        emmc = dict(self.EMMC)
+        emmc.update({"forgefirm/reset-requested": "requested\n", "forgefirm/setup.json": "{}\n"})
+        pr = self.run_boot("root=/dev/mmcblk1p1 rw", emmc, {"lost+found/.keep": ""})
+        self.assertEqual(pr["state"], "card-failed", pr["log"])
+        self.assertIn("reset-requested", pr["listing"], pr["log"])
+        self.assertIn("setup.json", pr["listing"], pr["log"])
+        self.assertNotIn("/data/forgefirm/setup.json", pr["log"])
+
+
+def pinned_forgectrl_file(path):
+    """A file of forgectrl at the revision the recipe pins, from the pinned
+    sources scripts/manifest-from-tree.py fetched into this checkout
+    (.manifest-cache); None when they do not hold it."""
+    with open(os.path.join(LAYER, "forgectrl", "forgectrl-pin.inc"), encoding="utf-8") as f:
+        rev = re.search(r'^SRCREV = "([0-9a-f]{40})"$', f.read(), re.M).group(1)
+    for repo in sorted(glob.glob(os.path.join(REPO, ".manifest-cache", "*"))):
+        try:
+            p = subprocess.run(["git", "-C", repo, "show", "%s:%s" % (rev, path)], capture_output=True)
+        except OSError:
+            return None
+        if p.returncode == 0:
+            return p.stdout.decode("utf-8", "replace")
+    return None
+
+
+@unittest.skipUnless(os.path.isdir(LAYER), "needs a forgefirm checkout")
+class LogTreeTests(unittest.TestCase):
+    """The logging tree under /data/log/forgefirm: a directory that gets a
+    log and no rotation grows until /data is full."""
+
+    TREE = r"/data/log/forgefirm/([\w.-]+)"
+
+    def test_every_directory_that_gets_a_log_is_rotated(self):
+        def text(*rel):
+            with open(os.path.join(REPO, *rel), encoding="utf-8") as f:
+                return f.read()
+        rules = "\n".join(ln for ln in text("meta-forgefirm", "recipes-forgefirm", "forgefirm-logging", "files",
+                                            "forgefirm.logrotate").splitlines() if not ln.lstrip().startswith("#"))
+        rotated = set(re.findall(self.TREE + r"/\*\.log", rules))
+        # The directories this repository's own files write: the default
+        # rules of the logging init script, and the installer's log.
+        ours = set(re.findall(self.TREE + "/", text("meta-forgefirm", "recipes-forgefirm", "forgefirm-logging",
+                                                    "files", "forgefirm-logging.init")))
+        ours |= set(re.findall(r'^LOG_DIR="%s"$' % self.TREE, text("scripts", "install-forgefirm.sh"), re.M))
+        self.assertTrue({"system", "install"} <= ours, ours)
+        self.assertEqual(ours - rotated, set(), "no rotation for a directory this repository writes")
+        # The loggers themselves are forgectrl's list (it renders their
+        # rsyslog rules and makes their directories), with the directories
+        # of the tree no logger feeds, read at the pinned revision.
+        logs_c = pinned_forgectrl_file("src/logs.c")
+        if logs_c is None:
+            why = "forgectrl at its pin is not in .manifest-cache (scripts/manifest-from-tree.py fetches it)"
+            if os.environ.get("GITHUB_ACTIONS"):
+                self.fail(why)
+            self.skipTest(why + ": the logger list was not compared")
+        loggers = set()
+        for array in ("logs_names", "tree_extra_names"):
+            m = re.search(r"\b%s\[\]\s*=\s*\{(.*?)\};" % array, logs_c, re.S)
+            self.assertIsNotNone(m, "forgectrl's src/logs.c has no %s[]" % array)
+            loggers |= set(re.findall(r'"([^"]+)"', m.group(1)))
+        self.assertTrue({"forgectrl", "system"} <= loggers, loggers)
+        self.assertEqual(loggers - rotated, set(), "no rotation for a directory of forgectrl's logging tree")
 
 
 class RootfsLintTests(unittest.TestCase):

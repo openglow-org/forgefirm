@@ -128,6 +128,98 @@ class BaselineTests(BaselineFixture, unittest.TestCase):
         left = self.bl().enforce("post", captured=None)
         self.assertEqual([(x.item, x.action) for x in left], [("cnc/state", "unrestorable")])
 
+    def test_loop_heater_is_the_flow_watchs_only_at_its_duty(self):
+        b = self.bl()
+        # Holding at 3.3 %: the heater at that duty is the watch's own.
+        self._attr("thermal/heater_pwm", "2162")
+        b._flow_status = lambda: {"watch": "hold", "duty": 3.3}
+        self.assertEqual(b.enforce("post", captured=None), [])
+        self.assertEqual(self._read("thermal/heater_pwm"), "2162")
+        # Anything else is a leftover, put back to 0: a heater far from the
+        # hold's duty, one under a resting watch (its heater is off), one with
+        # the watch off or not there.
+        for status, value in (({"watch": "hold", "duty": 3.3}, "65535"),
+                              ({"watch": "rest", "duty": None}, "2162"),
+                              ({"watch": "off"}, "2162"),
+                              ({}, "2162")):
+            self._attr("thermal/heater_pwm", value)
+            b._flow_status = lambda s=status: s
+            left = b.enforce("post", captured=None)
+            self.assertEqual([(x.item, x.found, x.action) for x in left],
+                             [("thermal/heater_pwm", value, "restored")], status)
+            self.assertEqual(self._read("thermal/heater_pwm"), "0")
+        # A hold that starts between the two reads of the watch.
+        self._attr("thermal/heater_pwm", "2162")
+        seq = iter(({"watch": "rest"}, {"watch": "hold", "duty": 3.3}))
+        b._flow_status = lambda: next(seq)
+        self.assertEqual(b.enforce("post", captured=None), [])
+
+    def test_a_failure_left_for_acknowledgment_is_acknowledged_and_named(self):
+        b = self.bl()
+        posted = []
+        status = {"phase": "idle", "armed": False, "hold": False,
+                  "attention": {"standing": True, "live": False, "verdict": "CRASH"},
+                  "notices": [{"seq": 3, "verdict": "BUMP"}]}
+        b.fc_get = lambda path: (200, status) if path == "/cool/status" else (None, None)
+        b.fc_post = lambda path, **kw: posted.append(path) or (200, {})
+        left = []
+        b._phase = "pre"
+        b._cool_side(left)
+        self.assertEqual(posted, ["/cool/attention/ack"], "before a test the panel's notices stand")
+        posted[:] = []
+        left = []
+        b._phase = "post"
+        b._cool_side(left, {"notices": {}})         # no notice stood before the run
+        self.assertEqual([(x.item, x.found, x.action) for x in left],
+                         [("attention", "CRASH", "restored (acknowledged)")])
+        self.assertEqual(posted, ["/cool/attention/ack", "/cool/notices/dismiss"])
+        # A failure that still stands is not acknowledged away.
+        status["attention"] = {"standing": True, "live": True, "verdict": "CRASH"}
+        status["notices"] = []
+        posted[:] = []
+        left = []
+        b._cool_side(left)
+        self.assertEqual(posted, [])
+
+    def test_the_runs_notices_are_recorded_and_those_from_before_it_stand(self):
+        b = self.bl()
+        posted = []
+        status = {"phase": "idle", "armed": False, "hold": False, "attention": {},
+                  "notices": [{"seq": 3, "verdict": "BUMP", "at": 100, "times": 1}]}
+        b.fc_get = lambda path: (200, status) if path == "/cool/status" else (None, None)
+        b.fc_post = lambda path, **kw: posted.append((path, kw.get("params"))) or (200, {})
+        cap = b.capture()
+        # The run: the notice from before it counted again, and a new one.
+        status["notices"] = [{"seq": 3, "verdict": "BUMP", "at": 100, "times": 2},
+                             {"seq": 4, "verdict": "FLAME", "at": 160, "times": 1}]
+        b._phase = "post"
+        left = []
+        b._cool_side(left, cap)
+        self.assertEqual(left, [], "a notice is no leftover")
+        self.assertEqual([(n["seq"], n["verdict"], n.get("times_before"), n["dismissed"]) for n in b.run_notices],
+                         [(3, "BUMP", 1, False), (4, "FLAME", None, False)])
+        self.assertEqual(posted, [], "a dismissal would take the notice from before the run")
+        # Nothing from before the run stands (the daemon started again, and
+        # its numbers with it): the run's notice goes, up to its own number.
+        status["notices"] = [{"seq": 3, "verdict": "FLAME", "at": 500, "times": 1}]
+        b._cool_side(left, cap)
+        self.assertEqual([(n["seq"], n["verdict"], n["dismissed"]) for n in b.run_notices], [(3, "FLAME", True)])
+        self.assertEqual(posted, [("/cool/notices/dismiss", {"upto": "3"})])
+
+    def test_a_pulsing_button_is_a_leftover_whatever_its_target_reads(self):
+        # A breathing LED's target swings between 0 and its level: the pulse
+        # is what says it was left on.
+        for name in baseline.BUTTON_LEDS:
+            with open(self.leds + name + "/pulse_on", "w") as f:
+                f.write("1800")
+            with open(self.leds + name + "/target", "w") as f:
+                f.write("0")
+        left = self.bl().enforce("post", captured=None)
+        self.assertEqual(sorted(x.item for x in left if x.item.startswith("leds/")),
+                         ["leds/" + n for n in baseline.BUTTON_LEDS])
+        with open(self.leds + baseline.BUTTON_LEDS[0] + "/pulse_on") as f:
+            self.assertEqual(f.read().strip(), "0")
+
     def test_button_leds_are_turned_off(self):
         self._led("button_led_2", "255")
         left = self.bl().enforce("post", captured=None)

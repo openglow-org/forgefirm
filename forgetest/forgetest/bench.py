@@ -145,9 +145,10 @@ TOOLS = [
      "args": [_arg("max_seconds", "int", 1200, "give up after this long without CRITICAL", flag="--max-seconds")],
      "desc": "Sets the ceiling, the resume gate and the critical line a few tenths above the live upstream "
              "reading, opens one M8 session and runs the loop heater at full duty to warm the loop through "
-             "them: OVERTEMP at the ceiling, then CRITICAL (fire blocked, hold, no resume), the fault ending "
-             "with the session; the heater off at CRITICAL and on every exit; settings restored and re-read. "
-             "Results to the bench data directory."},
+             "them: OVERTEMP at the ceiling, then CRITICAL (fire blocked, hold, no resume), which waits for "
+             "the acknowledgment after the session; the heater off at CRITICAL and on every exit; settings "
+             "restored and re-read, the failure acknowledged once its cause is gone, and the verdict checked "
+             "against the one found at the start. Results to the bench data directory."},
     {"id": "flow-sampler", "title": "Coolant sampler", "script": "flow_sampler.py",
      "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("duration_s", "int", 30, "capture length"), _arg("interval_s", "float", 1.0, "sample interval")],
