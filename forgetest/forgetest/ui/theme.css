@@ -307,6 +307,23 @@ body {
 body.has-savebar {
   padding-bottom: 64px;
 }
+/* The dev-image bar, which main.c puts above the header of every page on
+ * a dev image only: a solid red band that stays in view, the same in both
+ * themes. */
+.ff-devbar {
+  position: sticky;
+  top: 0;
+  z-index: 1030;
+  background: #c62828;
+  color: #fff;
+  font-size: 13.5px;
+  text-align: center;
+  padding: 6px 12px;
+}
+.ff-devbar strong {
+  font-weight: 700;
+  letter-spacing: 0.6px;
+}
 header {
   background: var(--og-navy);
 }
