@@ -10,14 +10,21 @@ The cloud tests judge a print on the machine's own log lines. When the
 app's wording moves (a resume that used to log one line logs two), a
 test keeps looking for the old line and fails a print that worked. The
 replay fixtures cannot catch that: they are excerpts of the old wording.
-This test reads the phrases straight out of suite/cloud.py and checks
-each against the logger calls in the app sources at the revisions the
-recipes pin (python3-gfhardware and python3-gfutilities, from the
-manifest cache the tree manifest builds, or the sibling checkouts when
-no cache is at hand), placeholder-aware: "paused at" is covered by
-'paused at %s', "warm up: holding" by '%s: holding %.1f s', and
-"authenticate_machine SUCCESS" by logger.info('SUCCESS') inside
-def authenticate_machine (the log format is module:function message).
+This test reads the phrases straight out of suite/cloud.py and
+suite/cloudlatch.py and checks each against the logger calls in the app
+sources at the revisions the recipes pin (python3-gfhardware and
+python3-gfutilities, from the manifest cache the tree manifest builds, or
+the sibling checkouts when no cache is at hand), placeholder-aware:
+"paused at" is covered by 'paused at %s', "warm up: holding" by
+'%s: holding %.1f s', and "authenticate_machine SUCCESS" by
+logger.info('SUCCESS') inside def authenticate_machine (the log format is
+module:function message). A phrase must run through the message's fixed
+text: one made of values alone is covered by nothing, and one whose fixed
+text is a separator only when each value in it is one of the app's own
+constants ("print [" by '%s [%s]: finished...' and the action type
+'print'; "zzz qqq" by no '%s %s'). A %s the call fills with a string
+constant is fixed text ("OFFLINE service" by offline.py's
+'%s: no web session...' % (OFFLINE_MARK, ...)).
 """
 import ast
 import importlib.util
@@ -32,6 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FORGETEST = os.path.dirname(HERE)
 REPO = os.path.dirname(FORGETEST)
 CLOUD_PY = os.path.join(FORGETEST, "forgetest", "suite", "cloud.py")
+CLOUDLATCH_PY = os.path.join(FORGETEST, "forgetest", "suite", "cloudlatch.py")
 APP_COMPONENTS = ("python3-gfhardware", "python3-gfutilities")
 SIBLINGS = {"python3-gfhardware": "python3-gfhardware", "python3-gfutilities": "Glowforge-Utilities"}
 
@@ -100,12 +108,23 @@ def needles_in(path):
 
 def log_literals(source, label):
     """(function name, fragments) for every logger call in a Python source:
-    the message's fixed text split at its placeholders."""
+    the message's fixed text split at its fields. A %s field the call fills
+    with a string constant, written out or a module-level name bound to one
+    (offline.py's OFFLINE_MARK), is fixed text too."""
     out = []
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return out
+    consts = {n.targets[0].id: n.value.value for n in tree.body
+              if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+              and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)}
+
+    def constant(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return consts.get(node.id) if isinstance(node, ast.Name) else None
+
     funcs = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -116,73 +135,95 @@ def log_literals(source, label):
                 and node.func.attr in ("debug", "info", "warning", "warn", "error", "critical", "exception")
                 and node.args):
             continue
-        msg = node.args[0]
+        msg, args = node.args[0], node.args[1:]
         if isinstance(msg, ast.BinOp) and isinstance(msg.op, ast.Mod):
-            msg = msg.left
+            msg, args = msg.left, (msg.right.elts if isinstance(msg.right, ast.Tuple) else
+                                   [] if isinstance(msg.right, ast.Dict) else [msg.right])
         frags = None
         if isinstance(msg, ast.Constant) and isinstance(msg.value, str):
-            frags = [p.replace("%%", "%") for p in PLACEHOLDER.split(msg.value)]
+            frags, k, pos = [""], 0, 0
+            for m in PLACEHOLDER.finditer(msg.value):
+                frags[-1] += msg.value[pos:m.start()]
+                pos = m.end()
+                if m.group() == "%%":
+                    frags[-1] += "%"
+                    continue
+                value = constant(args[k]) if m.group() == "%s" and k < len(args) else None
+                k += 1
+                if value is None:
+                    frags.append("")
+                else:
+                    frags[-1] += value
+            frags[-1] += msg.value[pos:]
         elif isinstance(msg, ast.JoinedStr):
             frags = [""]
             for v in msg.values:
-                if isinstance(v, ast.Constant):
-                    frags[-1] += str(v.value)
-                else:
+                value = (str(v.value) if isinstance(v, ast.Constant) else
+                         constant(v.value) if v.conversion == -1 and v.format_spec is None else None)
+                if value is None:
                     frags.append("")
+                else:
+                    frags[-1] += value
         if frags is not None:
             out.append((funcs.get(id(node), ""), frags, label))
     return out
 
 
-def covers(frags, needle):
+def app_words(text):
+    """The one-word string constants of an app module: the values a field
+    of a logged line carries by name (the action types 'hunt', 'motion' and
+    'print')."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    return {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and re.fullmatch(r"[\w.-]+", n.value)}
+
+
+def covers(frags, needle, words=frozenset()):
     """True when `needle` is a substring of a rendering of the message whose
-    fixed text is `frags` (the gaps between fragments are placeholders; the
-    rendered line is `function message`, so frags[0] carries the function).
-    A placeholder is a value, never the phrase itself: the needle must lie
-    inside one fixed fragment, or run through the fragments in order and
-    contain at least one complete non-empty fragment."""
+    fixed text is `frags` (the gaps between fragments are fields, each any
+    value; the rendered line is `function message`, so frags[0] carries the
+    function). A field is a value, never the phrase itself: the fixed text
+    the needle runs through must carry a word (a letter or a digit), or,
+    where it is a separator and never a bare space, every piece of a field
+    in the needle must be one of the app's own one-word constants (`words`:
+    "print [" is the action type print before the action's id)."""
+    # adjacent fields are one field
+    frags = [f for i, f in enumerate(frags) if f or i in (0, len(frags) - 1)]
     n = len(frags)
-    if any(needle in f for f in frags if f):
-        return True
+    found = []                                      # (fixed text, field pieces) of each rendering
 
-    def in_gap(text, i, complete):
-        """`text` starts in the gap before frags[i]."""
-        if i >= n:
-            return False
-        frag = frags[i]
-        if frag == "":
-            return complete if i == n - 1 else in_gap(text, i + 1, complete)
-        start = 0
-        while True:
-            j = text.find(frag, start)
-            if j < 0:
-                break
-            if after(text[j + len(frag):], i, True):
-                return True
-            start = j + 1
-        # the needle ends inside frags[i]: a proper prefix of it, which counts
-        # as the complete fragment the rule wants only when the gap before it
-        # was preceded by one, or when what is left of the fragment is a
-        # trailing separator (": holding " is covered by "warm up: holding")
-        for k in range(1, len(frag)):
-            if text.endswith(frag[:k]) and (complete or not frag[k:].strip()):
-                return True
-        return False
+    def fixed(rest, i, off, text, fields):
+        """rest starts at frags[i][off]."""
+        frag = frags[i][off:]
+        if frag.startswith(rest):
+            found.append((text + rest, fields))
+        elif rest.startswith(frag) and i + 1 < n:
+            field(rest[len(frag):], i + 1, text + frag, fields)
 
-    def after(text, i, complete):
-        """`text` starts right after the whole of frags[i]."""
-        if text == "":
-            return complete
-        return in_gap(text, i + 1, complete)
+    def field(rest, i, text, fields):
+        """rest starts in the field before frags[i]."""
+        if not rest:
+            found.append((text, fields))
+            return
+        found.append((text, fields + [rest]))       # the needle ends in this field
+        nxt, j = frags[i], 0
+        while nxt and j >= 0:                       # the field takes rest[:j], then frags[i]
+            if rest[j:].startswith(nxt) or nxt.startswith(rest[j:]):
+                fixed(rest[j:], i, 0, text, fields + ([rest[:j]] if j else []))
+            j = rest.find(nxt[0], j + 1)
 
     for i, frag in enumerate(frags):
-        for off in range(len(frag)):
-            suffix = frag[off:]
-            if needle.startswith(suffix) and after(needle[len(suffix):], i, off == 0):
-                return True
-        if i >= 1 and in_gap(needle, i, False):
-            return True
-    return False
+        off = frag.find(needle[:1])
+        while needle and off >= 0:
+            fixed(needle, i, off, "", [])
+            off = frag.find(needle[0], off + 1)
+        if i >= 1:
+            field(needle, i, "", [])
+    return any(re.search(r"\w", text) or (text.strip() and fields and all(p in words for p in fields))
+               for text, fields in found)
 
 
 # ------------------------------------------------------------ sources
@@ -228,37 +269,51 @@ def pinned_sources():
 
 class CloudNeedleTests(unittest.TestCase):
     def test_every_needle_is_a_line_the_pinned_app_can_log(self):
-        needles = needles_in(CLOUD_PY)
+        needles = needles_in(CLOUD_PY) + needles_in(CLOUDLATCH_PY)
         self.assertGreaterEqual(len(needles), 30, needles)
         self.assertIn("authenticate_machine SUCCESS", needles)
         self.assertIn("RX-EVENT: ready", needles)
+        self.assertIn("button pushed", needles)
         sources = pinned_sources()
         missing = [c for c in APP_COMPONENTS if c not in sources]
         if missing:
             if os.environ.get("CI"):
                 self.fail("no source for %s (run scripts/manifest-from-tree.py first)" % ", ".join(missing))
             self.skipTest("no source for %s" % ", ".join(missing))
-        literals = []
+        literals, words = [], set()
         for comp, (where, files) in sources.items():
             for path, text in files:
                 literals.extend(log_literals(text, "%s:%s" % (comp, path)))
+                if not path.startswith(("tests/", "examples/")):
+                    words |= app_words(text)
         self.assertGreater(len(literals), 100, "too few logger calls found: is the app source complete?")
         uncovered = []
         for needle in needles:
-            if not any(covers([fn + " " + frags[0]] + frags[1:], needle) for fn, frags, _ in literals):
+            if not any(covers([fn + " " + frags[0]] + frags[1:], needle, words) for fn, frags, _ in literals):
                 uncovered.append(needle)
-        self.assertEqual(uncovered, [], "cloud.py greps for lines the pinned app never logs (sources: %s)"
+        self.assertEqual(uncovered, [], "the cloud suite greps for lines the pinned app never logs (sources: %s)"
                          % ", ".join("%s=%s" % (c, w) for c, (w, _) in sources.items()))
 
     def test_cover_rules(self):
         self.assertTrue(covers(["_run_loop paused at ", ""], "paused at"))
         self.assertTrue(covers(["_dwell ", ": holding ", " s"], "warm up: holding"))
+        self.assertTrue(covers(["_dwell ", ": skipped (", " = ", ""], "warm up: skipped"))
         self.assertTrue(covers(["authenticate_machine SUCCESS"], "authenticate_machine SUCCESS"))
         self.assertTrue(covers(["_resume_retraced resuming (laser lead ", " ticks)"], "resuming (laser lead"))
         self.assertTrue(covers(["_finish_action ", " [", "]: finished with event \"", "\""],
                                'finished with event ":completed"'))
         self.assertFalse(covers(["_run_loop button pressed while paused"], "button pressed while paused; resuming"))
         self.assertFalse(covers(["_run_loop paused at ", ""], "paused it"))
+        # Fields alone are never the phrase: not two values around a space,
+        # and around a separator only the app's own constants.
+        self.assertFalse(covers(["img_upload FAILED: ", " ", ""], "zzz qqq", {"zzz", "qqq"}))
+        finish = ["_finish_action ", " [", "]: finished with event \":", "\""]
+        self.assertTrue(covers(finish, "print [", {"print"}))
+        self.assertFalse(covers(finish, "zzz [", {"print"}))
+        # A field the call fills with a constant is the line's own text.
+        (_, frags, _), = log_literals("MARK = 'OFFLINE service'\ndef open():\n"
+                                      "    logger.info('%s: listening on %s' % (MARK, path))\n", "x")
+        self.assertTrue(covers(["open " + frags[0]] + frags[1:], "OFFLINE service"))
 
 
 if __name__ == "__main__":

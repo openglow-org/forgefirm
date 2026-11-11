@@ -65,6 +65,61 @@ def rd_pos():
     return struct.unpack("<5i", raw[:20])
 
 
+# The dead man's switch puts the thermal driver in its safe state too: the
+# heater's duty to zero (through the lease write, so no lapse is counted)
+# and the heater's and the TEC's pins low. The close test drives both on
+# just before the close, so the switch has something to undo: the heater
+# at full duty, which its PWM timer holds as a steady high pin, for well
+# under a second.
+DEADMAN_HEATER_DUTY = 65535
+GPIO_DEBUG = "/sys/kernel/debug/gpio"
+GPIO_LABELS = {"heater": "water-heater-gpio", "tec": "tec-gpio"}
+
+
+def gpio_levels(path=GPIO_DEBUG):
+    """The heater's and the TEC's pin levels ("hi"/"lo") as the GPIO
+    debug listing shows them; None for a pin it does not list."""
+    out = {k: None for k in GPIO_LABELS}
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        for k, label in GPIO_LABELS.items():
+            if "|" + label in line:
+                words = line.split(")", 1)[-1].split()
+                out[k] = words[1] if len(words) > 1 and words[1] in ("hi", "lo") else None
+    return out
+
+
+def deadman_thermal_why(before, after):
+    """None when the close took the heat sources to their safe state, else
+    why not. before and after: heater_pwm, tec_on and heater_lapses as read,
+    and the two pins' levels."""
+    if (before.get("heater_pwm") != str(DEADMAN_HEATER_DUTY) or before.get("tec_on") != "1"
+            or before.get("heater_pin") != "hi" or before.get("tec_pin") != "hi"):
+        return ("the heater and the TEC were not on before the close (heater_pwm %s pin %s, tec_on %s "
+                "pin %s)" % (before.get("heater_pwm"), before.get("heater_pin"), before.get("tec_on"),
+                             before.get("tec_pin")))
+    if (after.get("heater_pwm") != "0" or after.get("tec_on") != "0"
+            or after.get("heater_pin") != "lo" or after.get("tec_pin") != "lo"):
+        return ("the close left the heat sources on (heater_pwm %s pin %s, tec_on %s pin %s; want 0 lo, "
+                "0 lo)" % (after.get("heater_pwm"), after.get("heater_pin"), after.get("tec_on"),
+                           after.get("tec_pin")))
+    if after.get("heater_lapses") != before.get("heater_lapses"):
+        return ("the heater went off by its lease, not by the switch (heater_lapses %s -> %s)"
+                % (before.get("heater_lapses"), after.get("heater_lapses")))
+    return None
+
+
+def thermal_read():
+    pins = gpio_levels()
+    return {"heater_pwm": rd("thermal/heater_pwm"), "tec_on": rd("thermal/tec_on"),
+            "heater_lapses": rd("thermal/heater_lapses"),
+            "heater_pin": pins["heater"], "tec_pin": pins["tec"]}
+
+
 def snap(ctx, tag):
     line = ("%s: state=%s laser_enable=%s laser_on=%s laser_on_sampled=%s interlock=%s"
             % (tag, rd("cnc/state"), rd("cnc/laser_enable"), rd("cnc/laser_on"),
@@ -359,9 +414,22 @@ def k1_k2(ctx):
                   "halts the engine at once, locks the laser latch, and puts the head in its safe "
                   "state - lens driver disabled at low current, measure laser and UV LED off. The "
                   "lens driver is enabled at low current before the close, so the safe state has "
-                  "something to undo. Motors locked; duty zero.")
+                  "something to undo. The same switch takes the thermal driver to its safe state: "
+                  "the heater (driven at full duty for well under a second before the close, which "
+                  "its PWM timer holds as a steady high pin) and the TEC go off, duty and pins, with "
+                  "no lease lapse, as read in sysfs and in the GPIO debug listing; both are put back "
+                  "as found. Motors locked; duty zero.")
 def deadman_close(ctx):
     ev = ctx.evidence
+    found = {"heater_pwm": rd("thermal/heater_pwm"), "tec_on": rd("thermal/tec_on")}
+    try:
+        deadman_close_body(ctx, ev)
+    finally:
+        wr("thermal/heater_pwm", found["heater_pwm"])
+        wr("thermal/tec_on", found["tec_on"])
+
+
+def deadman_close_body(ctx, ev):
     with ctx.takeover():
         stream = POWER0 + PAD * (6 * TICK_HZ)
         snap(ctx, "deadman pre")
@@ -383,12 +451,18 @@ def deadman_close(ctx):
             ctx.sleep(1.0)
             st = rd("cnc/state")
             ctx.check(st == "running", "expected running before the close, got %s", st)
+            wr("thermal/heater_pwm", DEADMAN_HEATER_DUTY)
+            wr("thermal/tec_on", 1)
+            ctx.sleep(0.05)                     # a few PWM periods: the timer has set the pin
+            thermal_before = thermal_read()
             t0 = time.time()
             dev.drop()
             while time.time() - t0 < 5:
                 if rd("cnc/state") != "running":
                     break
             dt = time.time() - t0
+        thermal_after = thermal_read()
+        ev["thermal"] = {"before": thermal_before, "after": thermal_after}
         state = rd("cnc/state")
         after = {"z_enable": rd("head/z_enable"), "z_current": rd("head/z_current"),
                  "measure_laser": rd("head/measure_laser"), "uv_led": rd("head/uv_led")}
@@ -406,8 +480,12 @@ def deadman_close(ctx):
                   after["z_enable"], after["z_current"])
         ctx.check(after["measure_laser"] == "0" and after["uv_led"] == "0",
                   "measure laser %s, UV LED %s after the close", after["measure_laser"], after["uv_led"])
+        why = deadman_thermal_why(thermal_before, thermal_after)
+        ctx.log("thermal: before %s, after %s", thermal_before, thermal_after)
+        ctx.check(why is None, "%s", why)
         wr("cnc/stop", 1)
-        ctx.log("PASS: the final close halted the engine in %.3f s, latch locked, head safed", dt)
+        ctx.log("PASS: the final close halted the engine in %.3f s, latch locked, head safed, heater and "
+                "TEC off", dt)
 
 
 # ---------------------------------------------------------------- backtrack

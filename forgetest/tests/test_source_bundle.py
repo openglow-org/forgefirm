@@ -12,8 +12,12 @@ behind. These tests hold the decision (which recipe needs source), the
 choice of archive (the version of the image, not an older build), and the
 refusal that stops a release with source missing."""
 import importlib.util
+import io
 import json
 import os
+import re
+import shutil
+import subprocess
 import tarfile
 import unittest
 
@@ -23,13 +27,44 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 SCRIPT = os.path.join(REPO, "scripts", "source-bundle.py")
 IMAGE = "forgefirm-image-glowforge.rootfs-20260101000000"
 DEV_IMAGE = "forgefirm-image-dev-glowforge.rootfs-20260101000000"
+# The mark the made-up BSP's layers carry, so a packed layer can be told
+# from any other checkout's.
+BSP_MARK = "the meta-openglow clone the kas config names\n"
 
 
-def load_script():
-    spec = importlib.util.spec_from_file_location("source_bundle", SCRIPT)
+def load_script(path=SCRIPT):
+    spec = importlib.util.spec_from_file_location("source_bundle", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def make_checkout(root):
+    """A made-up forgefirm checkout as a release builds from: the script and
+    the archiver policy copied in, a kas config whose meta-openglow entry
+    names the pinned clone under layers/, and that clone a git checkout
+    holding the two BSP layers. Returns the copied script's path."""
+    repo = os.path.join(root, "forgefirm")
+    script = os.path.join(repo, "scripts", "source-bundle.py")
+    os.makedirs(os.path.dirname(script))
+    shutil.copy(SCRIPT, script)
+    os.makedirs(os.path.join(repo, "kas"))
+    shutil.copy(os.path.join(REPO, "kas", "source-bundle.yml"), os.path.join(repo, "kas"))
+    write(os.path.join(repo, "kas", "forgefirm-glowforge.yml"), "\n".join([
+        "repos:",
+        "  meta-openglow:",
+        "    url: https://example.org/meta-openglow.git",
+        "    path: layers/meta-openglow",
+        "    layers:",
+        "      meta-glowforge-bsp:",
+        "      meta-openglow-core:",
+        ""]))
+    write(os.path.join(repo, "meta-forgefirm", "conf", "layer.conf"), 'BBFILE_COLLECTIONS += "forgefirm"\n')
+    bsp = os.path.join(repo, "layers", "meta-openglow")
+    for layer in ("meta-glowforge-bsp", "meta-openglow-core"):
+        write(os.path.join(bsp, layer, "conf", "layer.conf"), BSP_MARK)
+    subprocess.run(["git", "init", "-q", bsp], check=True, capture_output=True)
+    return script
 
 
 def package_block(recipe, version, license_, package=None):
@@ -95,6 +130,15 @@ class Policy(unittest.TestCase):
         for expr in ("MIT", "BSD-3-Clause", "Apache-2.0", "ISC", "PSF-2.0",
                      "Proprietary", "Firmware-imx-sdma_firmware", "PD"):
             self.assertFalse(self.mod.source_needed(expr, self.policy), expr)
+
+    def test_the_archiver_pass_builds_what_release_sh_builds(self):
+        # release.sh builds the images with the overlay merged, so the source
+        # the bundle packs is the source of every target it built: the dev
+        # image and the parts outside the root filesystem among them.
+        with open(os.path.join(REPO, "scripts", "release.sh"), encoding="utf-8") as f:
+            built = " ".join(re.findall(r'^\s*TARGETS="(?:\$TARGETS )?([^"]*)"$', f.read(), re.M)).split()
+        self.assertIn("forgefirm-image-dev", built)
+        self.assertEqual(sorted(built), sorted(self.mod.BUILD_TARGETS))
 
 
 class Manifests(unittest.TestCase):
@@ -181,27 +225,32 @@ class Bsp(unittest.TestCase):
         self.assertEqual(load_script().bsp_checkout(d),
                          os.path.normpath(os.path.join(d, "..", "meta-openglow")))
 
+    def test_a_config_that_names_no_path_stops_the_script(self):
+        # With no path the bundle cannot know which BSP built the binaries.
+        d = self.kas("\n".join([
+            "repos:",
+            "  meta-openglow:",
+            "    url: https://example.org/meta-openglow.git",
+            "  poky:",
+            "    path: layers/poky",
+            ""]))
+        with self.assertRaises(SystemExit):
+            load_script().bsp_checkout(d)
+
 
 class Pack(unittest.TestCase):
-    """The bundle end to end, on a deploy directory of made-up recipes and a
-    made-up meta-openglow checkout: the script reads the BSP's place from the
-    kas config, and a test run has no build's checkout there."""
+    """The bundle end to end, on a deploy directory of made-up recipes, with
+    the script copied into a made-up release checkout (make_checkout): the
+    module's own wiring, the BSP from the kas config and the layers from the
+    BSP, runs under every case."""
 
     def setUp(self):
         import tempfile
-        self.mod = load_script()
         self.root = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, self.root, True)
+        self.mod = load_script(make_checkout(self.root))
         self.deploy = os.path.join(self.root, "deploy")
         self.out = os.path.join(self.root, "out")
-        bsp = os.path.join(self.root, "meta-openglow")
-        for layer in ("meta-glowforge-bsp", "meta-openglow-core"):
-            write(os.path.join(bsp, layer, "conf", "layer.conf"),
-                  'BBFILE_COLLECTIONS += "%s"\n' % layer)
-        self.mod.BSP = bsp
-        self.mod.FORGEFIRM_LAYERS = [
-            (name, path if name == "meta-forgefirm" else os.path.join(bsp, name))
-            for name, path in self.mod.FORGEFIRM_LAYERS]
 
     def run_main(self, packages, archives, image_packages=(), images=(IMAGE,)):
         make_deploy(self.deploy, packages, archives, image_packages)
@@ -273,6 +322,38 @@ class Pack(unittest.TestCase):
         self.assertIn(root + "licenses/%s/license.manifest" % DEV_IMAGE, names)
         self.assertIn(root + "metadata/%s.forgefirm-manifest.json" % DEV_IMAGE, names)
         self.assertEqual(manifest["images"], [IMAGE, DEV_IMAGE])
+
+    def bundle(self):
+        """The packed bundle's MANIFEST.json and its member names."""
+        root = "forgefirm-source-v0.0.1/"
+        with tarfile.open(os.path.join(self.out, "forgefirm-source-v0.0.1.tar.gz")) as tar:
+            return (json.loads(tar.extractfile(root + "MANIFEST.json").read().decode()),
+                    {n: tar.extractfile(n).read() for n in tar.getnames() if n.startswith(root + "metadata/meta-")})
+
+    def test_the_bsp_layers_are_those_of_the_checkout_the_kas_config_names(self):
+        self.run_main(packages=[("busybox", "1.36.1", "GPL-2.0-only")], archives=["busybox-1.36.1-r0"])
+        _, layers = self.bundle()
+        for layer in ("meta-glowforge-bsp", "meta-openglow-core"):
+            blob = layers["forgefirm-source-v0.0.1/metadata/%s.tar.gz" % layer]
+            with tarfile.open(fileobj=io.BytesIO(blob)) as tar:
+                self.assertEqual(tar.extractfile("%s/conf/layer.conf" % layer).read().decode(), BSP_MARK)
+
+    def test_a_bsp_cloned_under_layers_is_recorded_once(self):
+        self.run_main(packages=[("busybox", "1.36.1", "GPL-2.0-only")], archives=["busybox-1.36.1-r0"])
+        manifest, _ = self.bundle()
+        self.assertEqual([lay["checkout"] for lay in manifest["layers"]].count("meta-openglow"), 1,
+                         manifest["layers"])
+
+    def test_an_image_with_no_build_identity_stops_the_pack(self):
+        # The deploy directory no longer holds the dev image the bundle would
+        # answer for.
+        make_deploy(self.deploy, [("gdb", "14.2", "GPL-3.0-only")], ["gdb-14.2-r0"], image=DEV_IMAGE)
+        os.remove(os.path.join(self.deploy, "images", "glowforge", DEV_IMAGE + ".forgefirm-manifest.json"))
+        with self.assertRaises(SystemExit) as caught:
+            self.run_main(packages=[("busybox", "1.36.1", "GPL-2.0-only")],
+                          archives=["busybox-1.36.1-r0"], images=(IMAGE, DEV_IMAGE))
+        self.assertEqual(caught.exception.code, 1)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "forgefirm-source-v0.0.1.tar.gz")))
 
     def test_a_recipe_with_no_source_stops_the_release(self):
         with self.assertRaises(SystemExit) as caught:

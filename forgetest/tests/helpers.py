@@ -85,6 +85,63 @@ def registry(*tests):
     return {t.id: t for t in tests}
 
 
+# ------------------------------------------- a test body's judgment alone
+
+class JudgeCtx:
+    """The runner's Context as a test body sees it, with nobody at the
+    machine, for driving a catalog test's judgment over a scripted machine:
+    check raises the runner's Failed, the sleeps take no time, a wait reads
+    its condition once, and act is the press the scripted machine answers."""
+
+    def __init__(self, forgectrl=None, press=None):
+        self.evidence = {}
+        self.lines = []
+        self.forgectrl = forgectrl
+        self.press = press
+
+    def check(self, cond, msg, *args):
+        if not cond:
+            from forgetest.runner import Failed
+            raise Failed(msg % args if args else msg)
+
+    def log(self, msg, *args):
+        self.lines.append(msg % args if args else msg)
+
+    def checkpoint(self):
+        pass
+
+    def sleep(self, seconds):
+        pass
+
+    def aborted(self):
+        return False
+
+    def wait_for(self, cond, timeout, poll=0.25):
+        try:
+            return 0.0 if cond() else None
+        except Exception:
+            return None
+
+    def act(self, channel, state, **kw):
+        self.press()
+
+
+class Clock:
+    """time.time and time.sleep for a module under test: the clock moves
+    only when the module sleeps, and each sleep runs the machine's tick."""
+
+    def __init__(self, tick=None):
+        self.t = 1000.0
+        self.tick = tick or (lambda: None)
+
+    def time(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.t += seconds
+        self.tick()
+
+
 # ------------------------------------------------------- fake forgectrl
 
 class FakeForgectrl:

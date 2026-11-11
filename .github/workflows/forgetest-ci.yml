@@ -8,7 +8,12 @@
 #    app can log (it reads the app sources from the manifest cache)
 #  - the source bundle of a release: which recipe of the image needs
 #    source, which archive answers for it, and the refusal that stops a
-#    release with source missing
+#    release with source missing; release.sh's gates, run on throwaway keys,
+#    a scratch checkout and small images
+#  - the layer's build checks (rootfs-lint.sh, image-check.py) on fixture
+#    trees and images, its boot steps in a private mount namespace, its log
+#    rotation under logrotate; the bench tools' heater-off and settings
+#    restore paths; one fflog in the three pinned components
 #  - shared UI files: theme.css and the vendored Bootstrap the page
 #    carries are byte-identical to forgectrl's at its pinned revision
 #  - the extension key: the public key the image installs for the official
@@ -34,8 +39,12 @@ on:
       - 'scripts/acceptance-gate.py'
       - 'scripts/manifest-from-tree.py'
       - 'scripts/source-bundle.py'
+      - 'scripts/release.sh'
+      - 'scripts/mkfw.sh'
+      - 'scripts/bench/**'
       - 'kas/source-bundle.yml'
       - 'meta-forgefirm/recipes-forgefirm/**'
+      - 'meta-forgefirm/wic/**'
       - '.github/workflows/forgetest-ci.yml'
   pull_request:
   workflow_dispatch:

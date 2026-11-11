@@ -365,6 +365,43 @@ def t_asks(ctx):
     ctx.confirm("Did it?")
 
 
+class ButtonReaderTests(unittest.TestCase):
+    """What the runner's press waits read from the button's LEDs (hw.py),
+    over a fake LED class tree: RoutingTests stub the reader itself."""
+
+    def setUp(self):
+        self.leds = tempfile.mkdtemp(prefix="forgetest-leds-")
+        self.addCleanup(shutil.rmtree, self.leds, ignore_errors=True)
+        os.environ["GF_LEDS_ROOT"] = self.leds
+        self.addCleanup(os.environ.pop, "GF_LEDS_ROOT", None)
+
+    def lamp(self, *leds):
+        """leds: (target, pulse_on) for button_led_1..3."""
+        for name, (target, pulse) in zip(runner_mod.hw.BUTTON_LEDS, leds):
+            os.makedirs(os.path.join(self.leds, name), exist_ok=True)
+            for attr, val in (("target", target), ("pulse_on", pulse)):
+                with open(os.path.join(self.leds, name, attr), "w") as f:
+                    f.write("%d\n" % val)
+
+    def test_the_button_asks_only_while_all_three_breathe(self):
+        hw = runner_mod.hw
+        self.assertIsNone(hw.button_asks(), "no LED readable")
+        self.lamp((0, 1800), (255, 1800), (40, 1800))         # breathing white
+        self.assertTrue(hw.button_asks())
+        self.lamp((0, 300), (0, 0), (0, 0))                   # the red flash
+        self.assertFalse(hw.button_asks())
+        self.lamp((254, 0), (254, 0), (254, 0))               # solid white
+        self.assertFalse(hw.button_asks())
+
+    def test_a_pulsing_led_is_lit_whatever_its_target_reads(self):
+        hw = runner_mod.hw
+        self.assertIsNone(hw.button_lit(), "no LED readable")
+        self.lamp((0, 0), (0, 0), (0, 0))
+        self.assertFalse(hw.button_lit())
+        self.lamp((0, 300), (0, 0), (0, 0))                   # the red flash at its dark half
+        self.assertTrue(hw.button_lit())
+
+
 class RoutingTests(unittest.TestCase):
     """The queues with a fixture up: the runner's probe is scripted."""
 

@@ -86,6 +86,14 @@ forgefirm_sd_data() {
 }
 do_image_wic[prefuncs] += "forgefirm_sd_data"
 
+# The image check reads the SD card image back too (image-check.py): p1
+# the slot's size with the rootfs's own fstab, p2 the card's data
+# partition (1024 MiB, forgefirm-dev-sd.wks.in) seeded as above.
+FORGEFIRM_IMAGE_CHECK_CARD = "--card ${IMGDEPLOYDIR}/${IMAGE_NAME}.wic \
+    --card-rootfs-kib ${IMAGE_ROOTFS_MAXSIZE} --data-label forgefirm-data --data-kib 1048576 \
+    --account 'forgefirm:${FORGEFIRM_SD_ACCOUNT_HASH}:1000'"
+FORGEFIRM_IMAGE_CHECK_CARD[vardepsexclude] += "DATETIME"
+
 # Dev builds identify by build timestamp (matches the artifact name),
 # tagged so a bench machine is never mistaken for a release.
 FORGEFIRM_VERSION_STRING = "${DATETIME} (dev)"

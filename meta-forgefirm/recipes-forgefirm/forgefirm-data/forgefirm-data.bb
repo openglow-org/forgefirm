@@ -20,7 +20,10 @@ inherit update-rc.d
 INITSCRIPT_NAME = "forgefirm-data"
 # 04 in rcS, ahead of udev by name: after mountall (S03) has mounted /data
 # and /run, and after slotmigrate (S02), which needs /data unmounted;
-# before the first reader of /data/forgefirm (forgefirm-sandbox, S30).
+# before the first readers of /data/forgefirm, bootmisc.sh (S36) and
+# urandom (S38), which read it through /etc/default/timestamp and
+# /etc/default/urandom (forgefirm-persist). rootfs-lint.sh's data-order
+# rule holds this order on the built rootfs.
 INITSCRIPT_PARAMS = "start 04 S ."
 
 do_install() {

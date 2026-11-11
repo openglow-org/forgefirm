@@ -6,9 +6,13 @@
 """scripts/manifest-from-tree.py - the workstation/CI mirror of the image
 manifest: recipe pins are read through their pin files, and a layer's
 content hash leaves the pin files out (a component bump is not a platform
-change; a recipe-body change is)."""
+change; a recipe-body change is). And what the pinned components share,
+read from the pinned sources it fetches: one fflog in all three."""
+import glob
+import hashlib
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -121,6 +125,42 @@ class TreeManifestTests(unittest.TestCase):
         base = self.mod.layer_content(self.layer)
         self.write("forgefirm-release.inc",'FORGEFIRM_RELEASE ?= "0.0.2"\n')
         self.assertEqual(self.mod.layer_content(self.layer), base)
+
+
+def pinned_file(recipe, path):
+    """A file of a component at the revision its recipe pins, from the
+    pinned sources manifest-from-tree.py fetched into this checkout
+    (.manifest-cache); None when they do not hold it."""
+    with open(os.path.join(REPO, "meta-forgefirm", "recipes-forgefirm", recipe, recipe + "-pin.inc"),
+              encoding="utf-8") as f:
+        rev = re.search(r'^SRCREV = "([0-9a-f]{40})"$', f.read(), re.M).group(1)
+    for repo in sorted(glob.glob(os.path.join(REPO, ".manifest-cache", "*"))):
+        p = subprocess.run(["git", "-C", repo, "show", "%s:%s" % (rev, path)], capture_output=True)
+        if p.returncode == 0:
+            return p.stdout
+    return None
+
+
+@unittest.skipUnless(git_ok(), "git not available")
+class PinnedSourcesTests(unittest.TestCase):
+    """What the pinned components share, read from their pinned sources."""
+
+    def test_the_three_fflog_copies_are_one(self):
+        # forgectrl's host tests prove fflog; grblHAL and forgeext carry
+        # copies of it, so the proof holds for them only while all three
+        # pinned copies are the same bytes.
+        for path in ("src/fflog.c", "src/fflog.h"):
+            copies = {r: pinned_file(r, path) for r in ("forgectrl", "grblhal-glowforge", "forgeext")}
+            missing = sorted(r for r, text in copies.items() if text is None)
+            if missing:
+                why = "%s of %s at its pin is not in .manifest-cache (manifest-from-tree.py fetches it)" % (
+                    path, ", ".join(missing))
+                if os.environ.get("GITHUB_ACTIONS"):
+                    self.fail(why)
+                self.skipTest(why)
+            self.assertEqual(len(set(copies.values())), 1,
+                             "%s differs between the pinned components: %s" % (
+                                 path, {r: hashlib.sha256(t).hexdigest()[:12] for r, t in copies.items()}))
 
 
 if __name__ == "__main__":

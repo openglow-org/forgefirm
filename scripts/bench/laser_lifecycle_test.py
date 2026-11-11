@@ -97,7 +97,8 @@ reported messages:
      M4; its next feed move with an S word ends it (the reason reported
      once, ALARM:3, no step of that move shipped), and started again its
      own M4 prompts; a feed move with no S word after the same stall is a
-     dry run and moves with no alarm
+     dry run and moves with no alarm, and a cutting move planned behind a
+     running dry move stops the job with none of its own steps shipped
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -1449,7 +1450,7 @@ def test_stalled_job_does_not_run_on_dark():
               "shipped, and started again it prompted and ran")
     finally:
         s.close()
-    s = Session("stalled-dry-run", disarm_s=2, switches=SW_CLOSED)
+    s = Session("stalled-dry-run", disarm_s=2, switches=SW_CLOSED, dump=True)
     try:
         stall_past_the_grace(s, "stalled-dry-run")
         send_line(s.sock, "G1 X6 F600", s.log)      # no S word: a dry run
@@ -1459,8 +1460,27 @@ def test_stalled_job_does_not_run_on_dark():
             fail("[stalled-dry-run] the dry move did not run (MPos X %s)" % x_end)
         if s.count(STALLED) != 0 or "ALARM" in "".join(s.log):
             fail("[stalled-dry-run] a move with no S word was stopped")
+        # A cutting move planned behind a running dry move ships none of its
+        # own steps: the reset from the running cycle stops the steppers
+        # short of the dry move's end, before the cutting block is prepared.
+        time.sleep(0.3)
+        per_mm = s.shipped_x_steps() / 6.0          # X0 to X6 so far
+        send_line(s.sock, "G1 X16 F300", s.log)     # 2 s of dry motion
+        if s.wait_state("Run", 2) is None:
+            fail("[stalled-dry-run] the dry move did not start")
+        s.send_raw("G1 X18 S100")                   # planned behind it
+        if not wait_for(s.log, STALLED, 3, s.sock):
+            fail("[stalled-dry-run] the cutting move behind the dry move was not stopped")
+        if not wait_for(s.log, "ALARM:3", 3, s.sock) or s.wait_state("Alarm", 3) is None:
+            fail("[stalled-dry-run] the stopped job did not end in ALARM:3 (state %s)" % s.state())
+        time.sleep(0.3)
+        shipped = s.shipped_x_steps()
+        if not 6.0 * per_mm < shipped < 16.0 * per_mm:
+            fail("[stalled-dry-run] the stream shipped %d X steps; the dry move runs from %d to "
+                 "%d, and a stop while it ran ships fewer" % (shipped, 6.0 * per_mm, 16.0 * per_mm))
         print("PASS [stalled-dry-run]: a feed move with no S word after the stall moved with "
-              "no alarm")
+              "no alarm, and a cutting move planned behind a running dry move stopped the job "
+              "with none of its steps shipped")
     finally:
         s.close()
 

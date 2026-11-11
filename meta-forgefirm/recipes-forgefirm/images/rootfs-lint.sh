@@ -32,6 +32,12 @@
 #   init-order runlevel 5 starts forgectrl before forgeext, and runlevel 6
 #              stops grblhal before forgectrl and forgeext before
 #              forgectrl: the links sort in that order.
+#   data-order forgefirm-data is on the image and rcS starts it after
+#              mountall.sh (which mounts /data) and slotmigrate (which
+#              needs /data unmounted), and before every other rcS script
+#              that reads /data/forgefirm: one that names the folder, or
+#              names an /etc/default file that does (bootmisc.sh's
+#              timestamp, urandom's seed). The links sort in that order.
 #   logging    a ForgeFIRM logging init script is on the image
 #              (forgefirm-logging or forgefirm-logrotate).
 #   watchdog   no userspace watchdog init script (/etc/init.d/watchdog):
@@ -163,17 +169,44 @@ link() {
         return
     done
 }
-# before <what> <a> <b>: a and b are both there and a sorts first
+# before <what> <a> <b>: a and b are both there and a sorts first (the
+# rule failed is $order, init-order unless set)
 before() {
     if [ -z "$2" ] || [ -z "$3" ]; then
-        fail init-order "$1: a link is missing (${2:-none}, ${3:-none})"
+        fail "${order:-init-order}" "$1: a link is missing (${2:-none}, ${3:-none})"
     elif [ "$(printf '%s\n%s\n' "$2" "$3" | LC_ALL=C sort | head -n 1)" != "$2" ] || [ "$2" = "$3" ]; then
-        fail init-order "$1: $2 does not sort before $3"
+        fail "${order:-init-order}" "$1: $2 does not sort before $3"
     fi
 }
 before "rc5.d starts forgectrl before forgeext" "$(link rc5.d S forgectrl)" "$(link rc5.d S forgeext)"
 before "rc6.d stops grblhal before forgectrl" "$(link rc6.d K grblhal)" "$(link rc6.d K forgectrl)"
 before "rc6.d stops forgeext before forgectrl" "$(link rc6.d K forgeext)" "$(link rc6.d K forgectrl)"
+
+# ------------------------------------------------------------ data-order
+order=data-order
+[ -x "$root/etc/init.d/forgefirm-data" ] || fail data-order "/etc/init.d/forgefirm-data is not on the image"
+data=$(link rcS.d S forgefirm-data)
+before "rcS.d mounts /data before forgefirm-data" "$(link rcS.d S mountall.sh)" "$data"
+before "rcS.d runs slotmigrate before forgefirm-data" "$(link rcS.d S slotmigrate)" "$data"
+for l in "$root"/etc/rcS.d/S*; do
+    [ -L "$l" ] || [ -e "$l" ] || continue
+    name=${l##*/}
+    [ "$name" = "$data" ] && continue
+    target=$(readlink "$l" 2>/dev/null)
+    script=$root/etc/init.d/${target##*/}
+    [ -n "$target" ] && [ -f "$script" ] || continue
+    text=$(active "$script")
+    reads=
+    case $text in
+        */data/forgefirm*) reads=1 ;;
+        */etc/default/*)
+            for f in $(printf '%s\n' "$text" | grep -o -E '/etc/default/[[:alnum:]_.-]+'); do
+                case $(active "$root$f") in */data/forgefirm*) reads=1 ;; esac
+            done ;;
+    esac
+    [ -z "$reads" ] || before "rcS.d runs forgefirm-data before ${name}, which reads /data/forgefirm" "$data" "$name"
+done
+order=
 
 # --------------------------------------------------------------- logging
 [ -e "$root/etc/init.d/forgefirm-logging" ] || [ -e "$root/etc/init.d/forgefirm-logrotate" ] \

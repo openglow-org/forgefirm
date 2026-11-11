@@ -261,13 +261,16 @@ echo "== gates =="
 # Repo state. Staging may run from an rsynced build tree (a warning); a
 # release that is published may not: what it builds must be the pushed,
 # clean commit its tag names, or the tag and the binaries disagree and an
-# untracked file (a bench tool, say) rides into the dev image.
+# untracked file (a bench tool, say) rides into the dev image. Commits are
+# compared, not trees: HEAD must be the very commit its upstream names, so
+# a commit that was never pushed is refused even when it changes no file.
 if git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
   [ -z "$(git -C "$REPO" status --porcelain)" ] \
     || die "working tree is dirty - release from a clean tree"
-  if ! git -C "$REPO" diff --quiet "@{upstream}" 2>/dev/null; then
-    [ "$PUBLISH" = 1 ] && die "HEAD differs from upstream - push before publishing"
-    warn "HEAD differs from upstream - push before publishing"
+  UP_REV=$(git -C "$REPO" rev-parse -q --verify "@{upstream}^{commit}" 2>/dev/null) || UP_REV=
+  if [ -z "$UP_REV" ] || [ "$UP_REV" != "$(git -C "$REPO" rev-parse HEAD)" ]; then
+    [ "$PUBLISH" = 1 ] && die "HEAD is not the commit its upstream names - push before publishing"
+    warn "HEAD is not the commit its upstream names - push before publishing"
   fi
   # The release is attached to the tag v<version>, and the tag must name the
   # commit this build is made from. Checked here, before the build and the

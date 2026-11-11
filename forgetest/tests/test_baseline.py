@@ -136,10 +136,10 @@ class BaselineTests(BaselineFixture, unittest.TestCase):
         self.assertEqual(b.enforce("post", captured=None), [])
         self.assertEqual(self._read("thermal/heater_pwm"), "2162")
         # Anything else is a leftover, put back to 0: a heater far from the
-        # hold's duty, one under a resting watch (its heater is off), one with
-        # the watch off or not there.
+        # hold's duty, one under a resting watch (its heater is off, whatever
+        # duty it reports), one with the watch off or not there.
         for status, value in (({"watch": "hold", "duty": 3.3}, "65535"),
-                              ({"watch": "rest", "duty": None}, "2162"),
+                              ({"watch": "rest", "duty": 3.3}, "2162"),
                               ({"watch": "off"}, "2162"),
                               ({}, "2162")):
             self._attr("thermal/heater_pwm", value)
@@ -205,6 +205,14 @@ class BaselineTests(BaselineFixture, unittest.TestCase):
         b._cool_side(left, cap)
         self.assertEqual([(n["seq"], n["verdict"], n["dismissed"]) for n in b.run_notices], [(3, "FLAME", True)])
         self.assertEqual(posted, [("/cool/notices/dismiss", {"upto": "3"})])
+        # The notices could not be read before the run: none can be told
+        # apart, so none is the run's and every one stands.
+        posted[:] = []
+        b.fc_get = lambda path: (None, None)
+        cap = b.capture()
+        b.fc_get = lambda path: (200, status) if path == "/cool/status" else (None, None)
+        b._cool_side(left, cap)
+        self.assertEqual((posted, b.run_notices), ([], []))
 
     def test_a_pulsing_button_is_a_leftover_whatever_its_target_reads(self):
         # A breathing LED's target swings between 0 and its level: the pulse
@@ -219,6 +227,23 @@ class BaselineTests(BaselineFixture, unittest.TestCase):
                          ["leds/" + n for n in baseline.BUTTON_LEDS])
         with open(self.leds + baseline.BUTTON_LEDS[0] + "/pulse_on") as f:
             self.assertEqual(f.read().strip(), "0")
+
+    def test_the_button_is_not_judged_while_a_failure_stands(self):
+        # The engine's red flash (channel 1 pulsing) while a failure stands
+        # is the machine's own state, and is left as it is.
+        for attr, val in (("pulse_on", "300"), ("target", "255")):
+            with open(self.leds + "button_led_1/" + attr, "w") as f:
+                f.write(val)
+        b = self.bl()
+        status = {"phase": "idle", "armed": False, "hold": False,
+                  "attention": {"standing": True, "live": True, "verdict": "CRASH"}}
+        b.fc_get = lambda path: (200, status) if path == "/cool/status" else (None, None)
+        self.assertEqual(b.enforce("post", captured=None), [])
+        with open(self.leds + "button_led_1/pulse_on") as f:
+            self.assertEqual(f.read().strip(), "300")
+        # With no failure standing, the same LED is a leftover.
+        status["attention"] = {}
+        self.assertEqual([x.item for x in b.enforce("post", captured=None)], ["leds/button_led_1"])
 
     def test_button_leds_are_turned_off(self):
         self._led("button_led_2", "255")

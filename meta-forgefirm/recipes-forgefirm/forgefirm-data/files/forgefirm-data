@@ -13,7 +13,9 @@
 ### END INIT INFO
 #
 # Runs in rcS at S04: mountall (S03) has mounted /data (eMMC p3) and /run,
-# and nothing reads /data/forgefirm before forgefirm-sandbox (S30).
+# and the first readers of /data/forgefirm come later: bootmisc.sh (S36),
+# which restores the boot timestamp, and urandom (S38), which carries the
+# random seed, both through their /etc/default files (forgefirm-persist).
 #
 # 1. The card. Booted from the SD card (root=/dev/mmcblk1p1), and the card
 #    has a second partition (the dev image's SD card image makes one), the

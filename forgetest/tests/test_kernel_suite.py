@@ -5,7 +5,11 @@
 
 """wait_hv_off against a scripted charge-pump readback: a chain that
 releases inside the window passes, a chain held past it is the refusal,
-and a chain already off costs no wait."""
+and a chain already off costs no wait. The dead man's close judge of the
+heat sources: it passes only when the heater and the TEC were on before
+the close and are off after it, duty and pins, with no lease lapse."""
+import os
+import tempfile
 import time
 import unittest
 
@@ -66,6 +70,38 @@ class WaitHvOffTests(unittest.TestCase):
         self.assertIsNone(kernel.wait_hv_off(ctx, timeout_s=2.0))
         self.assertLess(time.time() - t0, 0.1)
         self.assertEqual(ctx.lines, [])
+
+
+GPIO_LISTING = """gpiochip5: GPIOs 160-191, parent: platform/20b0000.gpio, 20b0000.gpio:
+ gpio-168 (                    |water-pump-gpio     ) out hi
+ gpio-170 (                    |tec-gpio            ) out %s
+gpiochip6: GPIOs 192-223, parent: platform/20b4000.gpio, 20b4000.gpio:
+ gpio-201 (                    |water-heater-gpio   ) out %s
+"""
+
+
+class DeadmanThermalTests(unittest.TestCase):
+    ON = {"heater_pwm": "65535", "tec_on": "1", "heater_lapses": "0", "heater_pin": "hi", "tec_pin": "hi"}
+    OFF = {"heater_pwm": "0", "tec_on": "0", "heater_lapses": "0", "heater_pin": "lo", "tec_pin": "lo"}
+
+    def test_the_pins_are_read_from_the_gpio_listing(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "gpio")
+            with open(path, "w") as f:
+                f.write(GPIO_LISTING % ("lo", "hi"))
+            self.assertEqual(kernel.gpio_levels(path), {"heater": "hi", "tec": "lo"})
+            self.assertEqual(kernel.gpio_levels(os.path.join(d, "absent")), {"heater": None, "tec": None})
+
+    def test_the_close_must_take_both_heat_sources_off_with_no_lapse(self):
+        self.assertIsNone(kernel.deadman_thermal_why(self.ON, self.OFF))
+        for name, before, after in (
+                ("the heater never on", dict(self.ON, heater_pin="lo"), self.OFF),
+                ("the duty left on", self.ON, dict(self.OFF, heater_pwm="65535")),
+                ("the heater pin left high", self.ON, dict(self.OFF, heater_pin="hi")),
+                ("the TEC left on", self.ON, dict(self.OFF, tec_on="1", tec_pin="hi")),
+                ("off by the lease", self.ON, dict(self.OFF, heater_lapses="1"))):
+            with self.subTest(name):
+                self.assertIsNotNone(kernel.deadman_thermal_why(before, after))
 
 
 if __name__ == "__main__":

@@ -14,7 +14,10 @@ skeleton of that excerpt.
 What is proven here: each test fails when the machine did the unsafe
 thing - a dark print whose press is asked for with the latch still locked,
 a print the kernel plays with the hardware button latch set, a lid stop
-that is polled rather than edge-driven, and a resume the kernel refused."""
+that is polled rather than edge-driven, and a resume the kernel refused.
+cloud.button-latch's every judgment, and exthost.armed-freeze's of the
+run's start (it runs the dark print), are proven on their sample records
+over a scripted machine and a clock that moves only when the test sleeps."""
 import contextlib
 import os
 import shutil
@@ -22,12 +25,15 @@ import struct
 import tempfile
 import threading
 import time
+import types
 import unittest
+from unittest import mock
 
 import helpers
 from forgetest.runner import Context, Failed, Run
 from forgetest.suite import cloud
 from forgetest.suite import cloudlatch
+from forgetest.suite import exthost
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures")
@@ -399,6 +405,199 @@ class CloudSuiteTests(unittest.TestCase):
         hooks = {"press it once. The print runs dark": pressed}
         self.assertFails(cloudlatch.button_latch_print,
                          "the hardware button latch read set while the kernel ran", hooks=hooks)
+
+
+Ctx, Clock = helpers.JudgeCtx, helpers.Clock
+LOCKED, UNLOCKED = "45", "37"           # cnc/interlock_circuit, the laser lock at bit 3
+
+
+class ButtonLatchJudgeTests(unittest.TestCase):
+    """cloud.button-latch's judgment (button_latch_body) over a scripted
+    machine: the hardware button latch (cnc/button_latch, 1 set) and the
+    laser lock as the kernel shows them, the cloud client's waits answered
+    at once. A print that holds every rule passes; one rule broken, the
+    rest held, fails on that rule."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forgetest-latch-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        os.makedirs(os.path.join(self.tmp, "cnc"))
+        os.environ["GF_SYSFS_ROOT"] = self.tmp + os.sep
+        self.addCleanup(os.environ.pop, "GF_SYSFS_ROOT", None)
+        self.clock = Clock(self.tick)
+        self.ran = 0
+        for name, fn in (("wait_button_wait", lambda ctx, offset, timeout, also=(): "waiting for button"),
+                         ("wait_print_running", lambda ctx, offset, timeout: "starting run"),
+                         ("wait_action_finished",
+                          lambda ctx, offset, action, timeout, poll=0.5: "t gfcloud[1] INFO " + cloud.COMPLETED),
+                         ("log_lines_since", lambda path, offset: ["t gfcloud[1] INFO button pushed"] * self.presses),
+                         ("settle_cloud", lambda ctx, offset: None)):
+            p = mock.patch.object(cloud, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(cloudlatch, "time", self.clock)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def attr(self, name, value):
+        with open(os.path.join(self.tmp, "cnc", name), "w") as f:
+            f.write(str(value))
+
+    def tick(self):
+        """The kernel plays the job for run_samples of the body's reads,
+        then the client relocks (the lock, and the latch with it)."""
+        if self.ran is None:
+            return
+        self.ran += 1
+        if self.m["lock_in_run"] and self.ran == 3:
+            self.attr("interlock_circuit", LOCKED)
+        if self.ran >= self.m["run_samples"]:
+            self.attr("state", "idle")
+            if self.m["relock_after"]:
+                self.attr("interlock_circuit", LOCKED)
+                self.attr("button_latch", 1)
+            self.ran = None
+
+    def judge(self, latch_before=1, unlock_for_press=True, latch_at_button=1, run_samples=25,
+              lock_in_run=False, presses=1, relock_after=True):
+        self.m = dict(lock_in_run=lock_in_run, run_samples=run_samples, relock_after=relock_after)
+        self.presses = presses
+        self.attr("button_latch", latch_before)
+        self.attr("interlock_circuit", LOCKED)
+        self.attr("state", "idle")
+        self.ran = None
+
+        def print_ready(action_id, job):
+            # the client waits out the verdict, releases the lock, asks for the press
+            if unlock_for_press:
+                self.attr("interlock_circuit", UNLOCKED)
+            self.attr("button_latch", latch_at_button)
+
+        def press():
+            # the press clears the latch; the client has the lock released by now
+            self.attr("button_latch", 0)
+            self.attr("interlock_circuit", UNLOCKED)
+            self.attr("state", "running")
+            self.ran = 0
+        ctx = Ctx(press=press)
+        cloudlatch.button_latch_body(ctx, ctx.evidence, types.SimpleNamespace(print_ready=print_ready), "job", 0)
+        return ctx
+
+    def assertJudged(self, needle, **machine):
+        with self.assertRaises(Failed) as cm:
+            self.judge(**machine)
+        self.assertIn(needle, str(cm.exception))
+
+    def test_a_print_that_holds_every_rule_passes(self):
+        ctx = self.judge()
+        self.assertEqual(ctx.evidence["samples_in_run"], 25)
+
+    def test_too_few_samples_while_the_kernel_plays_fail(self):
+        self.assertJudged("samples were taken", run_samples=cloudlatch.SAMPLES_MIN - 1)
+
+    def test_the_lock_held_while_the_button_is_asked_for_fails(self):
+        self.assertJudged("the lock is still held", unlock_for_press=False)
+
+    def test_a_latch_already_clear_before_the_press_fails(self):
+        self.assertJudged("before any press", latch_at_button=0)
+
+    def test_a_latch_clear_before_the_print_fails(self):
+        self.assertJudged("before the print", latch_before=0)
+
+    def test_the_lock_held_while_the_kernel_plays_fails(self):
+        self.assertJudged("the lock was held while the kernel ran", lock_in_run=True)
+
+    def test_a_second_press_fails(self):
+        self.assertJudged("2 presses", presses=2)
+
+    def test_a_latch_not_set_again_after_the_job_fails(self):
+        self.assertJudged("after the print", relock_after=False)
+
+
+class ArmedFreezeJudgeTests(unittest.TestCase):
+    """exthost.armed-freeze's judgment of its samples: the run's start is
+    the kernel's first running sample after the window opens, and the group
+    must be frozen by then. The package, the dark print and the machine are
+    scripted against the test's clock, which moves only when the sampler
+    sleeps (0.2 s a sample)."""
+
+    OPEN, CLOSE, END = 1005.1, 1025.1, 1036.0       # the armed window, and the print's end
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forgetest-freeze-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.clock = Clock()
+        self.spans = {"frozen": (1005.5, 1026.0), "running": (1008.0, 1024.0), "unlocked": (1006.0, 1025.0)}
+        ext = os.path.join(self.tmp, "data", "forgefirm", "ext")
+        os.makedirs(os.path.join(ext, "keys"))
+        pub = os.path.join(self.tmp, "ref.pub")
+        with open(pub, "wb") as f:
+            f.write(b"key")
+
+        def write_file(path, data):
+            with open(path, "wb") as f:
+                f.write(data)
+
+        def print_ends(ctx, ev, off, job, offset, fc):
+            while self.clock.t < self.END:
+                time.sleep(0.0005)
+        machine = {
+            "time": self.clock, "EXT_ROOT": ext, "SAFE_FILE": os.path.join(self.tmp, "no-safe-mode"),
+            "_host_pids": lambda: [1], "read_file": lambda path: "record", "record_path": lambda: "setup.json",
+            "_tree": lambda root: {}, "request": lambda *a, **k: (200, b"", {"etag": "e1"}),
+            "lan_ip": lambda: "192.0.2.1", "_pack_reference": lambda work, lan, **k: ("ref.ffx", pub),
+            "write_file": write_file, "_forgeext": lambda *a, **k: {"ok": True},
+            "_until": lambda ctx, cond, seconds, poll=0.25: True, "_svc": lambda id_: {"pid": 77},
+            "_read": lambda path, default="": "still" if self.at("frozen") else str(int(self.clock.t * 2)),
+            "_frozen": lambda id_: self.at("frozen"), "latch_locked": lambda: not self.at("unlocked"),
+            "hw": types.SimpleNamespace(sysfs_read=lambda attr: "running" if self.at("running") else "idle"),
+            "enter_offline": lambda ctx: 0, "offline_job": lambda ctx, name, seconds=30: "job",
+            "Offline": FakeOffline, "dark_print_body": print_ends, "offline_cleanup": lambda ctx: None,
+            "_put_back": lambda *a: None,
+        }
+        for name, value in machine.items():
+            p = mock.patch.object(exthost, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch("tempfile.mkdtemp", return_value=self.tmp)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def at(self, what):
+        span = self.spans[what]
+        return span is not None and span[0] <= self.clock.t <= span[1]
+
+    def judge(self):
+        armed = lambda: self.OPEN <= self.clock.t <= self.CLOSE            # noqa: E731
+
+        def get(path, params=None, raw=False):
+            if path == "/cool/status":
+                return 200, {"armed": armed()}
+            if path == "/cam/snapshot":
+                return (409, b"refused: the laser is armed") if armed() else (200, b"\xff\xd8\xff")
+            return None, None
+        fc = types.SimpleNamespace(base="http://forgectrl", host_header=lambda: "forgectrl",
+                                   wait_idle=lambda timeout=None, abort=None: True,
+                                   settings=lambda: {"ext_enabled": ""}, post=lambda *a, **k: (200, {}), get=get)
+        ctx = Ctx(forgectrl=fc)
+        exthost.armed_freeze(ctx)
+        return ctx
+
+    def test_a_freeze_in_place_before_the_run_passes(self):
+        ctx = self.judge()
+        self.assertGreater(ctx.evidence["freeze_led_the_run_s"], 0)
+
+    def test_a_run_that_starts_before_the_freeze_fails(self):
+        self.spans.update(frozen=(1006.5, 1026.0), running=(1005.2, 1024.0))
+        with self.assertRaises(Failed) as cm:
+            self.judge()
+        self.assertIn("the run started before the freeze", str(cm.exception))
+
+    def test_a_kernel_that_never_reads_running_fails(self):
+        self.spans["running"] = None
+        with self.assertRaises(Failed) as cm:
+            self.judge()
+        self.assertIn("the kernel never read running", str(cm.exception))
 
 
 if __name__ == "__main__":

@@ -261,3 +261,22 @@ rootfs_lint() {
         || bbfatal "rootfs_lint: rootfs-lint.sh refused the rootfs (its messages are above)"
 }
 ROOTFS_POSTPROCESS_COMMAND:append = " rootfs_lint"
+
+# The image check: the built files read back once every image type is
+# made, so a drift fails the build. The raw ext4 fits the slot and is made
+# with the slot's options (the journal kept, nothing reserved, one inode
+# per 8 KiB); FORGEFIRM_IMAGE_CHECK_CARD adds the dev image's SD card
+# image. image-check.py, next to this recipe, holds the rules and reads
+# the filesystems itself.
+IMAGE_CHECK := "${THISDIR}/image-check.py"
+do_image_complete[file-checksums] += "${IMAGE_CHECK}:True"
+FORGEFIRM_IMAGE_CHECK_CARD ?= ""
+
+image_check() {
+    python3 "${IMAGE_CHECK}" --ext4 "${IMGDEPLOYDIR}/${IMAGE_NAME}.ext4" \
+        --max-kib ${IMAGE_ROOTFS_MAXSIZE} --inode-ratio 8192 --tmp "${WORKDIR}" \
+        ${FORGEFIRM_IMAGE_CHECK_CARD} \
+        || bbfatal "image_check: image-check.py refused the built image (its messages are above)"
+}
+image_check[vardepsexclude] += "DATETIME"
+IMAGE_POSTPROCESS_COMMAND += "image_check "
