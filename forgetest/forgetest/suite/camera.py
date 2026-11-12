@@ -8,7 +8,7 @@ from ..catalog import test
 from .. import hw
 from ..baseline import LID_LAMP_ATTR
 
-_CAM_COVERS = [("forgectrl", "src/cam.*"), ("forgectrl", "src/camhealth.*"),
+_CAM_COVERS = [("forgectrl", "src/cam.*"), ("forgectrl", "src/camhealth.*"), ("forgectrl", "src/camlamp.*"),
                ("forgectrl", "src/debayer.*"), ("forgectrl", "src/vpu_jpeg.*"),
                ("forgectrl", "src/vpu_h264.*"), ("forgectrl", "src/mp4mux.*"),
                ("forgectrl", "src/gpu_debayer.*"), ("forgectrl", "src/ipu_copy.*"),
