@@ -780,7 +780,7 @@ class BaselineModeTests(BaselineFixture, unittest.TestCase):
         left = self.bl().enforce("pre", captured=None)
         self.assertEqual(sorted(x.item for x in left), ["cnc/step_freq", "pic/lid_led"])
         self.assertEqual(self._read("cnc/step_freq"), DEFAULT_TICK)
-        self.assertEqual(self._read("pic/lid_led"), "236")
+        self.assertEqual(self._read("pic/lid_led"), "240")
 
     def test_cloud_mode_leaves_the_clients_config_lamp_and_counters(self):
         self.cloud()

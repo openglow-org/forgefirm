@@ -19,9 +19,10 @@ restores it after (on every exit path), so a test cannot hand the next one
              restored where the interface allows.
 
 The lid lamp is fixed too, at forgectrl's `lid_lamp_idle` setting (unset =
-236): the daemon asserts it at start and at every controller spawn. The
-lamp fades toward a level written to it, so a level written a moment
-before the check is read again until it holds before it is judged.
+240): the daemon asserts it at start and at every controller spawn. A
+fade the cloud client started can still be moving it, so a level written
+a moment before the check is read again until it holds before it is
+judged.
 
 The controller mode in force decides what the baseline owns. In GRBL mode
 everything above applies. In cloud mode the cloud client owns what it
@@ -148,14 +149,14 @@ BUTTON_LEDS = ("button_led_1", "button_led_2", "button_led_3")
 PRESERVED_SYSFS = []                # sysfs attrs captured before, restored after
 
 LID_LAMP_ATTR = "pic/lid_led"
-LID_LAMP_DEFAULT = "236"            # forgectrl's lid_lamp_idle default
-# The lid LED runs on the kernel's "smooth" trigger: a level written to it
-# is reached by a fade over a fraction of a second, so a read right after
-# a write (the supervisor re-applies the idle level at every controller
-# spawn) finds the lamp part-way there: on the bench reference, 232 read
-# 0.05 s after the supervisor re-applies 236. The lamp is read again every
-# LID_LAMP_POLL_S until it holds the level, for at most LID_LAMP_SETTLE_S,
-# before it is called a leftover.
+LID_LAMP_DEFAULT = "240"            # forgectrl's lid_lamp_idle default
+# The lid LED has two writers: forgectrl sets the register (the idle level,
+# re-applied at every controller spawn), and the cloud client and its
+# homing runner set the kernel's "smooth" trigger, whose fade takes a
+# fraction of a second and writes the register as it goes. A read right
+# after a spawn can find the lamp part-way through such a fade. The lamp is
+# read again every LID_LAMP_POLL_S until it holds the level, for at most
+# LID_LAMP_SETTLE_S, before it is called a leftover.
 LID_LAMP_SETTLE_S = 3.0
 LID_LAMP_POLL_S = 0.1
 
