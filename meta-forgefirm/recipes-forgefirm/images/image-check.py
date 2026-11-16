@@ -21,6 +21,13 @@
 #   reserved    no blocks are reserved for root.
 #   inodes      one inode per --inode-ratio bytes, within a tenth (mkfs
 #               rounds to whole inode table blocks).
+#   manifest    the rootfs is what its /etc/forgefirm-manifest.json
+#               records (forgefirm-image-manifest.bbclass), so that the
+#               acceptance tool, which judges the machine against it,
+#               finds a pins-only image clean: each listed directory holds
+#               exactly its listed entries, each installed and boot file
+#               has its recorded sha256, and each recorded program is a
+#               file there.
 # With --card, the dev image's SD card image (.wic, or .wic.gz):
 #   partitions  two partitions: p1 the rootfs, exactly --card-rootfs-kib
 #               (the slot's size, so a later raw ext4 fits it), p2 the
@@ -38,6 +45,8 @@
 
 import argparse
 import gzip
+import hashlib
+import json
 import os
 import struct
 import sys
@@ -178,6 +187,46 @@ def check_fs(fs, what, ratio):
         fail("inodes", "%s has one inode per %.0f bytes, not %d" % (what, got, ratio))
 
 
+def check_manifest(fs, manifest=None):
+    """The rootfs read back against the build section of its manifest
+    (the file inside it, or the one given)."""
+    if manifest is None:
+        ino = fs.lookup("/etc/forgefirm-manifest.json")
+        if ino is None:
+            fail("manifest", "the rootfs carries no /etc/forgefirm-manifest.json")
+            return
+        manifest = json.loads(fs.data(ino).decode("utf-8"))
+    build = manifest.get("build") or {}
+    for key in ("dirs", "installed", "boot", "code"):
+        if key not in build:
+            fail("manifest", "the manifest records no %s" % key)
+
+    def regular(path):
+        ino = fs.lookup(path)
+        return ino if ino is not None and ino["mode"] & Ext4.S_IFMT == Ext4.S_IFREG else None
+
+    for d, names in sorted((build.get("dirs") or {}).items()):
+        ino = fs.lookup(d)
+        if ino is None or ino["mode"] & Ext4.S_IFMT != Ext4.S_IFDIR:
+            fail("manifest", "%s is listed and is no directory in the rootfs" % d)
+            continue
+        got, want = set(fs.entries(ino)), set(names)
+        if got != want:
+            fail("manifest", "%s holds %s beyond its listing and lacks %s"
+                 % (d, sorted(got - want) or "nothing", sorted(want - got) or "nothing"))
+    groups = sorted((build.get("installed") or {}).items()) + [("boot", build.get("boot") or {})]
+    for group, files in groups:
+        for path, want in sorted(files.items()):
+            ino = regular(path)
+            if ino is None:
+                fail("manifest", "%s: %s is recorded and is no file in the rootfs" % (group, path))
+            elif hashlib.sha256(fs.data(ino)).hexdigest() != want:
+                fail("manifest", "%s: %s is not the file the manifest records" % (group, path))
+    for path in build.get("code") or []:
+        if regular(path) is None:
+            fail("manifest", "%s is a recorded program and is no file in the rootfs" % path)
+
+
 def check_rootfs(path, max_kib, ratio):
     size = os.path.getsize(path)
     if size > max_kib * 1024:
@@ -192,6 +241,7 @@ def check_rootfs(path, max_kib, ratio):
             fail("size", "the filesystem is %d KiB, past the slot's %d KiB"
                  % (fs.blocks_count * fs.block_size // 1024, max_kib))
         check_fs(fs, "the rootfs", ratio)
+        check_manifest(fs)
         fstab = fs.lookup("/etc/fstab")
         return fs.data(fstab) if fstab else None
 

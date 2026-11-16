@@ -89,6 +89,8 @@ function render(){if(!state||!catalog)return;
  b+=c?('campaign <span class="mono">'+esc(c.id)+'</span> opened '+esc(fmtTs(c.ts))):('no open campaign'+(state.closed_by?(' (last one closed by '+esc(state.closed_by)+')'):'')+' - the first Start opens one');
  b+='<br>manifest identity <span class="mono">'+esc((m.sha||'').slice(0,16))+'</span> &middot; catalog <span class="mono">'+esc((state.catalog_hash||'').slice(0,12))+'</span>';
  if(state.log_corrupt)b+='<br><span class="b-bad">'+state.log_corrupt+' corrupt log line(s) skipped</span>';
+ var vd=state.verdict;if(vd&&vd.clean!==true)b+='<br><span class="b-bad">this campaign opened on a machine that is not its pins as built: '+esc((vd.why||[]).join('; '))+'</span>';
+ var uc=state.unclean||[];if(uc.length)b+='<br><span class="b-bad">satisfied only on a build that is not its pins as built, which never counts for a release: '+esc(uc.join(', '))+'</span>';
  setHtml($('banner'),b);
  var inv=state.invalidate;setHtml($('invnote'),inv?"<div class='note'>Full campaign required since "+esc(fmtTs(inv.ts))+": "+esc(inv.reason)+"</div>":'');
  renderQueue();renderGroups();renderRun();renderSteps();if(bench)renderBench()}

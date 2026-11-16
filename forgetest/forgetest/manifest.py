@@ -296,13 +296,16 @@ class Manifest:
         self.platform = data.get("platform", {}) or {}
         self.image = data.get("image", {}) or {}
         self.content_sha = data.get("content_sha256")
+        self.path = None          # the file it was loaded from (provenance.py)
         self._files = {}
 
     @classmethod
     def load(cls, path=None):
         path = path or os.environ.get("FORGETEST_MANIFEST") or DEFAULT_PATH
         with open(path, "r", encoding="utf-8") as f:
-            return cls(json.load(f))
+            m = cls(json.load(f))
+        m.path = os.path.abspath(path)
+        return m
 
     @classmethod
     def from_json(cls, text):

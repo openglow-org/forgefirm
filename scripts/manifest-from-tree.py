@@ -21,7 +21,11 @@
 # shallowly into --cache (default .manifest-cache/, gitignored) and listed
 # with `git ls-tree`; a submodule gitlink is followed through .gitmodules.
 # The layer content hash mirrors forgefirm-image-manifest.bbclass: every
-# file under the layer except *.md and *-pin.inc.
+# file under the layer that the checkout's own .gitignore files do not
+# ignore, except *.md, *-pin.inc and the release version file; a pin file
+# or the version file that assigns more than its rule allows stops the
+# script, as it stops the build. The kas configuration's text (kas/, the
+# lock file left out) is hashed the same way into the platform.
 import argparse
 import hashlib
 import json
@@ -58,6 +62,13 @@ CONTENT_LAYERS = {"meta-forgefirm": ("forgefirm", "meta-forgefirm"),
 # All three are metadata; hashing them would turn a pin bump or a version
 # bump into a platform change and invalidate every acceptance result.
 LAYER_SKIP_SUFFIXES = (".md", "-pin.inc", "forgefirm-release.inc")
+# What a file left out of the layer content may assign, as in the
+# bbclass (forgefirm_manifest_metadata_rules): a pin file its component's
+# SRCREV and PV, the version file FORGEFIRM_RELEASE.
+LAYER_METADATA = (("-pin.inc", ("SRCREV", "SRCREV_[A-Za-z0-9_-]+", "PV")),
+                  ("forgefirm-release.inc", ("FORGEFIRM_RELEASE",)))
+# The kas configuration's files left out of its hash (FORGEFIRM_MANIFEST_KAS_SKIP).
+KAS_SKIP_SUFFIXES = (".md", ".lock.yml")
 
 
 def git(args, cwd=None, input=None):
@@ -170,11 +181,41 @@ def dir_files(path):
     return [[p, i] for p, i in zip(paths, ids)]
 
 
-def layer_content(path):
-    out = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."], cwd=path)
+def listing(path):
+    """The files under path that a build reads: tracked ones, and untracked
+    ones that the checkout's own .gitignore files do not ignore (a local
+    exclude file and the user's global excludes do not count)."""
+    out = git(["-c", "core.excludesFile=/dev/null", "ls-files", "-z", "--cached", "--others",
+               "--exclude-per-directory=.gitignore", "--", "."], cwd=path)
     paths = sorted(set(p.decode("utf-8", "replace") for p in out.split(b"\0") if p))
-    paths = [p for p in paths
-             if os.path.isfile(os.path.join(path, p)) and not p.endswith(LAYER_SKIP_SUFFIXES)]
+    return [p for p in paths if os.path.isfile(os.path.join(path, p))]
+
+
+def metadata_problem(name, text, allowed):
+    """Why a file left out of the layer content holds more than its rule
+    allows, or None (forgefirm_manifest_metadata_problem in the bbclass)."""
+    rx = re.compile(r'^(?:%s)\s*(?:\?\?=|\?=|:=|=)\s*"[^"\\]*"$' % "|".join(allowed))
+    for n, line in enumerate(text.splitlines(), 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if not rx.match(s):
+            return "%s:%d: %s (it may assign only %s)" % (name, n, s, ", ".join(allowed))
+    return None
+
+
+def layer_content(path, skip=LAYER_SKIP_SUFFIXES, metadata=LAYER_METADATA):
+    paths = []
+    for p in listing(path):
+        if not p.endswith(skip):
+            paths.append(p)
+            continue
+        for suffix, allowed in metadata:
+            if p.endswith(suffix):
+                with open(os.path.join(path, p), encoding="utf-8", errors="replace") as f:
+                    why = metadata_problem(p, f.read(), allowed)
+                if why:
+                    raise SystemExit("%s is left out of the layer content, and %s" % (os.path.join(path, p), why))
     if not paths:
         return None
     # hash-object --stdin-paths resolves against the repository top level
@@ -185,6 +226,13 @@ def layer_content(path):
     for p, i in zip(paths, ids):
         h.update(p.encode("utf-8") + b"\0" + i.encode("ascii") + b"\n")
     return h.hexdigest()
+
+
+def kas_content(path):
+    """The kas configuration's content hash, as the bbclass's
+    forgefirm_manifest_kas computes it: its files' text, the lock file
+    left out."""
+    return layer_content(path, KAS_SKIP_SUFFIXES, ())
 
 
 def main(argv=None):
@@ -241,7 +289,8 @@ def main(argv=None):
         lpath = os.path.join(base, sub)
         if os.path.isdir(lpath):
             layers[lname] = {"content_sha256": layer_content(lpath)}
-    platform = {"machine": "glowforge", "layers": layers, "kernel_modules": [], "dtb": {}}
+    kas = {"content_sha256": kas_content(os.path.join(REPO, "kas"))}
+    platform = {"machine": "glowforge", "layers": layers, "kas": kas, "kernel_modules": [], "dtb": {}}
     canonical = manifest_mod.canonical({"components": components, "platform": platform})
     out = {"format": 1, "image": {"name": "tree", "version": "tree (no build)"},
            "content_sha256": hashlib.sha256(canonical.encode()).hexdigest(),

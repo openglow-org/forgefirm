@@ -86,6 +86,8 @@ class ServerTests(unittest.TestCase):
                                     index_path=os.path.join(cls.tmp, "bench.jsonl"))
         cls.log = Log(os.path.join(cls.tmp, "results.jsonl"))
         cls.runner = Runner(cls.log, cls.man, cls.reg, cls.bench)
+        # a machine running its pins as built (test_provenance.py judges one)
+        cls.runner.provenance = helpers.ScriptedProvenance()
         cls.token = server.load_token(os.path.join(cls.tmp, "token"))
         cls.app = server.App(cls.runner, cls.token, export_dir=os.path.join(cls.tmp, "export"))
         cls.srv = server.make_server(cls.app, "127.0.0.1", 0)

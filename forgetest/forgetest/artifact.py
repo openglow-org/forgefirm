@@ -16,20 +16,22 @@ origin) and the fingerprint it was recorded under. The gate
 (scripts/acceptance-gate.py) calls verify() with the artifact, the
 release build's manifest, and the catalog from the same source tree, and
 recomputes every fingerprint - a PASS applies to the release exactly when
-the recomputation matches. The artifact is self-hashed so an edited file
-is caught before any of that.
+the recomputation matches and the PASS was recorded on its pins as built
+(provenance.py). The artifact is self-hashed so an edited file is caught
+before any of that.
 """
 import json
 
 from . import VERSION
 from . import campaign as _campaign
 from . import manifest as _manifest
+from . import provenance as _provenance
 from .log import now_ts
 from .redact import scrub
 
 FORMAT = 1
 _RESULT_KEYS = ("ts", "campaign", "test", "result", "fingerprint", "manifest_sha", "image",
-                "duration_s", "message", "evidence", "answers", "log", "operator")
+                "duration_s", "message", "provenance", "evidence", "answers", "log", "operator")
 
 
 def _record(rec):
@@ -74,6 +76,7 @@ def build(state, tests, manifest, records, catalog_hash):
         "invalidate": state["invalidate"],
         "authorized": state["authorized"],
         "counts": state["counts"],
+        "unclean": state.get("unclean", []),
         "manifest": manifest.data,
         "tests": tests_out,
     }
@@ -103,6 +106,9 @@ def to_markdown(art):
     cnt = art.get("counts", {})
     lines.append("- Tests: %s total, %s satisfied (%s inherited), %s required"
                  % (cnt.get("total"), cnt.get("satisfied"), cnt.get("inherited"), cnt.get("required")))
+    if art.get("unclean"):
+        lines.append("- Satisfied on a build that is not its pins as built (never a release's): %s"
+                     % ", ".join("`%s`" % t for t in art["unclean"]))
     lines.append("")
     lines.append("| Test | Kind | Result | Run at | Campaign | Inherited |")
     lines.append("|---|---|---|---|---|---|")
@@ -179,6 +185,15 @@ def verify(art, release_manifest, tests, catalog_hash, expect_machine=None):
             if rec.get("result") != _campaign.PASS:
                 ok = False
                 why.append("recorded result is %s" % rec.get("result"))
+            # The release is its own build: a PASS recorded on a build other
+            # than its pins as built speaks for neither, inherited or not.
+            if not _provenance.clean(rec):
+                ok = False
+                prov = rec.get("provenance")
+                said = prov.get("why") if isinstance(prov, dict) else None
+                said = [str(w) for w in said[:3]] if isinstance(said, list) else []
+                why.append("recorded on a build that is not its pins as built (%s)"
+                           % ("; ".join(said) or "no usable provenance recorded"))
             fp = t.fingerprint(release_manifest)
             row["fingerprint"] = fp
             if rec.get("fingerprint") != fp:

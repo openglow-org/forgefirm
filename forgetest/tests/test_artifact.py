@@ -112,6 +112,29 @@ class ArtifactTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any("always-required" in p for p in problems), problems)
 
+    def test_a_pass_not_earned_on_its_pins_as_built_is_refused(self):
+        # A forged artifact that claims authorization: one PASS recorded on a
+        # hot-deployed binary, one with no verdict at all (an older tool's),
+        # and verdicts that are not an object with a true "clean". Each is
+        # a refused row, never a traceback.
+        cases = [{"clean": False, "why": ["forgectrl: /usr/bin/forgectrl not as built"]}, None, "clean",
+                 {"clean": "no"}, {"clean": True, "why": "not a list"}]
+        for verdict in cases:
+            art, _ = self.build()
+            body = json.loads(artifact.to_json(art))
+            body.pop("sha256")
+            for t in body["tests"]:
+                if t["id"] == "forgectrl.panel":
+                    if verdict is None:
+                        del t["record"]["provenance"]
+                    else:
+                        t["record"]["provenance"] = verdict
+            body["sha256"] = manifest_mod.sha256_text(manifest_mod.canonical(body))
+            ok, rows, problems = artifact.verify(body, self.release_manifest(), self.tests, self.chash)
+            refused = sorted(r["id"] for r in rows if not r["ok"])
+            expect = [] if isinstance(verdict, dict) and verdict.get("clean") is True else ["forgectrl.panel"]
+            self.assertEqual(refused, expect, (verdict, problems))
+
     def test_invalidate_epoch(self):
         art, _ = self.build()
         body = json.loads(artifact.to_json(art))

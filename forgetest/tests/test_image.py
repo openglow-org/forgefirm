@@ -6,6 +6,7 @@
 import contextlib
 import glob
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -964,8 +965,23 @@ class ImageCheckTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         return img
 
-    def rootfs(self, fstab=FSTAB, opts=SLOT):
-        return self.mkfs({"etc/fstab": fstab, "usr/bin/forgectrl": "x"}, opts=opts)
+    @staticmethod
+    def manifest(program="x", code=("/usr/bin/forgectrl",)):
+        """The build section forgefirm-image-manifest.bbclass records for
+        the rootfs below (the ext4's /lost+found and the manifest named)."""
+        sha = lambda text: hashlib.sha256(text.encode()).hexdigest()  # noqa: E731
+        return json.dumps({"build": {
+            "dirs": {"/": ["boot", "etc", "lost+found", "usr"], "/boot": ["zImage"],
+                     "/etc": ["forgefirm-manifest.json", "fstab"], "/usr/bin": ["forgectrl"]},
+            "installed": {"forgectrl": {"/usr/bin/forgectrl": sha(program)}},
+            "boot": {"/boot/zImage": sha("kernel")},
+            "code": list(code)}})
+
+    def rootfs(self, fstab=FSTAB, opts=SLOT, manifest=None, extra=None):
+        files = {"etc/fstab": fstab, "usr/bin/forgectrl": ("x", 0o755), "boot/zImage": "kernel",
+                 "etc/forgefirm-manifest.json": manifest or self.manifest()}
+        files.update(extra or {})
+        return self.mkfs(files, opts=opts)
 
     def seed(self, account=ACCOUNT, label="forgefirm-data", strangers=()):
         return self.mkfs({"forgefirm": (None, 0o711), "forgefirm/users": (account + "\n", 0o600),
@@ -1034,6 +1050,20 @@ class ImageCheckTests(unittest.TestCase):
             with open(big, "r+b") as f:
                 f.truncate((self.KIB + 4) << 10)
             self.assertFails("size", big)
+
+    def test_a_rootfs_that_is_not_what_its_manifest_records_fails(self):
+        # What the acceptance tool will judge the machine against, read back
+        # from the image the build made: a name the listing misses (a file
+        # a late build step wrote), a file whose content moved after it was
+        # hashed, a program recorded from a tree other than the one imaged,
+        # a manifest that records nothing to judge by.
+        for what, img in (("an unlisted name", lambda: self.rootfs(extra={"etc/ld.so.cache": "cache"})),
+                          ("a changed file", lambda: self.rootfs(manifest=self.manifest(program="y"))),
+                          ("a program it lacks", lambda: self.rootfs(manifest=self.manifest(
+                              code=("/usr/bin/forgectrl", "/usr/bin/grblHAL_glowforge")))),
+                          ("no manifest", lambda: self.mkfs({"etc/fstab": self.FSTAB}))):
+            with self.subTest(what):
+                self.assertFails("manifest", img())
 
     def test_the_dev_card_passes_and_each_drift_fails_its_rule(self):
         ext4, data = self.rootfs(), self.seed()          # the raw ext4 is the card's p1 as well

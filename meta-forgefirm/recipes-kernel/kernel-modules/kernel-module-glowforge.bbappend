@@ -15,6 +15,7 @@ python do_deploy() {
     forgefirm_manifest_write(entry, os.path.join(d.getVar('DEPLOYDIR'), 'forgefirm-manifest.d',
                                                  d.getVar('PN') + '.json'))
 }
-do_deploy[vardeps] += "FORGEFIRM_MANIFEST_NAME SRCREV SRC_URI forgefirm_manifest_entry \
-    forgefirm_manifest_tree forgefirm_manifest_git forgefirm_manifest_write"
+do_deploy[vardeps] += "FORGEFIRM_MANIFEST_NAME SRCREV SRC_URI EXTERNALSRC forgefirm_manifest_entry \
+    forgefirm_manifest_tree forgefirm_manifest_worktree forgefirm_manifest_blob_id \
+    forgefirm_manifest_git forgefirm_manifest_checkout_dirty forgefirm_manifest_installed forgefirm_manifest_write"
 addtask deploy after do_install before do_build

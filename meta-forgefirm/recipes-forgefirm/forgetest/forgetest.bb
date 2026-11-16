@@ -35,8 +35,13 @@ S = "${WORKDIR}"
 inherit python3-dir update-rc.d forgefirm-manifest
 
 # Non-git sources: fingerprint the package directory (dev-only component;
-# it identifies the campaign, never a test fingerprint).
+# it identifies the campaign, never a test fingerprint). The sources come
+# from the forgefirm checkout, outside the layer: the entry is marked dirty
+# when they differ from its commit, so a dev image built from uncommitted
+# acceptance code or bench tools records no result that can be inherited.
 FORGEFIRM_MANIFEST_SRC = "${WORKDIR}/forgetest/forgetest"
+FORGEFIRM_MANIFEST_DIRTY_TREES := "${THISDIR}/../../../forgetest/forgetest \
+    ${THISDIR}/../../../forgetest/forgetest.init ${THISDIR}/../../../scripts/bench"
 
 # The standard-library packages the tool imports (the page server, the
 # catalog, the bench scripts), not the python3 meta-package: the dev image

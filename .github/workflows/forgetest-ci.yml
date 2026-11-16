@@ -1,7 +1,10 @@
 # forgetest: the release acceptance tool's host-side proof.
 #
 #  - unit tests: campaign rules, fingerprints, artifact build/verify (the
-#    release gate's decision, including the negative fixtures), runner +
+#    release gate's decision, including the negative fixtures), whether a
+#    result was earned on its pins as built, the layer's manifest classes
+#    run on scratch checkouts (the component entry, the layer and kas
+#    hashes, the installed-file hashes), runner +
 #    HTTP API end to end with a fake catalog and a fake bench tool, the
 #    suites replayed on the machine's own log lines, and the check that
 #    every log phrase the cloud suite greps for is one the pinned cloud
@@ -46,7 +49,7 @@ on:
       - 'scripts/check-ui-vendor.py'
       - 'scripts/release-branch-check.py'
       - 'scripts/bench/**'
-      - 'kas/source-bundle.yml'
+      - 'kas/**'
       - 'meta-forgefirm/classes/**'
       - 'meta-forgefirm/recipes-forgefirm/**'
       - 'meta-forgefirm/wic/**'

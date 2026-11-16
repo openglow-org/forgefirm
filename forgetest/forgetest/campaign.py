@@ -13,17 +13,22 @@ catalog. Rules per test T with domain fingerprint F(T):
 
   satisfied by campaign  a PASS in the open campaign with fingerprint F(T)
   satisfied by inheritance  (never for the always-required core) the newest
-                         PASS anywhere in the history with fingerprint F(T)
-                         and newer than the last invalidate-all
+                         PASS anywhere in the history with fingerprint F(T),
+                         newer than the last invalidate-all, and recorded
+                         on its pins as built (provenance.py); a PASS that
+                         was not is never inherited
   required               otherwise (reason: always / never-passed /
-                         domain-changed)
+                         domain-changed / failed-since / not-as-built)
 
-  authorized  <=>  a campaign is open and every catalog test is satisfied
+  authorized  <=>  a campaign is open, every catalog test is satisfied,
+                   and every PASS that satisfies one was recorded on its
+                   pins as built
 
 Pure functions over the record list; nothing here touches hardware or
 the filesystem, which keeps the rules unit-testable and lets the release
 gate reason with the same code.
 """
+from .provenance import clean
 
 PASS, FAIL, ERROR, ABORTED = "PASS", "FAIL", "ERROR", "ABORTED"
 CLOSING = (FAIL, ERROR)
@@ -93,6 +98,7 @@ def compute(records, tests, manifest, catalog_hash, running=None):
         by_test.setdefault(r.get("test"), []).append(r)
 
     out_tests = {}
+    unclean = []
     tests = list(tests)
     for t in tests:
         fp = t.fingerprint(manifest)
@@ -115,7 +121,9 @@ def compute(records, tests, manifest, catalog_hash, running=None):
         else:
             # The newest record on the current fingerprint decides: a PASS
             # is inherited, a FAIL or ERROR after it blocks the inheritance
-            # (the test has to be run again), an ABORTED run says nothing.
+            # (the test has to be run again), an ABORTED run says nothing,
+            # and neither does a PASS recorded on a build other than its
+            # pins as built.
             inh = None
             blocked = None
             for r in reversed(hist):
@@ -124,7 +132,7 @@ def compute(records, tests, manifest, catalog_hash, running=None):
                 if epoch and (r.get("ts") or "") <= epoch:
                     continue
                 res = r.get("result")
-                if res == PASS:
+                if res == PASS and clean(r):
                     inh = r
                     break
                 if res in (FAIL, ERROR):
@@ -136,12 +144,19 @@ def compute(records, tests, manifest, catalog_hash, running=None):
                                              and (r.get("ts") or "") < (blocked.get("ts") or "")
                                              for r in hist):
                 reason = "failed-since"
+            elif any(r.get("result") == PASS and r.get("fingerprint") == fp
+                     and not (epoch and (r.get("ts") or "") <= epoch) for r in hist):
+                # passed on this fingerprint, but only on a build other than
+                # its pins as built
+                reason = "not-as-built"
             else:
                 reason = "domain-changed" if any(r.get("result") == PASS for r in hist) else "never-passed"
         if not satisfied and last_r is not None:
             status = {PASS: "stale", FAIL: "fail", ERROR: "error", ABORTED: "aborted"}.get(last_r.get("result"), "none")
         if running == t.id:
             status = "running"
+        if satisfied and not clean(origin):
+            unclean.append(t.id)
         out_tests[t.id] = {
             "fingerprint": fp,
             "status": status,
@@ -163,13 +178,18 @@ def compute(records, tests, manifest, catalog_hash, running=None):
     n_inh = sum(1 for v in out_tests.values() if v["status"] == "inherited")
     counts = {"total": len(tests), "satisfied": n_sat, "inherited": n_inh,
               "required": len(tests) - n_sat}
-    authorized = bool(campaign) and n_sat == len(tests) and len(tests) > 0
+    authorized = bool(campaign) and n_sat == len(tests) and len(tests) > 0 and not unclean
     return {
         "campaign": campaign,
         "last_campaign": last,
         "closed_by": closed_by,
         "invalidate": invalidate_shown,
         "authorized": authorized,
+        # tests satisfied only by a PASS recorded on a build other than its
+        # pins as built: they count on the page, never for a release
+        "unclean": unclean,
+        # what the open campaign's machine ran when it opened (provenance.py)
+        "verdict": campaign.get("provenance") if campaign else None,
         "counts": counts,
         "tests": out_tests,
     }

@@ -11,9 +11,75 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+REPO = os.path.dirname(os.path.dirname(HERE))
 
 from forgetest import catalog as catalog_mod  # noqa: E402
 from forgetest import manifest as manifest_mod  # noqa: E402
+
+# A provenance verdict for a run on its pins as built (provenance.py).
+CLEAN = {"clean": True, "why": [], "ran": {}}
+
+
+class ScriptedProvenance:
+    """provenance.Provenance as the runner calls it: each check answers
+    with the next verdict of the script, the last one repeating."""
+
+    def __init__(self, *verdicts):
+        self.verdicts = list(verdicts) or [CLEAN]
+        self.calls = 0
+
+    def check(self):
+        v = self.verdicts[min(self.calls, len(self.verdicts) - 1)]
+        self.calls += 1
+        return dict(v)
+
+
+# --------------------------------------------- the layer's classes, on a host
+
+class BitbakeFatal(Exception):
+    pass
+
+
+class _Bb:
+    """bitbake's `bb` as the classes' functions use it: a fatal stops."""
+
+    @staticmethod
+    def fatal(msg):
+        raise BitbakeFatal(msg)
+
+    @staticmethod
+    def note(msg):
+        pass
+
+
+class FakeData:
+    """A bitbake datastore that answers getVar from its keyword values."""
+
+    def __init__(self, **values):
+        self.values = values
+
+    def getVar(self, name, expand=True):
+        return self.values.get(name)
+
+
+def bbclass(name):
+    """The top-level `def` functions of meta-forgefirm/classes/<name>.bbclass
+    in one namespace, with a stand-in for bitbake's `bb`: the class's own
+    code, run on a host. Line numbers are the file's."""
+    path = os.path.join(REPO, "meta-forgefirm", "classes", name + ".bbclass")
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    ns = {"bb": _Bb}
+    block = None
+    for i, ln in enumerate(lines + ["end"]):
+        if block is not None and ln.strip() and not ln.startswith((" ", "\t")):
+            exec(compile("\n" * block[0] + "\n".join(block[1]), path, "exec"), ns)
+            block = None
+        if ln.startswith("def "):
+            block = (i, [ln])
+        elif block is not None:
+            block[1].append(ln)
+    return ns
 
 
 def blob(text):

@@ -9,8 +9,9 @@ Acceptance tests run in a worker thread with a Context: log lines, an
 operator prompt channel (the page shows the question, the answer comes
 back through the API), an abort flag, an evidence dict, hardware helpers,
 and the takeover wrapper for tests that need forgectrl out of the way.
-Results are appended to the log with the fingerprint the test ran under;
-the campaign rules (campaign.py) do the rest.
+Results are appended to the log with the fingerprint the test ran under
+and the provenance verdict (provenance.py: whether the machine runs its
+pins as built); the campaign rules (campaign.py) do the rest.
 
 Bench tools are subprocesses (bench.py registry): same single slot, same
 log pane, no campaign effect.
@@ -57,6 +58,7 @@ from . import campaign as _campaign
 from . import fixture as _fixture
 from . import catalog as _catalog
 from . import hw
+from . import provenance as _provenance
 from .log import now_ts, data_dir
 
 MAX_LINES = 4000
@@ -919,6 +921,7 @@ class Runner:
         self._fixture_lock = threading.Lock()
         self._fixture_said = None
         self.boot_ref = None
+        self.provenance = _provenance.Provenance(manifest)
         self.recover()
         threading.Thread(target=self._take_boot_reference, daemon=True,
                          name="forgetest-bootref").start()
@@ -1042,8 +1045,11 @@ class Runner:
         if state["campaign"]:
             return state["campaign"]
         cid = "c-%s-%04x" % (time.strftime("%Y%m%d%H%M%S", time.gmtime()), random.randrange(1 << 16))
+        # what the machine runs as the campaign opens: the component
+        # programs' hashes and whether they are the build's
         rec = self.log.append({"t": "campaign", "id": cid, "manifest_sha": self.manifest.content_sha,
-                               "catalog_hash": self.catalog_hash, "image": self.manifest.version})
+                               "catalog_hash": self.catalog_hash, "image": self.manifest.version,
+                               "provenance": self.provenance.check()})
         return rec
 
     def invalidate(self, reason):
@@ -1275,6 +1281,7 @@ class Runner:
     def _exec_test(self, t, run, campaign):
         ctx = Context(run, self, t)
         fp = t.fingerprint(self.manifest)
+        before = self.provenance.check()
         result, message = _campaign.PASS, ""
         captured = None
         try:
@@ -1314,9 +1321,12 @@ class Runner:
             run.log("baseline: post pass errored: %s: %s" % (type(e).__name__, e))
         duration = int(time.time() - run.started)
         run.log("result %s%s" % (result, (": " + message) if message else ""))
+        # whether the run was earned on the pins as built, judged before it
+        # and after it: a result that was not is never inherited
         rec = {"t": "result", "campaign": campaign["id"], "test": t.id, "result": result,
                "fingerprint": fp, "manifest_sha": self.manifest.content_sha,
                "image": self.manifest.version, "duration_s": duration, "message": message,
+               "provenance": _provenance.merge(before, self.provenance.check()),
                "evidence": run.evidence, "answers": run.answers, "log": list(run.lines)}
         self.log.append(rec)
         run.finished = {"result": result, "message": message, "duration_s": duration}

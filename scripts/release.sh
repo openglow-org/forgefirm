@@ -135,8 +135,18 @@ build_images () {
     CFG="$CFG:kas/source-bundle.yml"
     TARGETS="$TARGETS u-boot virtual/kernel kernel-module-glowforge"
   fi
+  # A release makes both images, and the acceptance tool's entry, again
+  # from the checkout as it stands: the manifest records the state of the
+  # layers, the kas configuration and the acceptance tool's sources when
+  # they are made, and no task signature moves when a change is committed
+  # unchanged, so an image an earlier build left (or its shared state)
+  # would carry the dirty marks of that build into the release check.
+  BUILD="bitbake $TARGETS"
+  if [ "$MODE" = release ]; then
+    BUILD="bitbake -c cleansstate forgefirm-image forgefirm-image-dev forgetest && $BUILD"
+  fi
   echo "== building images ($CFG) =="
-  ( cd "$REPO" && kas shell "$CFG" -c "bitbake $TARGETS" ) \
+  ( cd "$REPO" && kas shell "$CFG" -c "$BUILD" ) \
     || die "bitbake failed"
 }
 
@@ -174,6 +184,27 @@ sys.exit(0 if a == b else 1)' "$REPO/forgetest" "$REL_M" "$DEV_M" || SAME=1
   rm -f "$REL_M" "$DEV_M"
   [ "$SAME" = 0 ] \
     || die "the dev rootfs $(basename "$2") is not the build of the release rootfs $(basename "$1"): their manifests differ, or one carries none"
+}
+
+# A release is built from its pins as they are committed: the manifest of
+# the rootfs records no component built from a local checkout or from a
+# working tree that differs from its commit, no layer and no kas file that
+# differs from its commit, and no debug kernel (forgetest/forgetest/
+# provenance.py, manifest_reasons). forgetest never lets a PASS recorded
+# on such a build be inherited, and a release is no different.
+pins_only () {
+  PM=$(mktemp)
+  debugfs -R "cat /etc/forgefirm-manifest.json" "$1" > "$PM" 2>/dev/null || true
+  WHY=$(python3 -B -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from forgetest.manifest import Manifest
+from forgetest.provenance import manifest_reasons
+print("; ".join(manifest_reasons(Manifest.load(sys.argv[2]))))' "$REPO/forgetest" "$PM" 2>&1) \
+    || WHY="its manifest cannot be read: $WHY"
+  rm -f "$PM"
+  [ -z "$WHY" ] \
+    || die "the rootfs $(basename "$1") is not built from its pins: $WHY"
 }
 
 # The dev rootfs is sized and capped like the release one, so both take
@@ -267,6 +298,23 @@ echo "== gates =="
 if git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
   [ -z "$(git -C "$REPO" status --porcelain)" ] \
     || die "working tree is dirty - release from a clean tree"
+  # What the build reads must be the commit, file for file: the layer
+  # (bitbake reads every file its globs match), the kas configuration, the
+  # acceptance tool and the bench tools the dev image takes from this
+  # checkout, and the release scripts. Only the checkout's own .gitignore
+  # files may leave a file out there: a local exclude (.git/info/exclude,
+  # the user's global excludes file) hides a file from the check above,
+  # and the image manifest counts it as content. Nor may a tracked file
+  # carry an edit the index is told to ignore (skip-worktree,
+  # assume-unchanged), which git status does not report. Elsewhere in the
+  # checkout (a tool's output directory at the top) nothing is read.
+  BUILD_READS="meta-forgefirm kas forgetest scripts"
+  HIDDEN=$(git -C "$REPO" -c core.excludesFile=/dev/null ls-files --others --exclude-per-directory=.gitignore -- $BUILD_READS)
+  [ -z "$HIDDEN" ] \
+    || die "untracked files that only a local exclude hides (${HIDDEN%%$'\n'*} ...) - commit or remove them"
+  UNSEEN=$(git -C "$REPO" ls-files -v -- $BUILD_READS | grep -E '^[a-zS] ' || true)
+  [ -z "$UNSEEN" ] \
+    || die "tracked files whose changes the index ignores (${UNSEEN%%$'\n'*} ...) - clear skip-worktree and assume-unchanged"
   UP_REV=$(git -C "$REPO" rev-parse -q --verify "@{upstream}^{commit}" 2>/dev/null) || UP_REV=
   if [ -z "$UP_REV" ] || [ "$UP_REV" != "$(git -C "$REPO" rev-parse HEAD)" ]; then
     [ "$PUBLISH" = 1 ] && die "HEAD is not the commit its upstream names - push before publishing"
@@ -285,6 +333,39 @@ else
   [ "$PUBLISH" = 1 ] && die "$REPO is not a git checkout - a published release builds from a clean checkout"
   warn "$REPO is not a git checkout - repo-state gates skipped (rsynced build tree)"
 fi
+
+# The build configuration is the kas files and nothing else. bitbake also
+# reads build/conf/site.conf and build/conf/auto.conf, which kas leaves in
+# place and no manifest records.
+for CONF in site.conf auto.conf; do
+  [ ! -e "$REPO/build/conf/$CONF" ] \
+    || die "build/conf/$CONF changes the build and is recorded nowhere - remove it before a release"
+done
+
+# Every repository of the build comes from its url at the commit the lock
+# names. A repository with no url is a local checkout (the commented
+# local-sibling form of meta-openglow): kas performs no git operation on
+# it, the build takes whatever it holds, and the tag does not reproduce
+# the release.
+KAS_JSON=$( cd "$REPO" && kas dump --format json kas/forgefirm-glowforge.yml ) \
+  || die "kas dump failed"
+printf '%s' "$KAS_JSON" | python3 -B -c '
+import json, sys
+cfg = json.load(sys.stdin)
+locked = (cfg.get("overrides") or {}).get("repos") or {}
+bad = []
+for name, repo in sorted((cfg.get("repos") or {}).items()):
+    repo = repo or {}
+    if "url" not in repo and "path" not in repo:
+        continue    # this repository, which the repository-state gates check
+    if not repo.get("url"):
+        bad.append("%s has no url (a local checkout)" % name)
+    elif not (repo.get("commit") or (locked.get(name) or {}).get("commit")):
+        bad.append("%s names no commit (kas lock)" % name)
+for b in bad:
+    print(b, file=sys.stderr)
+sys.exit(1 if bad else 0)' \
+  || die "the kas configuration builds a repository from something other than its url at a locked commit"
 
 # Version single-source check.
 BB_REL=$(sed -n 's/^FORGEFIRM_RELEASE ?= "\(.*\)"/\1/p' "$RELEASE_INC")
@@ -324,6 +405,8 @@ check_size "$EXT4"
 resolve_dev_ext4
 check_size "$DEV_EXT4"
 same_build "$EXT4" "$DEV_EXT4"
+pins_only "$EXT4"
+pins_only "$DEV_EXT4"
 
 # Rootfs version stamp.
 STAMP=$(debugfs -R "cat /etc/forgefirm-version" "$EXT4" 2>/dev/null)

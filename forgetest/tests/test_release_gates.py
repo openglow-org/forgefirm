@@ -29,13 +29,30 @@ VERSION = "0.0.42"
 REL_NAME = "forgefirm-image-glowforge.rootfs-20260101000000"
 DEV_NAME = "forgefirm-image-dev-glowforge.rootfs-20260101000300"
 OTHER_DEV_NAME = "forgefirm-image-dev-glowforge.rootfs-20251201000000"
+DIRTY_REL_NAME = "forgefirm-image-glowforge.rootfs-20260102000000"
+DIRTY_DEV_NAME = "forgefirm-image-dev-glowforge.rootfs-20260102000300"
 SEARCH = os.pathsep.join([os.environ.get("PATH", ""), "/usr/sbin", "/sbin"])
 TOOLS = ("bash", "git", "debugfs", "mkfs.ext4", "base64", "sha256sum", "python3")
 
 KAS = r"""#!/bin/sh
-# A build records its command line; kas dump prints a config with no debug-tweaks.
-if [ "$1" = shell ]; then printf '%s\n' "$*" >> "$STUB_LOGS/kas.log"; else echo 'header: {version: 14}'; fi
+# A build records its command line; kas dump prints a config with no
+# debug-tweaks, and as JSON the repositories of the file KAS_DUMP names.
+case "$1 $2" in
+  shell*) printf '%s\n' "$*" >> "$STUB_LOGS/kas.log" ;;
+  "dump --format") cat "$KAS_DUMP" ;;
+  *) echo 'header: {version: 14}' ;;
+esac
 """
+# The resolved configuration as kas dump --format json prints it: this
+# repository (no url, no path), an upstream layer at its url, and the
+# commit the lock file names for it.
+KAS_DUMP = {"header": {"version": 14},
+            "repos": {"forgefirm": {"layers": {"meta-forgefirm": None}},
+                      "poky": {"url": "https://git.yoctoproject.org/poky.git", "branch": "scarthgap",
+                               "path": "layers/poky"}},
+            "overrides": {"repos": {"poky": {"commit": "7" * 40}}}}
+# The build section of a manifest built from the pins as they are committed.
+CLEAN_BUILD = {"layers": {"meta-forgefirm": {"rev": "8" * 40, "dirty": False}}, "kas": {"dirty": False}}
 GH = r"""#!/bin/sh
 printf '%s\n' "$@" > "$STUB_LOGS/gh.log"
 """
@@ -191,12 +208,24 @@ class ReleaseGateTests(unittest.TestCase):
             "user%05d:*:19000:0:99999:7:::\n" % i for i in range(8000))
         comps = {"forgectrl": {"srcrev": "aaa", "files": [["src/main.c", "1" * 40]]}}
         plat = {"machine": "glowforge"}
-        cls.rootfs(REL_NAME, {"format": 1, "components": comps, "platform": plat}, cls.shadow)
+        cls.rootfs(REL_NAME, {"format": 1, "components": comps, "platform": plat, "build": CLEAN_BUILD},
+                   cls.shadow)
         # The dev image carries forgetest besides: one build all the same.
         dev = dict(comps, forgetest={"srcrev": None, "files": [["forgetest/x.py", "2" * 40]]})
-        cls.rootfs(DEV_NAME, {"format": 1, "components": dev, "platform": plat}, cls.shadow)
+        cls.rootfs(DEV_NAME, {"format": 1, "components": dev, "platform": plat, "build": CLEAN_BUILD},
+                   cls.shadow)
         other = dict(dev, forgectrl={"srcrev": "bbb", "files": [["src/main.c", "3" * 40]]})
-        cls.rootfs(OTHER_DEV_NAME, {"format": 1, "components": other, "platform": plat}, cls.shadow)
+        cls.rootfs(OTHER_DEV_NAME, {"format": 1, "components": other, "platform": plat, "build": CLEAN_BUILD},
+                   cls.shadow)
+        # One build of a layer that differs from its commit: the same identity
+        # as the clean build, a dirty layer in the build section.
+        dirty = {"layers": {"meta-forgefirm": {"rev": "8" * 40, "dirty": True}}, "kas": {"dirty": False}}
+        cls.rootfs(DIRTY_REL_NAME, {"format": 1, "components": comps, "platform": plat, "build": dirty},
+                   cls.shadow)
+        cls.rootfs(DIRTY_DEV_NAME, {"format": 1, "components": dev, "platform": plat, "build": dirty},
+                   cls.shadow)
+        cls.kas_dump = os.path.join(cls.tmp, "kas-dump.json")
+        write(cls.kas_dump, json.dumps(KAS_DUMP))
 
         for name, text in (("kas", KAS), ("gh", GH), ("fwup-compat", FWUP_COMPAT)):
             write(os.path.join(cls.bin, name), text, 0o755)
@@ -236,7 +265,8 @@ class ReleaseGateTests(unittest.TestCase):
         cls.env = dict(GIT_ENV, PATH=cls.bin + os.pathsep + SEARCH, FWUP="true",
                        FWUP_COMPAT=os.path.join(cls.bin, "fwup-compat"),
                        RELEASE_RAW_KEY=os.path.join(cls.keys, "release.raw"),
-                       FORGEFIRM_SIGNING_KEY=cls.release_key, FORGEFIRM_DEV_KEY=cls.dev_key)
+                       FORGEFIRM_SIGNING_KEY=cls.release_key, FORGEFIRM_DEV_KEY=cls.dev_key,
+                       KAS_DUMP=cls.kas_dump)
         cls.passed = cls.case_at("passed")
         cls.passed_run = cls.passed.run(VERSION, "--publish")
 
@@ -322,6 +352,69 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(gh[:3], ["release", "create", "v" + VERSION], gh)
         self.assertIn("--verify-tag", gh)
 
+    def test_a_file_only_a_local_exclude_hides_stops_the_release(self):
+        # An externalsrc bbappend kept out of git status by the local exclude
+        # file: bitbake reads it, and the layer hash counts it.
+        c = self.case()
+        write(os.path.join(c.repo, "meta-forgefirm", "recipes-forgefirm", "forgectrl", "forgectrl.bbappend"),
+              'inherit externalsrc\nEXTERNALSRC = "/src/forgectrl"\n')
+        with open(os.path.join(c.repo, ".git", "info", "exclude"), "a") as f:
+            f.write("forgectrl.bbappend\n")
+        self.assertStoppedBeforeTheBuild(c, c.run(VERSION))
+
+    def test_a_file_a_local_exclude_hides_where_the_build_reads_nothing_does_not_stop_it(self):
+        # A tool's output at the top of the checkout, hidden the same way.
+        c = self.case()
+        write(os.path.join(c.repo, "graphify-out", "graph.json"), "{}\n")
+        with open(os.path.join(c.repo, ".git", "info", "exclude"), "a") as f:
+            f.write("graphify-out/\n")
+        p = c.run(VERSION)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_an_edit_the_index_is_told_to_ignore_stops_the_release(self):
+        # git status does not report a skip-worktree file's edit.
+        c = self.case()
+        inc = os.path.join("meta-forgefirm", "recipes-forgefirm", "images", "forgefirm-release.inc")
+        git(c.repo, "update-index", "--skip-worktree", inc)
+        with open(os.path.join(c.repo, inc), "a") as f:
+            f.write("# a local edit\n")
+        self.assertStoppedBeforeTheBuild(c, c.run(VERSION))
+
+    # ------------------------------------------------- the build's inputs
+
+    def test_a_build_conf_that_kas_does_not_write_stops_the_release(self):
+        c = self.case()
+        write(os.path.join(c.repo, "build", "conf", "auto.conf"), 'IMAGE_INSTALL:append = " strace"\n')
+        self.assertStoppedBeforeTheBuild(c, c.run(VERSION))
+
+    def test_a_repository_from_a_local_checkout_stops_the_release(self):
+        # The commented local-sibling form of meta-openglow: a path, no url.
+        c = self.case()
+        dump = json.loads(json.dumps(KAS_DUMP))
+        dump["repos"]["meta-openglow"] = {"path": "../meta-openglow", "layers": {"meta-glowforge-bsp": None}}
+        path = os.path.join(c.root, "kas-dump.json")
+        write(path, json.dumps(dump))
+        self.assertStoppedBeforeTheBuild(c, c.run(VERSION, KAS_DUMP=path))
+
+    def test_a_repository_with_no_locked_commit_stops_the_release(self):
+        c = self.case()
+        dump = json.loads(json.dumps(KAS_DUMP))
+        dump["repos"]["meta-openglow"] = {"url": "https://github.com/openglow-org/meta-openglow.git",
+                                          "branch": "scarthgap", "path": "layers/meta-openglow"}
+        path = os.path.join(c.root, "kas-dump.json")
+        write(path, json.dumps(dump))
+        self.assertStoppedBeforeTheBuild(c, c.run(VERSION, KAS_DUMP=path))
+
+    def test_a_release_makes_its_images_again_before_it_builds(self):
+        # The images, and the acceptance tool's entry, are made from the
+        # checkout as it stands, never taken from an earlier build.
+        self.assertEqual(self.passed_run.returncode, 0, self.passed_run.stdout + self.passed_run.stderr)
+        build = self.passed.log("kas.log").splitlines()[-1]
+        clean, _, make = build.partition("&&")
+        self.assertEqual(clean.split("bitbake", 1)[1].split(),
+                         ["-c", "cleansstate", "forgefirm-image", "forgefirm-image-dev", "forgetest"])
+        self.assertIn("forgefirm-image-dev", make.split())
+
     # -------------------------------------------------------------- staging
 
     def test_a_release_stopped_after_the_signatures_leaves_nothing_where_the_publish_looks(self):
@@ -373,6 +466,16 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
         self.assertIsNone(c.log("mkfw.log"), "signed before the identity gate")
         self.assertFalse(os.path.exists(c.staging))
+
+    def test_a_rootfs_not_built_from_its_pins_stops_the_release_before_the_signatures(self):
+        # One build, its two images agreeing, from a layer that differs from
+        # its commit.
+        c = self.case()
+        c.link("forgefirm-image-glowforge.rootfs.ext4", DIRTY_REL_NAME + ".ext4")
+        c.link("forgefirm-image-dev-glowforge.rootfs.ext4", DIRTY_DEV_NAME + ".ext4")
+        p = c.run(VERSION)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIsNone(c.log("mkfw.log"), "signed a rootfs built from a layer that differs from its commit")
 
     def test_the_root_password_gate_reads_a_large_shadow_to_its_end(self):
         # Root is the first line of a shadow larger than a pipe holds, so a
