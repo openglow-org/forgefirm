@@ -6,7 +6,7 @@ HOMEPAGE = "https://github.com/openglow-org/forgeext"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=785c97b59b518e7ad943cd9e8b15fc97"
 
-SRC_URI = "git://github.com/openglow-org/forgeext.git;protocol=https;branch=main"
+SRC_URI = "git://github.com/openglow-org/forgeext.git;protocol=https;branch=next"
 # SRCREV and PV live in the pin file (forgefirm-image-manifest.bbclass).
 require forgeext-pin.inc
 

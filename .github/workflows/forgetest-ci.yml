@@ -18,7 +18,8 @@
 #    carries are byte-identical to forgectrl's at its pinned revision
 #  - the extension key: the public key the image installs for the official
 #    tier is byte-identical to the one the extension catalog publishes
-#    (keys/forgefirm-ext.pub on its main branch)
+#    (keys/forgefirm-ext.pub on its main branch, or on its next branch
+#    in a run on next)
 #  - the catalog's address: EXTPKG_INDEX_URL in the pinned forgectrl's
 #    src/extpkg.h is the catalog's latest-release download of the file its
 #    tools/publish.py passes to gh release create; read, never requested
@@ -33,7 +34,7 @@ name: forgetest-ci
 
 on:
   push:
-    branches: [master]
+    branches: [master, next]
     paths:
       - 'forgetest/**'
       - 'scripts/acceptance-gate.py'
@@ -41,8 +42,12 @@ on:
       - 'scripts/source-bundle.py'
       - 'scripts/release.sh'
       - 'scripts/mkfw.sh'
+      - 'scripts/install-forgefirm.sh'
+      - 'scripts/check-ui-vendor.py'
+      - 'scripts/release-branch-check.py'
       - 'scripts/bench/**'
       - 'kas/source-bundle.yml'
+      - 'meta-forgefirm/classes/**'
       - 'meta-forgefirm/recipes-forgefirm/**'
       - 'meta-forgefirm/wic/**'
       - '.github/workflows/forgetest-ci.yml'
@@ -63,14 +68,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: openglow-org/meta-openglow
-          ref: scarthgap
+          ref: ${{ (github.ref_name == 'next' || github.base_ref == 'next') && 'next' || 'scarthgap' }}
           path: meta-openglow
 
       - name: Checkout forgefirm-extensions-catalog (sibling)
         uses: actions/checkout@v4
         with:
           repository: openglow-org/forgefirm-extensions-catalog
-          ref: main
+          ref: ${{ (github.ref_name == 'next' || github.base_ref == 'next') && 'next' || 'main' }}
           path: forgefirm-extensions-catalog
 
       - name: Set up Python

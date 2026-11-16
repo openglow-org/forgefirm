@@ -8,7 +8,7 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=785c97b59b518e7ad943cd9e8b15fc97"
 
 PE = "1"
 
-SRC_URI = "git://github.com/openglow-org/forgectrl.git;protocol=https;branch=main"
+SRC_URI = "git://github.com/openglow-org/forgectrl.git;protocol=https;branch=next"
 # SRCREV and PV live in the pin file (forgefirm-image-manifest.bbclass).
 require forgectrl-pin.inc
 

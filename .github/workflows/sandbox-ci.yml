@@ -15,7 +15,7 @@ name: sandbox-ci
 
 on:
   push:
-    branches: [master]
+    branches: [master, next]
     paths:
       - 'meta-forgefirm/recipes-forgefirm/forgefirm-sandbox/**'
       - 'scripts/sandbox-rules-test.py'

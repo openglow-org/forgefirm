@@ -73,13 +73,13 @@ repos:
       .:
 
   # --- meta-openglow - Glowforge BSP layers ---------------------------------
-  # Referenced as a local sibling checkout (no url => kas performs no git ops,
-  # so in-place BSP edits are what gets built). The kernel-module-glowforge
-  # sources are NOT a layer; the kernel-module-glowforge.bb recipe fetches them
-  # by pinned SRCREV, so kas does not manage them here.
-  # Release: the pinned-remote block, the commit in the lock file
-  # (kas/forgefirm-glowforge.lock.yml). The local-sibling alternative for
-  # development (no url => kas performs no git ops, so in-place BSP edits
+  # The pinned-remote block below: the GitHub repository at the commit in the
+  # lock file (kas/forgefirm-glowforge.lock.yml). kas checks that the branch
+  # named here holds that commit, and `kas lock --update` moves the commit to
+  # the head of that branch. The kernel-module-glowforge sources are NOT a
+  # layer; the kernel-module-glowforge.bb recipe fetches them by pinned
+  # SRCREV, so kas does not manage them here. The local-sibling alternative
+  # for development (no url => kas performs no git ops, so in-place BSP edits
   # are what gets built; see the site, Developers, "Release flow"):
   #   meta-openglow:
   #     path: ../meta-openglow
@@ -88,7 +88,7 @@ repos:
   #       meta-glowforge-bsp:
   meta-openglow:
     url: https://github.com/openglow-org/meta-openglow.git
-    branch: scarthgap
+    branch: next
     path: layers/meta-openglow
     layers:
       meta-openglow-core:

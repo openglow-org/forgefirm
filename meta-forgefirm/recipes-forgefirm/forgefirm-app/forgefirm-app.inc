@@ -11,7 +11,7 @@ HOMEPAGE = "https://github.com/openglow-org/python3-gfhardware"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=314d21c23b626bdadbb4801c47b16266"
 
-SRC_URI = "git://github.com/openglow-org/python3-gfhardware.git;protocol=https;branch=master"
+SRC_URI = "git://github.com/openglow-org/python3-gfhardware.git;protocol=https;branch=next"
 # SRCREV and PV live in the pin file (forgefirm-image-manifest.bbclass).
 require forgefirm-app-pin.inc
 

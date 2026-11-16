@@ -50,8 +50,8 @@ contributor is welcome to read it too: it is the same set of rules.
 ### CI couplings that set the push order
 
 - The CI of `grblHAL-glowforge` gets the laser harnesses from `scripts/bench/`
-  at the head of `master`, unpinned. Push a harness change here before the
-  driver change that needs it.
+  at the head of `master` (of `next` in a run on `next`), unpinned. Push a
+  harness change here before the driver change that needs it.
 - The acceptance page shares its theme and its vendored Bootstrap with the
   `forgectrl` panel, byte for byte. Land a UI change in `forgectrl` first.
   Push it and pin it. Only then push this repository.

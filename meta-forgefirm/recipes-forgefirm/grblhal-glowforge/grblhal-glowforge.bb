@@ -9,7 +9,7 @@ LIC_FILES_CHKSUM = "file://COPYING;md5=ea8d0b3d9e732587396d0345870910f0"
 # gitsm: the grblHAL core rides as a submodule (openglow-org/grblHAL-core, branch
 # forgefirm = upstream master + the step_us_min buffer fix pending
 # upstream).
-SRC_URI = "gitsm://github.com/openglow-org/grblHAL-glowforge.git;protocol=https;branch=main"
+SRC_URI = "gitsm://github.com/openglow-org/grblHAL-glowforge.git;protocol=https;branch=next"
 # SRCREV and PV live in the pin file (forgefirm-image-manifest.bbclass).
 require grblhal-glowforge-pin.inc
 
