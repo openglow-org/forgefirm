@@ -10,8 +10,10 @@
  * Streams NOP (0x00) pulse bytes to /dev/glowforge, pacing by wall clock to
  * hold a bounded queue depth (like a real grblHAL backend would),
  * with the deadman flock held. The caller locks the motors and the laser
- * latch first: write 1 to /sys/glowforge/cnc/motor_lock and 1 to
- * /sys/glowforge/cnc/laser_latch, and read both back before starting.
+ * latch first: write 15 to /sys/glowforge/cnc/motor_lock (every axis: 1
+ * locks X alone) and 1 to /sys/glowforge/cnc/laser_latch, and read both
+ * back before starting. Not on the image: cross-compile it with
+ * build-feeder.sh and copy the binary to /tmp on the board.
  *
  * Reports: feed statistics, worst scheduling stall, ENOMEM count, and the
  * final driver state (expect "running" throughout, "underrun" only after

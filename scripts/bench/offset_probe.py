@@ -13,11 +13,13 @@ the heater PWM (7), the exhaust tach (8) and the exhaust PWM (9); the
 intake fans and the HV lines are on J1, the air assist on the head. This
 probe switches one actuator at a time, dark (no laser, no press), with
 both sensors sampled at 25 Hz, and scores the common-mode step at every
-edge and the toggling inside every dwell. Runs on the board with
-forgectrl idle (the engine writes the fans only at session transitions,
-so a write here stands until the next session); every value is restored
-on the way out, whatever happens. The pump is stopped for one short dwell
-with the tube dark and the heater off, the one pump-off state allowed.
+edge and the toggling inside every dwell. The actuator runs (the survey
+and the ladder) drive the thermal hardware behind the cooling engine and
+stop the pump for one short dwell, so they run with forgectrl, the
+controller and the cloud client stopped (the bench page's takeover) and
+refuse while any of them runs: with none, nothing can arm a job, and the
+tube stays dark while the pump is off. Every value is restored on the way
+out, whatever happens.
 
 Usage: offset_probe.py [repeat]   (repeats of the exhaust-run edge, default 2)
        offset_probe.py ladder     (the air-assist duty ladder alone: the step
@@ -29,11 +31,8 @@ Usage: offset_probe.py [repeat]   (repeats of the exhaust-run edge, default 2)
                                    35 mm +X and 10 mm +Y free; no laser, no press)
 Record: FORGETEST_BENCH_DATA or /tmp, offset_probe_<stamp>.json (jog: offset_jog_<stamp>.json)
 """
-import atexit
 import json
-import math
 import os
-import signal
 import sys
 import threading
 import time
@@ -46,13 +45,8 @@ LEDS = '/sys/class/leds/'
 HZ = 25
 PRE, POST, GAP = 1.5, 1.5, 0.3      # seconds around an edge for the step means
 
-# B-equation from status.c: 10k B3380 NTC in a 10k divider behind a 1.3x
-# reference.
-ADC_F = 1024.0 * 1.3
-RINF = 10000.0 * math.exp(-3380.0 / 298.15)
 
-
-from gfbench import degc, forgectrl_get, forgectrl_post
+from gfbench import arming_processes, degc, exit_on_signal, put_back
 
 
 def rd(path):
@@ -169,6 +163,7 @@ def run_jog():
         phases.append((label, t0, time.time()))
         print('  %+7.1f s  %s done' % (time.time() - phases[0][1], label), flush=True)
 
+    failed = []
     try:
         phase('still, fan idle', None, False, 10)
         phase('fan run, still', 1023, False, 15)
@@ -177,17 +172,11 @@ def run_jog():
         phase('fan idle, jogging', 204, True, 30)
         phase('fan idle, still', None, False, 10)
     finally:
-        stop_motion.set()
-        try:
-            g.wait_state('Idle', 20)
-            g.cmd('G90')
-        except Exception:
-            pass
-        if orig is not None:
-            wr(aa, orig)
-        time.sleep(2)
-        sampler.stop.set()
-        sampler.join(2)
+        # The air assist first; a second Abort waits for every step.
+        failed = put_back(('put the air assist back to %s' % orig, lambda: orig is not None and wr(aa, orig)),
+                          ('stop the jogs', stop_motion.set),
+                          ('wait for Idle and absolute mode', lambda: (g.wait_state('Idle', 20), g.cmd('G90'))),
+                          ('stop the sampler', lambda: (time.sleep(2), sampler.stop.set(), sampler.join(2))))
     tr = sampler.samples
     print('\n%d samples, %.1f Hz' % (len(tr), (len(tr) - 1) / (tr[-1][0] - tr[0][0])))
     print('--- per phase: level toggles (both sensors, >= 0.45 C), the readings and the air-assist tach ---')
@@ -212,7 +201,7 @@ def run_jog():
     with open(path, 'w') as f:
         json.dump(rec, f)
     print('record: %s' % path)
-    return 0
+    return 1 if failed else 0
 
 
 def run_armed():
@@ -355,42 +344,22 @@ def run_armed():
     return 0 if not lit else 1
 
 
-def flow_watch_off():
-    """The coolant flow watch, when an owner has it on, holds the loop heater
-    at idle and writes it every second: the probe's heater and pump steps want
-    the heater its own. The watch goes off for the run and comes back at exit
-    (a SIGTERM or a lost terminal included). Returns False when it would not
-    turn off."""
-    st, s = forgectrl_get('/settings')
-    if st != 200 or not isinstance(s, dict):
-        return True                    # no forgectrl: no watch either
-    was = s.get('cool_flow_watch', '')
-    if was in ('', '0'):
-        return True
-    st, _ = forgectrl_post('/settings', params={'cool_flow_watch': '0'})
-    if st != 200:
-        print('REFUSED: the coolant flow watch could not be turned off (%s)' % st)
-        return False
-    atexit.register(lambda: forgectrl_post('/settings', params={'cool_flow_watch': was}))
-    # Only "off" is the watch out of the heater's way: "wait" is a watch that
-    # has not begun, and one that begins may hold the loop.
-    for _ in range(15):                # it reads its setting every 5 s
-        st, fw = forgectrl_get('/cool/flow')
-        if st == 200 and isinstance(fw, dict) and fw.get('watch') == 'off':
-            print('the coolant flow watch is off for the probe')
-            return True
-        time.sleep(1)
-    print('REFUSED: the coolant flow watch did not turn off in 15 s')
-    return False
+class Refused(RuntimeError):
+    pass
 
 
-def stop_on_signal(signum, frame):
-    raise SystemExit(128 + signum)
+def refuse_if_armable(when):
+    """Raise Refused when anything that can arm a job runs: forgectrl, a
+    controller, the cloud client, or any holder of the pulse device."""
+    owners = arming_processes()
+    if owners:
+        raise Refused('%s running %s; the survey and the ladder need forgectrl, the '
+                      'controller and the cloud client stopped (the bench page runs them '
+                      'under its takeover)' % (', '.join(owners), when))
 
 
 def main():
-    signal.signal(signal.SIGTERM, stop_on_signal)
-    signal.signal(signal.SIGHUP, stop_on_signal)
+    exit_on_signal()
     if len(sys.argv) > 1 and sys.argv[1] == 'jog':
         return run_jog()
     if len(sys.argv) > 1 and sys.argv[1] == 'armed':
@@ -407,7 +376,14 @@ def main():
         'tec': SYSFS + 'thermal/tec_on',
         'lid_led': LEDS + 'lid_led/brightness',
     }
-    if not flow_watch_off():
+    # Nothing may arm a job while the pump is off, and nothing else may own
+    # the heater and the fans the probe switches: forgectrl, the controller
+    # and the cloud client are stopped (the bench page's takeover). Checked
+    # here and again right before the pump goes off.
+    try:
+        refuse_if_armable('at the start')
+    except Refused as e:
+        print('REFUSED: %s' % e)
         return 2
     orig = {k: rd(p) for k, p in attrs.items()}
     print('start values: %s' % orig)
@@ -438,6 +414,8 @@ def main():
     sampler = Sampler()
     sampler.start()
     edges = []
+    failed = []
+    stopped = None
     try:
         for label, key, val, dwell in sched:
             if label == 'all run fans':
@@ -454,6 +432,8 @@ def main():
                 edges.append((t, 'all fans off'))
                 time.sleep(12)
                 continue
+            if key == 'pump' and not val:
+                refuse_if_armable('before the pump-off dwell')
             if key:
                 t = time.time()
                 wr(attrs[key], val)
@@ -471,16 +451,17 @@ def main():
                         wr(attrs[key], val)
             else:
                 time.sleep(dwell)
+    except Refused as e:
+        stopped = e
     finally:
-        for k, p in attrs.items():
-            if orig[k] is not None:
-                try:
-                    wr(p, orig[k])
-                except OSError as e:
-                    print('RESTORE FAILED %s: %s' % (k, e))
-        time.sleep(3)
-        sampler.stop.set()
-        sampler.join(2)
+        # The heater and the pump first; a second Abort waits for them all.
+        order = ['heater', 'pump', 'tec'] + [k for k in attrs if k not in ('heater', 'pump', 'tec')]
+        failed = put_back(*[('put %s back to %s' % (k, orig[k]), lambda k=k: wr(attrs[k], orig[k]))
+                            for k in order if orig[k] is not None],
+                          ('stop the sampler', lambda: (time.sleep(3), sampler.stop.set(), sampler.join(2))))
+    if stopped is not None:
+        print('STOPPED: %s' % stopped)
+        return 1 if failed else 2
     tr = sampler.samples
     t0 = edges[0][0]
     print('\n%d samples, %.1f Hz' % (len(tr), (len(tr) - 1) / (tr[-1][0] - tr[0][0])))
@@ -509,7 +490,7 @@ def main():
         json.dump(rec, f)
     print('record: %s' % path)
     print('end values: %s' % {k: rd(p) for k, p in attrs.items()})
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':

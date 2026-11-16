@@ -20,15 +20,28 @@ board(cmd)     run a shell command on the machine and return its stdout
 degc(raw)      the factory B-equation coolant conversion
                (docs.forgefirm.org, the sensors page).
 data_path(f)   where a tool keeps its data files: FORGETEST_BENCH_DATA
-               when set (the bench page passes <data>/bench/), else next
-               to the tool.
+               when set (the bench page passes <data>/bench/), else
+               /data/forgetest/bench on the board and next to the tool on
+               a LAN host.
 forgectrl_*    the machine-services HTTP API (:80) with the panel token
                from GF_TOKEN or, on the board, /data/forgefirm/panel.token.
+               forgectrl answers a write only from loopback, so a tool
+               that writes runs on the board.
+arming_processes()  forgectrl, a GRBL controller, the cloud client and
+               any holder of the pulse device while they run: the
+               processes that can arm a job. A tool that stops the pump or
+               drives the thermal hardware itself runs only when there are
+               none (the bench page's takeover).
+exit_on_signal(), put_back(...)
+               SIGTERM (the bench page's Abort) and SIGHUP end a tool
+               through its finally blocks; each restore step there runs in
+               its own try, and a second signal waits for all of them.
 """
 import json
 import math
 import os
 import shlex
+import signal
 import subprocess
 import urllib.error
 import urllib.parse
@@ -36,13 +49,16 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+BOARD_SYSFS = "/sys/glowforge"
+BOARD_DATA = "/data/forgetest/bench"     # the bench page's <data>/bench/
+PROC = "/proc"
 
 
 def _resolve():
     host = os.environ.get("GF_HOST")
     if host:
         return host, host in _LOCAL_HOSTS
-    if os.path.isdir("/sys/glowforge"):
+    if os.path.isdir(BOARD_SYSFS):
         return "127.0.0.1", True
     raise SystemExit("set GF_HOST to the machine IP address (or run this on the board)")
 
@@ -80,11 +96,16 @@ def degc(raw):
 
 
 def data_dir():
+    """FORGETEST_BENCH_DATA, else the page's directory on the board (the
+    tools' own directory there is the read-only rootfs), else next to the
+    tool."""
     d = os.environ.get("FORGETEST_BENCH_DATA")
-    if d:
-        os.makedirs(d, exist_ok=True)
-        return d
-    return HERE
+    if not d:
+        if not os.path.isdir(BOARD_SYSFS):
+            return HERE
+        d = BOARD_DATA
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def data_path(name):
@@ -176,3 +197,99 @@ def setting(key, default=None):
         except OSError:
             pass
     return default
+
+
+# ------------------------------------------------- the machine's owners
+
+# The command names (comm, 15 characters at most) of the processes that
+# hold the pulse device or can arm a job; the cloud client is a script,
+# found by its command line. The takeover of the bench page waits for the
+# same three to be gone.
+ARMING_COMMS = ("forgectrl", "grblHAL_glowfor")
+ARMING_SCRIPT = b"gfcloud.py"
+PULSE_DEVICE = "/dev/glowforge"
+
+
+def holds_pulse_device(pid):
+    """True when the process has the pulse device open, whatever its name
+    (a controller under another name included). A descriptor table this
+    process may not read (another user's, off the board) reads as not."""
+    fds = os.path.join(PROC, pid, "fd")
+    try:
+        names = os.listdir(fds)
+    except OSError:
+        return False
+    for name in names:
+        try:
+            if os.readlink(os.path.join(fds, name)) == PULSE_DEVICE:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def arming_processes():
+    """['<pid> <name>', ...] for every process that can arm a job, from
+    /proc: forgectrl, a controller, the cloud client, and anything holding
+    the pulse device. An unreadable /proc reads as one, so a caller
+    refuses."""
+    try:
+        pids = [p for p in os.listdir(PROC) if p.isdigit()]
+    except OSError as e:
+        return ["(%s unreadable: %s)" % (PROC, e)]
+    found = []
+    for pid in pids:
+        try:
+            with open(os.path.join(PROC, pid, "comm"), "rb") as f:
+                comm = f.read().strip().decode("ascii", "replace")
+            with open(os.path.join(PROC, pid, "cmdline"), "rb") as f:
+                cmdline = f.read()
+        except OSError:
+            continue                    # gone while listed
+        if comm in ARMING_COMMS:
+            found.append("%s %s" % (pid, comm))
+        elif any(os.path.basename(a) == ARMING_SCRIPT for a in cmdline.split(b"\0")):
+            found.append("%s %s" % (pid, ARMING_SCRIPT.decode()))
+        elif holds_pulse_device(pid):
+            found.append("%s %s (holds %s)" % (pid, comm, PULSE_DEVICE))
+    return found
+
+
+# ------------------------------------------------------------- signals
+
+def stop_on_signal(signum, frame):
+    raise SystemExit(128 + signum)
+
+
+def exit_on_signal():
+    """SIGTERM (the bench page's Abort) and SIGHUP (a lost terminal) end
+    the tool through SystemExit, so its finally blocks put back what it
+    changed; Python's default for both ends the process without them."""
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop_on_signal)
+
+
+def put_back(*steps):
+    """Run each (label, callable) restore step in its own try, so a step
+    that fails never skips the steps after it. A SIGTERM or a SIGHUP that
+    arrives meanwhile (a second Abort) is held until every step has run,
+    then ends the tool. Returns the labels of the steps that failed."""
+    held = []
+    saved = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        saved[sig] = signal.getsignal(sig)
+        signal.signal(sig, lambda signum, frame: held.append(signum))
+    failed = []
+    try:
+        for label, step in steps:
+            try:
+                step()
+            except BaseException as e:  # noqa: B036 - a fail()'s SystemExit included
+                failed.append(label)
+                print("WARNING: could not %s: %s: %s" % (label, type(e).__name__, e), flush=True)
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+    if held:
+        raise SystemExit(128 + held[0])
+    return failed

@@ -27,7 +27,8 @@ Usage:
                                                supply_calibration.json.
 
 Points accumulate in temp_calibration.json in the bench data directory
-(gfbench.data_path: next to this script, or FORGETEST_BENCH_DATA). Take
+(gfbench.data_path: FORGETEST_BENCH_DATA, else /data/forgetest/bench on
+the board, else next to this script on a LAN host). Take
 at least two points as far apart in temperature as practical (e.g. cold
 machine in the morning, and warm after a fan-off soak with the flow
 heater on).

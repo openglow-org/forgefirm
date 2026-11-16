@@ -16,7 +16,7 @@ SoC's own pins, with no kernel change and no scope:
 The sampler arms rising-edge detection for GPIO3 pin 24 only (ICR2 bits
 17:16), clears that pin's sticky ISR flag, then polls ISR bit 24 and the two
 readback pads in a loop with a ~100 us sleep per pass, restoring ICR2 on
-exit. GPIO3 IMR bit 24 must be clear (nothing has an interrupt on that pin;
+every exit (the bench page's Abort and a lost terminal included). GPIO3 IMR bit 24 must be clear (nothing has an interrupt on that pin;
 the run refuses otherwise), so the kernel never sees the flag. Reads and
 writes go through /dev/mem; the CHG_PUMP pad has SION set in the device
 tree, so its pad state is visible. The loop must not hog the CPU: only the
@@ -41,6 +41,9 @@ Grbl client attached (a connection here displaces the sender).
 """
 import mmap, os, socket, sys, time
 
+from gfbench import exit_on_signal, put_back
+
+MEM = '/dev/mem'
 GPIO1, GPIO3, GPIO4 = 0x0209C000, 0x020A4000, 0x020A8000
 PSR, ICR2, IMR, ISR = 0x08, 0x10, 0x14, 0x18
 PULSE_PIN = 24            # GPIO3_24 CHG_PUMP
@@ -52,12 +55,13 @@ DEFAULT_JOGS = ['$J=G91 X5 F300', '$J=G91 X-5 F300']
 
 
 def main():
+    exit_on_signal()
     dur = float(sys.argv[1]) if len(sys.argv) > 1 else 14.0
     jogs = sys.argv[2:] if len(sys.argv) > 2 else DEFAULT_JOGS
     if jogs == ['-']:
         jogs = []
 
-    fd = os.open('/dev/mem', os.O_RDWR | os.O_SYNC)
+    fd = os.open(MEM, os.O_RDWR | os.O_SYNC)
 
     def M(base):
         return mmap.mmap(fd, 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=base)
@@ -95,6 +99,7 @@ def main():
     icr2_orig = rd(g3, ICR2)
     isr_clear = (1 << PULSE_PIN).to_bytes(4, 'little')
     events = []
+    failed = []
     maxgap = n = 0
     try:
         wr(g3, ICR2, (icr2_orig & ~(0x3 << 16)) | (0x2 << 16))   # pin 24: rising edge
@@ -136,10 +141,9 @@ def main():
                 break
             time.sleep(SLEEP_S)
     finally:
-        wr(g3, ICR2, icr2_orig)
-        wr(g3, ISR, 1 << PULSE_PIN)
-        if sock:
-            sock.close()
+        failed = put_back(('restore GPIO3 ICR2', lambda: wr(g3, ICR2, icr2_orig)),
+                          ('clear the pump pin flag', lambda: wr(g3, ISR, 1 << PULSE_PIN)),
+                          ('close the Grbl connection', lambda: sock is not None and sock.close()))
 
     print('samples=%d  mean period=%.1f us  worst gap=%.1f us' % (n, (tprev - t0) / max(n, 1) / 1e3, maxgap / 1e3))
     print()
@@ -174,7 +178,7 @@ def main():
         print('prime -> Q high: mean %.1f us (n=%d)' % (sum(prime) / len(prime), len(prime)))
     if hvq:
         print('Q fall -> HV_ENABLE fall: mean %.1f us (n=%d)' % (sum(hvq) / len(hvq), len(hvq)))
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':

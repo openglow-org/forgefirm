@@ -69,31 +69,12 @@ TOOLS = [
      "args": [_arg("duration_s", "float", 14.0, "capture length")],
      "desc": "Latches CHG_PUMP feed pulses, polls the watchdog readbacks while commanding short local jogs. Motion only, laser locked."},
     {"id": "accel-fast", "title": "Head accelerometer sampler", "script": "accel_fast.py",
-     "safety": "dry", "where": "board", "ported": True,
-     "args": [_arg("duration_s", "float", 5.0, "capture length"),
-              _arg("jog1", "str", None, "optional mid-capture jog, e.g. $J=G91X20F2400"),
-              _arg("jog2", "str", None, "optional second jog")],
-     "desc": "Direct-I2C sampler for the head-bus LIS2HH12s with optional mid-capture jogs. CSV to /tmp/accel.csv."},
-    {"id": "bump-seek", "title": "Accelerometer bump-seek homing prototype", "script": "bump_seek.py",
-     "safety": "dry", "where": "board", "ported": True,
-     "args": [_arg("direction", "choice", "-", "X direction", ["-", "+"]),
-              _arg("feed", "int", 120, "creep feed"), _arg("segment_mm", "float", 15.0, "jog segment"),
-              _arg("max_mm", "float", 200.0, "travel bound")],
-     "desc": "Creeps toward a rail in bounded jog segments, detects the contact jolt, jog-cancels and backs off."},
-    {"id": "accel-crash-probe", "title": "Head accel crash-detector probe", "script": "accel_crash_probe.py",
-     "safety": "dry", "where": "board", "ported": True,
-     "args": [_arg("seconds", "float", 20.0, "arm-and-watch window"),
-              _arg("mode", "choice", "coexist", "coexist keeps st_accel bound (forgectrl up); unbind frees it",
-                   ["coexist", "unbind"], flag="--mode"),
-              _arg("ths", "int", 40, "per-axis threshold register value 0..255", flag="--ths"),
-              _arg("dur", "int", 0, "IG_DUR1 duration counter (ODR samples)", flag="--dur"),
-              _arg("axes", "str", "xyz", "axes to arm for high events", flag="--axes"),
-              _arg("jog", "str", None, "optional one jog at t=2 s, e.g. $J=G91X5F1000 (+X only)", flag="--jog")],
-     "desc": "Arms the head LIS2HH12's on-chip interrupt generator (IG1) and polls IG_SRC1 for a latched strike. "
-             "coexist mode reaches the IG registers over i2c-dev with st_accel still bound (the forgectrl-only "
-             "path proof); provoke a trip by hand or with --jog. Touches the IG registers and CTRL1 "
-             "(saved, run at 800 Hz, restored; the IG only samples at a running ODR), no emission, "
-             "no full-scale change. CSV to /tmp/accel_crash.csv."},
+     "safety": "takeover", "where": "board", "ported": True,
+     "args": [_arg("duration_s", "float", 5.0, "capture length")],
+     "desc": "Direct-I2C sampler for the head-bus LIS2HH12s. It unbinds st_accel for the capture, so it runs "
+             "under the takeover (forgectrl's liveness probe and crash watch read the same part) and refuses "
+             "while anything can arm; nothing here commands motion. st_accel is bound again on every exit, "
+             "an Abort included, and a rebind that did not take exits 1. CSV to /tmp/accel.csv."},
     # -- board-side, takeover / scope ------------------------------------------
     {"id": "pwm-sweep", "title": "LASER_PWM scope sweep", "script": "pwm_sweep.py",
      "safety": "scope", "where": "board", "ported": True,
@@ -124,15 +105,24 @@ TOOLS = [
      "desc": "Dead-man trip readback, rmmod/modprobe cycles under load, decay/microstep readback, LED sequence."},
     # -- cooling ------------------------------------------------------------------
     {"id": "offset-probe", "title": "Coolant-sensor offset probe", "script": "offset_probe.py",
-     "safety": "dry", "where": "board", "ported": True,
+     "safety": "takeover", "where": "board", "ported": True,
      "args": [_arg("mode", "choice", "survey", "survey: one actuator at a time; ladder: the air-assist "
-                   "duty ladder; jog: the air assist at run duty while the gantry jogs",
-                   ["survey", "ladder", "jog"])],
+                   "duty ladder", ["survey", "ladder"])],
      "desc": "Which actuator moves both coolant thermistors together? Switches the exhaust (100/50/25 "
              "percent), intakes, air assist, purge, heater, pump, TEC and lid lamp one at a time, dark, "
              "with both sensors at 25 Hz, and scores the common-mode step at every edge and the level "
              "toggling inside every dwell; every value is restored on exit. The pump stops once for "
-             "8 s with the tube dark and the heater off. About five minutes."},
+             "8 s with the heater off. Under the takeover, so nothing can arm a job while the pump is "
+             "off; the probe refuses while forgectrl, the controller, the cloud client or any holder of "
+             "the pulse device runs, checked again before the pump goes off. About "
+             "five minutes."},
+    {"id": "offset-probe-jog", "title": "Coolant-sensor readings under motion", "script": "offset_probe.py",
+     "safety": "dry", "where": "board", "ported": True, "args": [],
+     "argv_fixed": ["jog"],
+     "desc": "The air assist steady at its run duty while the gantry jogs, dark: do the coolant readings "
+             "toggle under motion? GRBL mode, the controller idle, 35 mm of free +X and 10 mm of free +Y. "
+             "The air assist goes back to its value on every exit, a second Abort included; the pump is "
+             "never touched."},
     {"id": "aa-offset-check", "title": "Coolant offset correction under the run airflow", "script": "aa_offset_check.py",
      "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("dwell", "float", 20.0, "seconds to read under the run profile")],
@@ -287,7 +277,9 @@ TOOLS = [
      "desc": "For each mode given: stores xy_microsteps, waits for the restarted controller, streams a 60-pass "
              "raster of 150 mm at F12000 with the laser off, and reports the peak feed, the controller CPU, the "
              "kernel counters against the start, underruns and clamped events. Needs the head with 150 mm of "
-             "free +X and 12 mm of free +Y travel, no other Grbl client. Ends at x8."},
+             "free +X and 12 mm of free +Y travel, no other Grbl client. The mode found (an unset key "
+             "included) goes back on every exit once the queued raster has played out; when it has not "
+             "within 120 s the tool says so and exits 1."},
     {"id": "xy-pattern-accel", "title": "XY microstep modes by the head accelerometer, the machine silent",
      "script": "xy_pattern_accel.py", "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("modes", "choice", "8 16 32", "the modes to run, in order", ["8", "16", "32", "8 16 32"])],
@@ -297,7 +289,9 @@ TOOLS = [
              "accelerometer sampled over the bus at 800 Hz through the pattern; "
              "cruise-window RMS and peak-to-peak per leg and overall, the kernel counters against home, "
              "underruns; JSON with the trace to the bench data directory. Needs the machine homed and at home, "
-             "the lid closed, no other Grbl client, the bed clear. Ends at x8."},
+             "the lid closed, no other Grbl client, the bed clear. The mode found (an unset key included) "
+             "goes back on every exit once the machine has stopped; when it has not within 120 s the tool "
+             "says so and exits 1."},
     {"id": "arc-tolerance-sweep", "title": "How fine an arc the controller can plan ($12 ladder)",
      "script": "arc_tolerance_sweep.py", "safety": "dry", "where": "board", "ported": True,
      "args": [_arg("mode", "choice", "16", "the XY microstep mode", ["8", "16", "32"], flag="--mode"),
@@ -305,13 +299,15 @@ TOOLS = [
      "desc": "From home, the machine silent: to (9, 9) in, then the 9 in circle at F12000 once per $12 in the "
              "ladder. Per rung: the chords and boundaries a second, the circle time against the ideal, the lowest "
              "feed mid-circle, the fewest free planner blocks, the controller CPU, clamped events, underruns, the "
-             "accelerometer's cruise RMS. $12 goes back to what it was; the head returns home. Needs the machine "
+             "accelerometer's cruise RMS. The quiet hold goes back on every exit, an Abort included; $12 and "
+             "the mode found go back, and the head returns home, once the controller reports Idle and the "
+             "kernel is idle, else none of the three is attempted and the tool exits 1. Needs the machine "
              "homed and at home, the lid closed, no other Grbl client."},
     {"id": "planner-blocks-test", "title": "Planner buffer depth harness", "script": "planner_blocks_test.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
-     "desc": "A deep planner buffer starts: the controller restarted at $398=400 and at $398=1000 answers "
-             "on the port, reports the depth in its status report and runs a move. A CI harness (the grblHAL "
-             "repo): needs the host-built null-sink controller, not the machine, so it is not a bench-page tool."},
+     "desc": "A deep planner buffer starts: the controller restarted at $398=1000 answers on the port, "
+             "reports the depth in its status report and runs a move. A CI harness (the grblHAL repo): needs "
+             "the host-built null-sink controller, not the machine, so it is not a bench-page tool."},
     {"id": "xy-mode-test", "title": "XY microstep mode harness", "script": "xy_mode_test.py",
      "safety": "dry", "where": "host", "ported": False, "args": [],
      "desc": "The XY scale is the microstep mode's, never typed: xy_microsteps sets $100/$101 and the "
@@ -327,15 +323,19 @@ TOOLS = [
      "safety": "takeover", "where": "board", "ported": True, "args": [],
      "desc": "Runs only on the debug-kernel image (kas/forgefirm-glowforge-debug.yml): three glowforge.ko "
              "load/unload cycles under DEBUG_MUTEXES and a forced -EPROBE_DEFER unwind, each read against "
-             "dmesg for lock splats. Cycles the 40 V rail; refuses on a non-debug kernel or a non-idle machine."},
+             "dmesg for lock splats. Cycles the 40 V rail; works under the takeover (forgectrl stays stopped "
+             "until the takeover starts it); refuses on a non-debug kernel, a non-idle machine, or while "
+             "forgectrl, the controller or the cloud client runs."},
 ]
 
 # Files in scripts/bench the page never offers: the helper module the
 # host/board tools share (the C feeder and the build scripts are not
-# python), and the two lens stall drills. A stall slips the lens stepper's
-# rotor under full torque, so those run from the shell on the bench
-# reference machine only (scripts/bench/README.md).
-NOT_TOOLS = ("gfbench.py", "lens_travel.py", "lens_stop_accel.py")
+# python), the two lens stall drills and the bump-seek prototype. A lens
+# stall slips the lens stepper's rotor under full torque, and a bump seek
+# that misses the contact stalls the X motor at the rail once a segment,
+# so those run from the shell on the bench reference machine only
+# (scripts/bench/README.md).
+NOT_TOOLS = ("gfbench.py", "lens_travel.py", "lens_stop_accel.py", "bump_seek.py")
 
 
 class Bench:

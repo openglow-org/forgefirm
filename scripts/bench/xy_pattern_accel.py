@@ -27,7 +27,11 @@ through the pattern. Reports, per leg and overall, the cruise-window
 RMS and peak-to-peak of X and Y with the mean removed, the leg times,
 the kernel counters against home, and cnc/underruns; JSON with the raw
 trace to the bench data directory. Releases the hold and puts the
-accelerometer back on every exit path. Ends at x32.
+accelerometer back on every exit path, the bench page's Abort and a lost
+terminal included, and stores the mode it found (an unset key unset
+again) once the machine has stopped: forgectrl takes no settings write
+while a leg still plays. When the machine does not stop within 120 s
+the mode is not written, the tool says so, and it exits 1.
 
 Needs the controller in GRBL mode, homed and standing at home, the lid
 closed, no other Grbl client, and the bed clear across the pattern.
@@ -44,7 +48,8 @@ import sys
 import threading
 import time
 
-from gfbench import data_path, forgectrl_get, forgectrl_post
+from gfbench import data_path, exit_on_signal, forgectrl_get, forgectrl_post, put_back
+
 
 def modes_from_argv(argv):
     """The modes named on the command line ("8 16 32" as one argument or
@@ -159,10 +164,30 @@ def fail(msg):
     raise SystemExit(1)
 
 
-def set_mode(mode):
-    st, body = forgectrl_post("/settings", data={"xy_microsteps": str(mode)})
+MODE_UNSET = 32                         # the mode an unset xy_microsteps runs at
+
+
+def mode_found():
+    """xy_microsteps as forgectrl stores it: the value, or "" when the key
+    is unset."""
+    st, body = forgectrl_get("/settings")
+    if st != 200 or not isinstance(body, dict):
+        fail("cannot read the settings: %s" % st)
+    v = body.get("xy_microsteps")
+    return v if isinstance(v, str) else ""
+
+
+def put_mode(value):
+    """Store xy_microsteps ("" unsets the key) through forgectrl, which
+    restarts the idle controller, and wait for the controller at the mode
+    in force."""
+    if value == "":
+        st, body = forgectrl_post("/settings", params={"xy_microsteps": ""})
+    else:
+        st, body = forgectrl_post("/settings", data={"xy_microsteps": value})
     if st != 200:
         fail("settings write refused: %s %s" % (st, body))
+    mode = int(value) if value else MODE_UNSET
     time.sleep(3)
     t0 = time.time()
     while time.time() - t0 < 180:
@@ -174,6 +199,63 @@ def set_mode(mode):
             return
         time.sleep(2)
     fail("x%d: the controller did not come back" % mode)
+
+
+def set_mode(mode):
+    put_mode(str(mode))
+
+
+SETTLE_S = 120.0                        # how long a restore waits for the machine to stop
+
+
+def machine_still(g=None):
+    """The kernel idle or disabled (the state forgectrl's settings lock
+    reads) and, given a connection, the controller reporting Idle."""
+    try:
+        if sysfs("cnc/state") not in ("idle", "disabled"):
+            return False
+    except OSError:
+        return False
+    if g is None:
+        return True
+    try:
+        st = g.status()[0]
+    except (OSError, SystemExit):       # no reply, or an error or ALARM in it
+        return False
+    return bool(st) and st.startswith("Idle")
+
+
+def settle(g=None, timeout=SETTLE_S):
+    """Wait, at most timeout seconds, for the machine to stop. A dropped
+    sender does not stop its job, the controller takes a $ write only at
+    rest, forgectrl takes a settings write only at idle, and a position
+    read in motion is nowhere to aim from. Two still readings about 1 s
+    apart count as stopped (a streamed job's kernel reads idle for an
+    instant between lines). True once it has stopped; False, said loudly,
+    when it has not, and then nothing that needs it at rest may be put
+    back."""
+    end = time.time() + timeout
+    still = 0
+    while True:
+        still = still + 1 if machine_still(g) else 0
+        if still >= 2:
+            return True
+        if time.time() >= end:
+            print("WARNING: the machine did not stop within %.0f s: what needs it at rest is NOT "
+                  "put back" % timeout, flush=True)
+            return False
+        time.sleep(1.0 if still else 0.5)
+
+
+def restore_mode(found):
+    """The mode found at the start back, an unset key unset again, once
+    the machine has stopped; nothing is written when it already stands.
+    Raises when the machine did not stop or forgectrl refused the write."""
+    if not settle():
+        raise RuntimeError("xy_microsteps is NOT put back (found: %s)" % (found or "unset"))
+    if mode_found() != found:
+        print("=== the mode found: %s ===" % (found or "unset (x%d)" % MODE_UNSET))
+        put_mode(found)
 
 
 def quiet(on):
@@ -340,17 +422,10 @@ def run_pattern(mode, home):
     finally:
         # The fans first, whatever else fails: the hold must not outlive
         # the listening (the engine would drop it itself within 600 s).
-        try:
-            quiet(False)
-        except SystemExit:
-            print("WARNING: the quiet hold did not release; the engine drops it itself within 600 s")
-        try:
-            if sampler is not None:
-                sampler.stop()
-        finally:
-            if accel is not None:
-                accel.restore()
-            g.close()
+        put_back(("release the quiet hold (the engine drops it itself within 600 s)", lambda: quiet(False)),
+                 ("stop the sampler", lambda: sampler is not None and sampler.stop()),
+                 ("put the accelerometer back", lambda: accel is not None and accel.restore()),
+                 ("close the Grbl connection", g.close))
     samples = sampler.samples
     record["samples"] = len(samples)
     record["read_errors"] = sampler.errors
@@ -385,22 +460,25 @@ def run_pattern(mode, home):
 
 
 def main():
+    exit_on_signal()
     modes = modes_from_argv(sys.argv[1:])
     home = preflight()
+    found = mode_found()
     stamp = time.strftime("%Y%m%d%H%M%S")
     results = []
-    for mode in modes:
-        print("=== x%d ===" % mode)
-        set_mode(mode)
-        rec = run_pattern(mode, home)
-        path = data_path("xy_pattern_accel_x%d_%s.json" % (mode, stamp))
-        with open(path, "w") as f:
-            json.dump(rec, f)
-        print("  record: %s" % path)
-        results.append(rec)
-    if modes[-1] != 32:
-        print("=== restore x32 ===")
-        set_mode(32)
+    failed = []
+    try:
+        for mode in modes:
+            print("=== x%d ===" % mode)
+            set_mode(mode)
+            rec = run_pattern(mode, home)
+            path = data_path("xy_pattern_accel_x%d_%s.json" % (mode, stamp))
+            with open(path, "w") as f:
+                json.dump(rec, f)
+            print("  record: %s" % path)
+            results.append(rec)
+    finally:
+        failed = put_back(("store the mode found", lambda: restore_mode(found)))
     print("\n=== summary (cruise RMS with the mean removed, raw counts; CTRL4 0x%02x) ==="
           % results[0].get("ctrl4", 0))
     print("%-6s %10s %10s %10s %10s %8s" % ("mode", "x rms", "x p2p", "y rms", "y p2p", "result"))
@@ -408,7 +486,7 @@ def main():
         o = rec["overall"]
         print("%-6s %10s %10s %10s %10s %8s" % ("x%d" % rec["mode"], o["x"]["rms"], o["x"]["p2p"],
                                                   o["y"]["rms"], o["y"]["p2p"], rec["result"]))
-    return 0 if all(r["result"] == "PASS" for r in results) else 1
+    return 0 if results and not failed and all(r["result"] == "PASS" for r in results) else 1
 
 
 if __name__ == "__main__":

@@ -10,17 +10,22 @@ Runs only on the debug-kernel image (kas/forgefirm-glowforge-debug.yml),
 which carries CONFIG_DEBUG_MUTEXES and lockdep. Both drills cycle the
 40 V rail - a deliberate power cycle, the gamble the rail policy avoids
 in normal operation and accepts here for one bench slot. The machine
-must be idle with no job.
+must be idle with no job, and forgectrl, the controller and the cloud
+client stopped so the module can unload: the bench page's takeover
+stops them and starts forgectrl again after the run; from a shell, stop
+forgectrl first and start it after. The drills refuse while any of the
+three runs, and never start or stop forgectrl themselves.
 
-  drill A  stop forgectrl, rmmod + modprobe glowforge three times with a
-           settle between, and read dmesg for any lockdep/mutex splat.
+  drill A  rmmod + modprobe glowforge three times with a settle between,
+           and read dmesg for any lockdep/mutex splat.
   drill B  unbind the cnc device, unbind the 40 V regulator it needs so
            the re-bind probe returns -EPROBE_DEFER and unwinds, read
            dmesg for a clean unwind, then restore the regulator so the
-           deferred probe completes and the rail returns.
+           deferred probe completes.
 
 PASS = both drills leave dmesg free of BUG/WARNING/lockdep/"held lock"
-and the machine ends idle with the rail up and forgectrl serving.
+and the module bound and idle (or disabled, the rail off until
+forgectrl's start enables it).
 
 Not a catalog test: it needs a special kernel and cycles the rail, so
 it rides the closing burn, not the acceptance campaign.
@@ -32,7 +37,10 @@ import subprocess
 import sys
 import time
 
+from gfbench import arming_processes
+
 CNC_DRV = '/sys/bus/platform/drivers/glowforge_cnc'
+STATE = '/sys/glowforge/cnc/state'
 # Real splat markers only - not the benign "RCU lockdep checking is
 # enabled" boot banner (a bare "lockdep" match would flag it).
 SPLAT = re.compile(r'BUG:|WARNING:|INFO: possible|held lock|'
@@ -81,7 +89,8 @@ def require_idle():
     st = ''
     for _ in range(8):
         try:
-            st = open('/sys/glowforge/cnc/state').read().strip()
+            with open(STATE) as f:
+                st = f.read().strip()
         except OSError:
             st = ''
         if st in ('idle', 'disabled'):
@@ -91,14 +100,19 @@ def require_idle():
     sys.exit(2)
 
 
-def forgectrl(action):
-    sh('/etc/init.d/forgectrl %s' % action)
-    time.sleep(5)
+def require_stopped():
+    # The module unloads only with /dev/glowforge free, and nothing may
+    # arm a job across the rail cycles: forgectrl, the controller and the
+    # cloud client are stopped by whoever runs the drill (the takeover).
+    owners = arming_processes()
+    if owners:
+        print('REFUSED: %s running; stop forgectrl first (the bench page runs this '
+              'drill under its takeover).' % ', '.join(owners))
+        sys.exit(2)
 
 
 def drill_load_unload():
     print('== drill A: module load/unload under DEBUG_MUTEXES')
-    forgectrl('stop')          # release /dev/glowforge so the module can unload
     m = mark('A')
     ok = True
     for i in range(3):
@@ -116,7 +130,6 @@ def drill_load_unload():
         time.sleep(2)
         print('  cycle %d: unload/reload ok' % (i + 1))
     found = splats(dmesg_since(m))
-    forgectrl('start')
     if found:
         print('  FAIL: %d lock splat(s):' % len(found))
         for ln in found[:8]:
@@ -148,7 +161,6 @@ def drill_forced_defer():
         print('  SKIP: could not resolve the 40 V regulator provider to unbind '
               '(inspect /sys/bus/platform/drivers/*regulator*); drill A stands.')
         return None
-    forgectrl('stop')
     m = mark('B')
     # Take cnc down, remove the resource, bring cnc back -> probe defers.
     sh('echo cnc > %s/unbind' % CNC_DRV, check=True)
@@ -164,11 +176,10 @@ def drill_forced_defer():
     time.sleep(3)
     bound = 'cnc' in os.listdir(CNC_DRV)
     found = splats(dmesg_since(m))
-    forgectrl('start')
-    time.sleep(2)
     state = ''
     try:
-        state = open('/sys/glowforge/cnc/state').read().strip()
+        with open(STATE) as f:
+            state = f.read().strip()
     except OSError:
         pass
     print('  cnc bound after restore: %s; cnc/state=%r' % (bound, state))
@@ -186,6 +197,7 @@ def drill_forced_defer():
 
 def main():
     require_debug_kernel()
+    require_stopped()
     require_idle()
     a = drill_load_unload()
     require_idle()

@@ -21,8 +21,15 @@ at F12000 and reports the chords, the boundaries a second, the circle
 time against the ideal, the lowest feed in the middle of the circle and
 the fewest free planner blocks (a starved planner shows as both), the
 controller CPU over the circle, any clamped-event line the driver logged,
-cnc/underruns, and the accelerometer's cruise RMS. $12 goes back to what
-it was, on every exit path, and the head returns home.
+cnc/underruns, and the accelerometer's cruise RMS. On every exit path
+(the bench page's Abort and a lost terminal included, each step in its
+own try) the quiet hold is released and the accelerometer put back; then,
+once the controller reports Idle and the kernel is idle (a dropped sender
+does not stop a circle in flight, and the controller takes no $ write in
+motion), $12 and the XY microstep mode (an unset key unset again) go back
+to what they were, each write checked, and the head returns home from
+where it stands at rest. When the machine does not stop within 120 s,
+none of those three is attempted, the tool says so, and it exits 1.
 
 Needs the controller in GRBL mode, homed and standing at home, the lid
 closed, no other Grbl client, and the bed clear across the circle.
@@ -35,9 +42,9 @@ import subprocess
 import sys
 import time
 
-from gfbench import data_path
-from xy_pattern_accel import (Accel, Sampler, Grbl, fail, preflight, quiet, set_mode, stats,
-                              sysfs, window, FEED, IN, QUIET_S, TRIM_S)
+from gfbench import data_path, exit_on_signal, put_back
+from xy_pattern_accel import (Accel, Sampler, Grbl, fail, mode_found, preflight, quiet, restore_mode,
+                              set_mode, settle, stats, sysfs, window, FEED, IN, QUIET_S, TRIM_S)
 
 LOG = "/data/log/forgefirm/grblhal/grblhal.log"
 RADIUS = 4.5 * IN
@@ -145,17 +152,52 @@ def run_circle(g, pid):
             "status_samples": len(feeds), "clamped": clamped, "underruns": [k0, int(sysfs("cnc/underruns"))]}
 
 
+def wait_at_rest(g):
+    """The controller Idle and the kernel idle, or raise: $12, the head and
+    the mode are put back only at rest."""
+    if not settle(g):
+        raise RuntimeError("$12, the head and the XY mode are NOT put back")
+
+
+def restore_tol(g, orig):
+    """$12 back to the value read at the start (None: never read, nothing
+    changed), the write's reply and the value read back checked."""
+    if g is None or orig is None:
+        return
+    r = g.cmd("$12=%.6f" % float(orig))
+    got = grbl_setting(g, "$12")
+    if "ok" not in r or got is None or abs(float(got) - float(orig)) > 0.0006:
+        raise RuntimeError("$12 is NOT put back: the write answered %r, $12 reads %s (was %s)"
+                           % (r.strip(), got, orig))
+    print("$12 restored to %s" % got)
+
+
+def return_home(g, home):
+    """The head back home from where it stands at rest, absolute mode
+    back. Raises, moving nothing, unless the controller reports Idle."""
+    st, pos, _ = g.status()
+    if not st or not st.startswith("Idle") or pos is None:
+        raise RuntimeError("the controller is %s, not Idle: the head is not moved" % st)
+    if abs(pos[0] - home[0]) > 0.05 or abs(pos[1] - home[1]) > 0.05:
+        g.run_leg("G1 X%.3f Y%.3f F%d" % (home[0] - pos[0], home[1] - pos[1], FEED))
+        print("head back at home: MPos %s" % (g.status()[1],))
+    g.cmd("G90")
+
+
 def main():
+    exit_on_signal()
     mode, ladder = parse_args(sys.argv[1:])
     home = preflight()
-    set_mode(mode)
-    pid = controller_pid()
-    g = Grbl()
-    accel = sampler = None
+    found = mode_found()
+    g = accel = sampler = None
     orig = None
     rows = []
+    failed = []
     stamp = time.strftime("%Y%m%d%H%M%S")
     try:
+        set_mode(mode)
+        pid = controller_pid()
+        g = Grbl()
         st, pos, _ = g.status()
         if not st or not st.startswith("Idle"):
             fail("controller is %s, not Idle" % st)
@@ -206,35 +248,21 @@ def main():
                 print("     ", l)
             time.sleep(2.0)
     finally:
-        try:
-            if orig is not None:
-                g.cmd("$12=%.6f" % float(orig))
-                print("$12 restored to %s" % grbl_setting(g, "$12"))
-        except Exception as e:
-            print("WARNING: could not restore $12: %s" % e)
-        try:
-            quiet(False)
-        except SystemExit:
-            print("WARNING: the quiet hold did not release; the engine drops it itself within 600 s")
-        try:
-            if sampler is not None:
-                sampler.stop()
-        finally:
-            if accel is not None:
-                accel.restore()
-        try:
-            st, pos, _ = g.status()
-            if pos and (abs(pos[0] - home[0]) > 0.05 or abs(pos[1] - home[1]) > 0.05):
-                g.run_leg("G1 X%.3f Y%.3f F%d" % (home[0] - pos[0], home[1] - pos[1], FEED))
-                print("head back at home: MPos %s" % (g.status()[1],))
-            g.cmd("G90")
-        finally:
-            g.close()
+        at_rest = []
+        failed = put_back(
+            ("release the quiet hold (the engine drops it itself within 600 s)", lambda: quiet(False)),
+            ("stop the sampler", lambda: sampler is not None and sampler.stop()),
+            ("put the accelerometer back", lambda: accel is not None and accel.restore()),
+            ("wait for the machine to stop", lambda: at_rest.append(wait_at_rest(g))),
+            ("restore $12", lambda: at_rest and restore_tol(g, orig)),
+            ("return the head home", lambda: at_rest and g is not None and return_home(g, home)),
+            ("close the Grbl connection", lambda: g is not None and g.close()),
+            ("store the mode found", lambda: at_rest and restore_mode(found)))
     path = data_path("arc_tolerance_sweep_x%d_%s.json" % (mode, stamp))
     with open(path, "w") as f:
         json.dump({"mode": mode, "feed": FEED, "radius_mm": RADIUS, "rows": rows}, f)
     print("record: %s" % path)
-    return 0 if rows and all(r["result"] == "PASS" for r in rows) else 1
+    return 0 if rows and not failed and all(r["result"] == "PASS" for r in rows) else 1
 
 
 if __name__ == "__main__":

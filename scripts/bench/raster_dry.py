@@ -14,49 +14,33 @@ LEN mm along X at F12000, Y stepped by PITCH between passes, and back to
 the start. Reports the peak feed, the controller CPU over the job, the
 kernel counters against the start (the head must come back within TOL mm
 on both axes), Grbl's own drift, cnc/underruns, and any "late events
-clamped" line the driver logged. Ends with the key cleared (x8).
+clamped" line the driver logged. The mode found (an unset key unset
+again) goes back on every exit, the bench page's Abort and a lost
+terminal included, once the kernel is idle: the raster already queued
+plays on after an Abort, and forgectrl takes no settings write until it
+ends. When it does not end within 120 s the mode is not written, the
+tool says so, and it exits 1.
 
 Needs the controller in GRBL mode, idle, no other Grbl client, the bed
 clear, and LEN mm of free +X travel plus LINES x PITCH mm of free +Y
 travel from where the head stands.
 """
-import json
 import os
 import re
 import socket
 import subprocess
 import sys
 import time
-import urllib.request
 
-FC = "http://127.0.0.1"
-FC_TOKEN = "/data/forgefirm/panel.token"
-MODES = [int(a) for arg in sys.argv[1:] for a in arg.split()] or [8, 16, 32]
+from gfbench import exit_on_signal, put_back
+from xy_pattern_accel import fc_get, mode_found, restore_mode, set_mode, sysfs
+
 LINES, LEN, PITCH, FEED, TOL = 60, 150.0, 0.2, 12000, 0.05
 LOG = "/data/log/forgefirm/grblhal/grblhal.log"
 
 
-def fc(path, data=None):
-    token = open(FC_TOKEN).read().strip()
-    body = None
-    if data is not None:
-        body = "&".join("%s=%s" % (k, v) for k, v in data.items()).encode()
-    req = urllib.request.Request(FC + path, data=body,
-                                 headers={"Authorization": "Bearer " + token, "X-ForgeFIRM-Token": token,
-                                          "Content-Type": "application/x-www-form-urlencoded"})
-    try:
-        return json.load(urllib.request.urlopen(req, timeout=30))
-    except urllib.error.HTTPError as e:
-        return {"http": e.code, "body": e.read().decode()}
-
-
-def sysfs(attr):
-    with open("/sys/glowforge/" + attr) as f:
-        return f.read().strip()
-
-
 def kernel_mm():
-    p = fc("/status").get("pos") or {}
+    p = fc_get("/status").get("pos") or {}
     return float(p.get("x", 0)), float(p.get("y", 0))
 
 
@@ -69,23 +53,6 @@ def cpu_ticks(pid):
     with open("/proc/%d/stat" % pid) as f:
         s = f.read().split()
     return int(s[13]) + int(s[14])
-
-
-def set_mode(mode):
-    r = fc("/settings", {"xy_microsteps": str(mode)})
-    if "http" in r:
-        raise SystemExit("settings write refused: %s" % r)
-    time.sleep(3)
-    t0 = time.time()
-    while time.time() - t0 < 180:
-        m = fc("/mode")
-        if m.get("controller") == "running" and m.get("motion") == "verified" and sysfs("cnc/x_mode") == str(mode):
-            time.sleep(2)
-            print("x%d: controller pid %s, step_freq %s, ramp_rate %s"
-                  % (mode, m.get("pid"), sysfs("cnc/step_freq"), sysfs("cnc/ramp_rate")))
-            return
-        time.sleep(2)
-    raise SystemExit("x%d: the controller did not come back" % mode)
 
 
 class Grbl:
@@ -191,7 +158,7 @@ def raster(mode):
         g.close()
     # the machine itself idle: the kernel plays out the depth behind Idle
     end = time.time() + 20
-    while time.time() < end and fc("/status").get("state") != "idle":
+    while time.time() < end and fc_get("/status").get("state") != "idle":
         time.sleep(0.5)
     k1 = kernel_mm()
     und1 = int(sysfs("cnc/underruns"))
@@ -213,17 +180,21 @@ def raster(mode):
 
 
 def main():
+    exit_on_signal()
+    modes = [int(a) for arg in sys.argv[1:] for a in arg.split()] or [8, 16, 32]
+    found = mode_found()
     verdicts = {}
-    for mode in MODES:
-        print("=== x%d ===" % mode)
-        set_mode(mode)
-        verdicts[mode] = raster(mode)
-    if MODES[-1] != 32:
-        print("=== restore x32 ===")
-        set_mode(32)
-    print("settings xy_microsteps:", repr(fc("/settings").get("xy_microsteps")))
+    failed = []
+    try:
+        for mode in modes:
+            print("=== x%d ===" % mode)
+            set_mode(mode)
+            verdicts[mode] = raster(mode)
+    finally:
+        failed = put_back(("store the mode found", lambda: restore_mode(found)))
+    print("settings xy_microsteps:", repr(fc_get("/settings").get("xy_microsteps")))
     print("RESULT:", " ".join("x%d=%s" % (m, "PASS" if v else "FAIL") for m, v in verdicts.items()))
-    return 0 if all(verdicts.values()) else 1
+    return 0 if verdicts and not failed and all(verdicts.values()) else 1
 
 
 if __name__ == "__main__":

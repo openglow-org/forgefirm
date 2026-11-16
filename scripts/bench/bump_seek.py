@@ -7,6 +7,11 @@
 segments, detect the contact jolt on the head LIS2HH12, jog-cancel at once,
 back off. This is the homing-cycle detection loop, run standalone.
 
+From the shell on the bench reference machine only: a seek that misses
+the contact stalls the X motor at the rail once a segment, so the bench
+page does not offer it. st_accel is bound again, and the jog canceled, on
+every exit (an exception, a SIGTERM and a lost terminal included).
+
 Usage: bump_seek.py [dir(+|-)] [feed] [seg_mm] [max_mm]
 Logs every sample to /tmp/bump.csv: t,x,y,z,dev,state
 """
@@ -17,12 +22,15 @@ import struct
 import sys
 import time
 
+from gfbench import exit_on_signal, put_back
+
 I2C_SLAVE = 0x0703
 BUS = '/dev/i2c-3'
 HEAD = 0x1e
 CTRL1 = 0x20
 OUT_X_L = 0x28
 DRIVER = '/sys/bus/i2c/drivers/st-accel-i2c'
+CSV = '/tmp/bump.csv'
 
 BASELINE_S = 1.2     # of each segment: learn moving-noise floor
 EMA_A = 0.05         # gravity/slope tracker
@@ -115,29 +123,46 @@ def mpos(st):
         return None
 
 
+def stop_and_back_off(g, hit, dirn):
+    """Cancel the jog in flight, and back 3 mm off a contact."""
+    g.cancel()
+    time.sleep(0.3)
+    st = g.wait_idle(10)
+    pos = mpos(st) if st else None
+    print('stopped at MPos:', pos)
+    if hit and pos:
+        print('backing off 3 mm')
+        g.send('$J=G91X%sF600' % ('3' if dirn == '-' else '-3'))
+        g.wait_idle(10)
+
+
 def main():
+    exit_on_signal()
     dirn = sys.argv[1] if len(sys.argv) > 1 else '-'
     feed = int(sys.argv[2]) if len(sys.argv) > 2 else 120
     seg = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
     maxmm = float(sys.argv[4]) if len(sys.argv) > 4 else 200.0
 
-    unbind()
-    acc = Accel()
-    g = Grbl()
-    log = open('/tmp/bump.csv', 'w')
-
-    st = g.wait_idle(5)
-    if st is None:
-        print('controller not idle, aborting')
-        return 1
-    start = mpos(st)
-    print('start MPos:', start)
-
-    t0 = time.monotonic()
-    traveled = 0.0
-    hit = False
+    g = log = None
+    hit = moved = False
+    failed = []
     try:
+        unbind()
+        acc = Accel()
+        g = Grbl()
+        log = open(CSV, 'w')
+
+        st = g.wait_idle(5)
+        if st is None:
+            print('controller not idle, aborting')
+            return 1
+        start = mpos(st)
+        print('start MPos:', start)
+
+        t0 = time.monotonic()
+        traveled = 0.0
         while traveled < maxmm and not hit:
+            moved = True
             g.send('$J=G91X%s%.3fF%d' % (dirn, seg, feed))
             seg_t0 = time.monotonic()
             exp_dur = seg / feed * 60.0
@@ -187,19 +212,11 @@ def main():
             traveled += seg
             print('segment done, traveled<=%.0f mm, hit=%s' % (traveled, hit))
     finally:
-        g.cancel()
-        time.sleep(0.3)
-        st = g.wait_idle(10)
-        pos = mpos(st) if st else None
-        print('stopped at MPos:', pos)
-        if hit and pos:
-            print('backing off 3 mm')
-            g.send('$J=G91X%sF600' % ('3' if dirn == '-' else '-3'))
-            g.wait_idle(10)
-        log.close()
-        rebind()
+        failed = put_back(('stop the jog', lambda: moved and stop_and_back_off(g, hit, dirn)),
+                          ('close the log', lambda: log is not None and log.close()),
+                          ('bind st_accel to the head accelerometer', rebind))
     print('HIT' if hit else 'NO CONTACT within %.0f mm' % maxmm)
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':

@@ -6,6 +6,9 @@
 """Live-fire bench drills - Phases 4, 5, 6. Runs on the board (the bench
 page) or from a LAN host, against grblHAL over TCP (port 23) and
 forgectrl over HTTP (:80, FORGECTRL_PORT overrides); the machine is GF_HOST, default 127.0.0.1.
+expstop and ctrlstart write to forgectrl, which answers a write only from
+loopback: they run on the board. The exit status is the drill's verdict:
+0 pass, 1 fail, 2 refused before anything ran.
 LIVE LASER: the operator must be armed with eye protection, a fire
 watch, an extinguisher, and the exhaust running. Every drill waits for
 the operator to press the physical arm button before the machine fires;
@@ -16,14 +19,16 @@ Usage: live_fire_drills.py <drill> [arg] [F]  (ircut/pthresh take S,
        F, the line length and an optional rung list)
 
 Drills (pass a name):
-  witness   Phase 5 A-1/A-2/A-5: a short vector mark at S400. Samples
+  witness   Phase 5 A-1/A-2/A-5: a short vector mark at S400. Refuses
+            unless laser_disarm_s is 30 s or more (a shorter grace could
+            close the window inside the bound below). Samples
             forgectrl /status (emission_samples, lid_ir[], hv_current)
             and /cool/status (armed, fire_watch) at ~8 Hz through the
             job. PASS: emission_samples goes nonzero during the fire
             window and returns to 0; lid_ir peak recorded per channel
             vs the ambient baseline; hv_current range logged. Also
-            asserts X-3: armed drops at Idle with the job close, not at
-            +60 s.
+            asserts X-3: the window, read armed during the job, drops
+            within 10 s of Idle with the job's close, not at the grace.
   hold      Phase 4 G-10: arm + start a longer job, feed-hold mid-run,
             then hold. PASS: the disarm grace counts down in Hold and
             the window closes (armed -> false) without the job resuming.
@@ -36,19 +41,18 @@ Drills (pass a name):
             are what the engine's cool_fire_q1/q2 alert and critical
             thresholds (absolute counts) must sit above.
               ircut [S] [F]             e.g. ircut 1000 300
-  pthresh   Laser power-threshold ladder: one line per power level on
-            scrap, climbing from 2 % to 30 % of full, at constant power
-            (M3) so nothing scales the duty with velocity. The ladder
-            separates two thresholds that are far apart: the discharge
-            strikes at a duty well below the one the tube lases at, and
-            the rungs between them show only a spot at the line start
-            (the strike transient) with a dark line after it. The
-            lowest rung that leaves a CONTINUOUS mark is the lasing
-            threshold, and because $35 is a percent of full duty and
-            the rungs are percents of $30 with $31 = 0, that rung's
-            percent IS the $35 value. Requires $35 = 0 for the run: a
-            floor already in place lifts every rung and hides both
-            thresholds.
+  pthresh   Laser density-threshold ladder: one line per level on
+            scrap, climbing from 2 % to 30 % of Smax, at constant power
+            (M3) so nothing scales the level with velocity. Every pulse
+            fires at full duty; a rung's level is the density of FIRE
+            ticks. The lowest rung that leaves a CONTINUOUS mark is the
+            lowest density that still marks: the value for
+            laser_floor_density. Refuses unless S maps straight onto
+            density: laser_floor_density = 0 (a floor lifts every rung
+            onto it and hides the threshold) and laser_dose_curve = off
+            (the curve bends S through the measured light curve). Set
+            both on the panel before the run and put them back after.
+            Prints the density each rung lands on from $30/$31/$35/$36.
               pthresh [Smax] [F]        e.g. pthresh 1000 300
   dladder   Density ladder for the FIRE-bit dose model: one line per
             dose level on scrap, 5 % to 100 %, at constant power (M3)
@@ -60,11 +64,13 @@ Drills (pass a name):
             on the same material: 20 ticks is 710 us, the factory's
             ~1.43 kHz, and 40 and 10 bracket it. Two questions the
             material answers: does mark depth track density linearly,
-            and how short a burst still marks. Requires
-            laser_power_model = density; reads $30/$31/$35/$36 and
-            reports the mapping, so a run with a density floor set shows
-            what a shipped machine would actually emit. Sets
-            laser_pulse_ticks itself when run on the board.
+            and how short a burst still marks. Reads $30/$31/$36 and the
+            floor the arm loads (laser_floor_density) and reports the
+            mapping, so a run with a density floor set shows what that
+            floor fires. Writes no setting: it refuses unless
+            laser_dose_curve is off (the curve bends every rung) and
+            laser_pulse_ticks already holds the period (set both on the
+            panel, and put them back after).
               dladder [period] [F]      e.g. dladder 20 300
   pcurve    Laser performance-curve ladder, both instruments: one line
             per level at constant feed (default F600, 10 mm/s, 100 mm),
@@ -83,8 +89,10 @@ Drills (pass a name):
             repeat-rung comparison. Rungs follow laser_power_model:
             analog 16..100 % of duty (dense at the knee), density
             1..100 %; a comma list overrides. Records the actual level
-            each S lands on from $30/$31/$35/$36; measuring the curve
-            itself wants $35 = 0. JSON record (with the raw trace) in
+            each S lands on from $30/$31/$35/$36. Refuses unless S maps
+            straight onto density, as pthresh: laser_floor_density = 0
+            and laser_dose_curve = off, set on the panel before the run
+            and put back after. JSON record (with the raw trace) in
             FORGETEST_BENCH_DATA, else /tmp. Runs on the board for the
             thermopile; from a host it falls back to /status (current
             only, no curve). Reaches FULL power for 10 s per line.
@@ -147,7 +155,10 @@ Drills (pass a name):
             of equal depth by eye: that reads the model's light
             fraction off the material, next to what the thermopile
             says it should be. Samples sysfs at 25 Hz like pcurve;
-            JSON record in the bench data directory.
+            JSON record in the bench data directory. Refuses unless S
+            maps straight onto density: laser_dose_curve off and
+            laser_floor_density 0 (otherwise row B fires other
+            densities than it names).
               dpatch [F] [pitch] [length]   e.g. dpatch 1500 0.3 30
   senderchg A sender change mid-job: a 20 mm line at F60 lit on the
             press, the connection dropped five seconds in, the job held
@@ -173,8 +184,11 @@ Drills (pass a name):
             drops to 0 within a few samples of the stop and stays 0,
             the kernel is not running, and POST /controller/start
             is a SEPARATE step (`ctrlstart`, run after the operator has
-            judged the stop). Needs the panel token: GF_TOKEN, or
-            /data/forgefirm/panel.token when running on the board.
+            judged the stop). Runs on the board (the stop is a write)
+            with the panel token: GF_TOKEN, or /data/forgefirm/panel.token,
+            and refuses before it arms when GF_HOST is not loopback. A
+            stop forgectrl does not answer with 200 fails the drill and
+            says the job is still burning.
   ctrlstart POST /controller/start after an expstop; no motion, no laser.
 
 """
@@ -188,6 +202,7 @@ import time
 import urllib.request
 
 HOST = os.environ.get('GF_HOST') or '127.0.0.1'
+LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 PORT = 23
 CTRL_PORT = int(os.environ.get('FORGECTRL_PORT') or 80)
 BASE = 'http://%s:%d' % (HOST, CTRL_PORT)
@@ -231,6 +246,43 @@ def ir_delta(peak, base):
 def get_json(path):
     with urllib.request.urlopen(BASE + path, timeout=4) as r:
         return json.load(r)
+
+
+def fc_request(method, path):
+    """(status, body text) of one forgectrl request with the panel token;
+    the status is None when forgectrl cannot be reached."""
+    # http.client preserves the header-name case exactly as given.
+    import http.client
+    try:
+        c = http.client.HTTPConnection(HOST, CTRL_PORT, timeout=8)
+        c.putrequest(method, path)
+        c.putheader('X-ForgeFIRM-Token', panel_token())
+        c.putheader('Content-Length', '0')
+        c.endheaders()
+        r = c.getresponse()
+        body = r.read().decode('utf-8', 'replace')
+        c.close()
+        return r.status, body
+    except (OSError, http.client.HTTPException) as e:
+        return None, str(e)
+
+
+def fc_settings():
+    """forgectrl's settings as a dict, or None when they cannot be read."""
+    st, body = fc_request('GET', '/settings')
+    if st != 200:
+        return None
+    try:
+        s = json.loads(body)
+    except ValueError:
+        return None
+    return s if isinstance(s, dict) else None
+
+
+def verdict(rc):
+    """A drill's return as the exit status the bench page records: 0, 1
+    or 2, and anything else (samples, a record, nothing) a fail."""
+    return rc if type(rc) is int and rc in (0, 1, 2) else 1
 
 
 class Grbl:
@@ -402,8 +454,48 @@ def prepare(g):
     return st
 
 
+# The longest the witness drill's window may take to read closed after
+# its M2: program end closes it within the cycle, and laser_disarm_s's idle
+# grace is what a window that missed it would take. The drill runs only
+# with a grace long enough to tell the two apart: the X-3 timer starts
+# some 3 s after Idle, so a grace under WITNESS_GRACE_MIN_S could close
+# the window inside the bound by itself.
+WITNESS_DISARM_MAX_S = 10.0
+WITNESS_GRACE_MIN_S = 30.0
+DISARM_S_DEFAULT = 60.0                 # glowforge_laser.c DISARM_S_DEFAULT
+
+
+def disarm_grace(s):
+    """The idle grace the driver closes a window with: laser_disarm_s, or
+    its default when the key is unset or outside 1..3600 s."""
+    try:
+        v = float(s.get('laser_disarm_s') or '')
+    except ValueError:
+        return DISARM_S_DEFAULT
+    return v if 1.0 <= v <= 3600.0 else DISARM_S_DEFAULT
+
+
 def drill_witness(g):
     print('=== Phase 5 witness drill: S400 vector mark ===')
+    settings = fc_settings()
+    if settings is None:
+        print("REFUSED: forgectrl's settings cannot be read (laser_disarm_s)")
+        return 2
+    # forgectrl shows a value it does not take as unset, while the driver
+    # reads the file's leading number: such a grace is unknown here.
+    if not settings.get('laser_disarm_s') and conf_get('laser_disarm_s'):
+        print('REFUSED: laser_disarm_s is %s in %s, a value forgectrl does not take; the driver'
+              % (conf_get('laser_disarm_s'), CONF))
+        print('may read another grace from it. Set it on the panel (Settings).')
+        return 2
+    grace = disarm_grace(settings)
+    if grace < WITNESS_GRACE_MIN_S:
+        print('REFUSED: laser_disarm_s is %g s: the idle grace could close the window inside the'
+              % grace)
+        print('%g s this drill gives program end, so the two cannot be told apart. Set it to %g s'
+              % (WITNESS_DISARM_MAX_S, WITNESS_GRACE_MIN_S))
+        print('or more on the panel (Settings) for the run, and put it back after.')
+        return 2
     print('connect: %s' % prepare(g))
     base = sample_forgectrl()
     print('pre-fire: %s' % base)
@@ -462,14 +554,21 @@ def drill_witness(g):
     print('X-3 time-to-disarm after Idle: %s s (job-based PASS if prompt, '
           'not ~60 s grace)'
           % (round(disarm_dt, 1) if disarm_dt is not None else '>75 (REVIEW)'))
-    ok = peak_emis > 0 and end_emis == 0
-    print('WITNESS emission %s' % ('PASS' if ok else 'REVIEW - see values above'))
+    emission_ok = peak_emis > 0 and end_emis == 0
+    print('WITNESS emission %s' % ('PASS' if emission_ok else 'REVIEW - see values above'))
+    # Program end closes the window within the cycle, so the window must
+    # read closed within a few polls of Idle, far inside the idle grace.
+    # A window never read open proves nothing about how it closed.
+    disarm_ok = armed_seen and disarm_dt is not None and disarm_dt <= WITNESS_DISARM_MAX_S
+    print('WITNESS window seen armed, then closed at program end within %g s (grace %g s): %s'
+          % (WITNESS_DISARM_MAX_S, grace, 'PASS' if disarm_ok else 'FAIL'))
+    ok = emission_ok and disarm_ok
     # The engine's fire watch trips on absolute lid-IR counts, per quartile
     # pair (cool_fire_q1_alert / _critical, cool_fire_q2_alert / _critical):
     # the peaks above are what those thresholds must clear on a clean job.
     print('fire-watch thresholds must sit above these peaks: %s '
           '(cool_fire_q1_* for channels 1-2, cool_fire_q2_* for 3-4)' % ir_peak)
-    return samples
+    return 0 if ok else 1
 
 
 def drill_hold(g):
@@ -488,23 +587,33 @@ def drill_hold(g):
               % st)
         g.cmd('M5', timeout=1)
         g.rt(b'\x18')
-        return
+        return 1
     print('moving under laser: %s; feed-hold in 2 s' % st)
     time.sleep(2)
     g.rt(b'!')                      # feed hold mid-move
     st = g.wait_state('Hold', 5)
     print('feed-held mid-move: %s' % st)
+    took_hold = st.startswith('Hold')
+    if not took_hold:
+        print('FAIL: the feed hold did not take (state=%s)' % st)
     print('watching the disarm grace count down IN HOLD (not resuming)...')
     t0 = time.time()
     disarmed_at = None
+    left_hold = None                # the state seen when it was not Hold
+    armed_in_hold = None            # the first poll in Hold read the window open
     while time.time() - t0 < 120:
         s = sample_forgectrl()
-        held = g.state().startswith('Hold')
+        if armed_in_hold is None:
+            armed_in_hold = bool(s and s['armed'])
+            if not armed_in_hold:
+                print('FAIL: the window did not read armed at the first poll in Hold')
+        state = g.state()
+        if not state.startswith('Hold') and left_hold is None:
+            left_hold = state
+            print('note: left Hold (state=%s) before disarm' % state)
         if s and not s['armed']:
             disarmed_at = time.time() - t0
             break
-        if not held:
-            print('note: left Hold (state=%s) before disarm' % g.state())
         time.sleep(1)
     # Recover: laser off, abort out of hold.
     g.cmd('M5', timeout=1)
@@ -512,9 +621,15 @@ def drill_hold(g):
     time.sleep(1)
     print('G-10 disarmed in Hold after %s s (PASS if it disarms while held; '
           'the bug left it armed for hours)'
-          % (round(disarmed_at, 1) if disarmed_at else 'NOT WITHIN 120 - REVIEW'))
+          % (round(disarmed_at, 1) if disarmed_at is not None else 'NOT WITHIN 120 - REVIEW'))
     if 'Alarm' in g.status():
         g.cmd('$X')
+    # A PASS is a window read open in Hold that then closed while the job
+    # stood in Hold the whole time: a hold that never took, one the job
+    # left, or a window never read open proves nothing.
+    ok = took_hold and armed_in_hold and left_hold is None and disarmed_at is not None
+    print('HOLD %s' % ('PASS' if ok else 'FAIL'))
+    return 0 if ok else 1
 
 
 def drill_ircut(g):
@@ -560,37 +675,133 @@ def drill_ircut(g):
     print('worst peaks this job: %s counts -> the cool_fire_q1/q2 alert '
           'thresholds must sit above the worst across ALL jobs' % ir_peak)
     print('the engine logged its own "run telemetry: lid IR ..." line for this job')
-    return samples
+    return 0 if emis and max(emis) > 0 else 1
 
 
-# Power ladder for `pthresh`, in percent of full duty. The spacing is fine
-# at the bottom because that is where the tube stops striking.
+# Level ladder for `pthresh`, in percent of Smax. The spacing is fine at
+# the bottom because that is where the marks stop.
 PTHRESH_PCT = (2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 20, 25, 30)
 PTHRESH_LEN = 25.0                      # mm of burn per rung
 PTHRESH_PITCH = 3.0                     # mm between rungs
 
 
+FLOOR_DENSITY_DEFAULT = 10.0            # glowforge_laser.c FLOOR_DENSITY_DEFAULT
+
+
+def floor_refusal(s):
+    """Why the floor the next arm loads is not 0, or None."""
+    floor = s.get('laser_floor_density') or ''
+    try:
+        if float(floor) == 0.0:
+            return None
+        return 'laser_floor_density is %s' % floor
+    except ValueError:
+        return 'laser_floor_density is %s' % ('unset (the driver default, 10)' if floor == '' else repr(floor))
+
+
+def curve_refusal(s):
+    """Why S is bent through a dose curve, or None when the curve is off
+    (the curve maps S through the measured light curve onto density)."""
+    curve = s.get('laser_dose_curve') or ''
+    if curve == 'off':
+        return None
+    return 'laser_dose_curve is %s' % (repr(curve) if curve else 'unset (the measured default)')
+
+
+def raw_mapping_refusal(s):
+    """Why S does not map straight onto density on this machine, or None
+    when it does: laser_floor_density = 0 and laser_dose_curve = off (the
+    driver loads the floor into $35 at every arm, so a typed $35 changes
+    nothing). s: forgectrl's settings, None when they could not be read."""
+    if s is None:
+        return "forgectrl's settings cannot be read"
+    return '; '.join(w for w in (floor_refusal(s), curve_refusal(s)) if w) or None
+
+
+def refused_unless_raw(drill, s):
+    """True (and why, printed) when the drill must not run: its rungs are
+    densities only while S maps straight onto density."""
+    why = raw_mapping_refusal(s)
+    if why is None:
+        return False
+    print('REFUSED: %s needs S to map straight onto density: %s.' % (drill, why))
+    print('Set laser_floor_density = 0 and laser_dose_curve = off on the panel')
+    print('(Settings), run the drill, and put both back after.')
+    return True
+
+
+def arm_floor(s):
+    """The floor the next arm loads into $35: laser_floor_density, or the
+    driver's default when the key is unset or not a percent. The $35 that
+    $$ reports is the last arm's, not this one's."""
+    try:
+        f = float(s.get('laser_floor_density') or '')
+    except ValueError:
+        return FLOOR_DENSITY_DEFAULT
+    return f if 0.0 <= f <= 100.0 else FLOOR_DENSITY_DEFAULT
+
+
+def read_mapping(g):
+    """($30, $31, $35, $36) as the controller reports them; None where one
+    cannot be read."""
+    return (grbl_setting(g, '$30'), grbl_setting(g, '$31'),
+            grbl_setting(g, '$35'), grbl_setting(g, '$36'))
+
+
+def with_arm_floor(m, s):
+    """The mapping the next arm fires: $35 replaced by the floor it loads."""
+    return (m[0], m[1], arm_floor(s), m[3])
+
+
+def mapping_ok(m):
+    return None not in m and m[0] > m[1]
+
+
+def level_of(sval, m):
+    """The fraction of full S lands on with the dose curve off: the core's
+    linear map from $31..$30 onto the floor $35 .. the ceiling $36 (duty
+    under analog, density under density)."""
+    rpm_max, rpm_min, floor, ceil = m
+    min_value = int(PWM_PERIOD * floor / 100.0)
+    max_value = int(PWM_PERIOD * ceil / 100.0)
+    if sval <= rpm_min:
+        return 0.0
+    gradient = (max_value - min_value) / (rpm_max - rpm_min)
+    return min(int((sval - rpm_min) * gradient) + min_value, max_value) / float(PWM_PERIOD)
+
+
 def drill_pthresh(g):
     smax = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
     feed = int(sys.argv[3]) if len(sys.argv) > 3 else 300
-    levels = [(p, max(1, int(round(smax * p / 100.0)))) for p in PTHRESH_PCT]
-    print('=== laser power threshold ladder: %d rungs, F%d, %g mm each ==='
-          % (len(levels), feed, PTHRESH_LEN))
-    print('constant power (M3): the commanded duty is the tested duty.')
-    print('PRECONDITION: $35 must be 0 for this run. A floor already in')
-    print('place lifts every rung and the threshold cannot be read.')
+    print('=== laser density threshold ladder: %d rungs, F%d, %g mm each ==='
+          % (len(PTHRESH_PCT), feed, PTHRESH_LEN))
+    settings = fc_settings()
+    if refused_unless_raw('pthresh', settings):
+        return 2
+    m = read_mapping(g)
+    if not mapping_ok(m):
+        print('PRECONDITION FAILED: cannot read $30/$31/$35/$36 (%s/%s/%s/%s)' % m)
+        return 2
+    m = with_arm_floor(m, settings)     # 0: the floor this run's arm loads
+    levels = []
+    for p in PTHRESH_PCT:
+        s = max(1, int(round(smax * p / 100.0)))
+        levels.append((p, s, level_of(s, m)))
+    print('constant power (M3): every pulse at full duty, the rung\'s level')
+    print('the density of FIRE ticks.')
+    print('mapping: $30=%g $31=%g $35=%g (the floor the arm loads) $36=%g' % m)
     print('rungs (drawn in order, alternating direction, +Y between):')
-    for i, (pct, s) in enumerate(levels):
-        print('  %2d: %2d%% -> S%d' % (i + 1, pct, s))
+    for i, (pct, s, dens) in enumerate(levels):
+        print('  %2d: %2d%% -> S%-4d density %.1f%%' % (i + 1, pct, s, 100.0 * dens))
     print('connect: %s' % prepare(g))
     base = sample_forgectrl()
     print('pre-fire: %s' % base)
     arm_cue()
-    print('>>> This ladder reaches %d%% of full power - use scrap you are'
-          % PTHRESH_PCT[-1])
+    print('>>> This ladder reaches %.0f%% density - use scrap you are'
+          % (100.0 * max(d for _p, _s, d in levels)))
     print('>>> willing to cut through.\n')
     job = ['G91', 'G21', 'M3']
-    for i, (_pct, s) in enumerate(levels):
+    for i, (_pct, s, _d) in enumerate(levels):
         job.append('S%d' % s)
         job.append('G1 X%g F%d' % (PTHRESH_LEN if i % 2 == 0 else -PTHRESH_LEN,
                                    feed))
@@ -622,13 +833,13 @@ def drill_pthresh(g):
         if line:
             print('  ' + '  '.join(line))
     print('\nRead the material: count rungs from the FIRST one drawn. The')
-    print('lowest rung carrying a CONTINUOUS mark is the lasing threshold;')
-    print('set $35 to that rung\'s percent. A rung showing only a spot at')
-    print('the start of its line struck but did not sustain - it is below')
-    print('the threshold, not at it. Note the emission counter proves the')
-    print('safety chain asserted LASER_ON, not that the tube lased - only')
-    print('the mark and the discharge current say that.')
-    return samples
+    print('lowest rung carrying a CONTINUOUS mark is the lowest density that')
+    print('still marks: set laser_floor_density to that rung\'s density on the')
+    print('panel, and put laser_dose_curve back. A rung that marks only in')
+    print('spots is below the threshold, not at it. Note the emission counter')
+    print('proves the safety chain asserted LASER_ON, not that the tube lased')
+    print('- only the mark and the discharge current say that.')
+    return 0 if emis and max(emis) > 0 else 1
 
 
 # --- density ladder -------------------------------------------------------
@@ -644,6 +855,8 @@ PWM_PERIOD = 127                        # 7-bit power byte against PWMSAR
 CONF = os.environ.get('GFHOME_CONF') or '/data/forgefirm/forgefirm.conf'
 PULSE_MIN_KEY = 'laser_pulse_min_ticks'
 PULSE_MIN_DEFAULT = 3                   # glowforge_laser.c PULSE_MIN_TICKS_DEFAULT
+PULSE_TICKS_KEY = 'laser_pulse_ticks'
+PULSE_TICKS_DEFAULT = 20                # glowforge_laser.c PULSE_TICKS_DEFAULT
 
 
 def conf_get(key):
@@ -661,35 +874,24 @@ def conf_get(key):
     return None
 
 
-def conf_set(key, val):
-    """Set one key, preserving every other line. False when the config is
-    not ours to write - running from a LAN host, say."""
+def period_refusal(period, s):
+    """Why the machine's base period is not `period`, or None when it is.
+    forgectrl owns the setting; the drill only reads it (an unset key is
+    the driver's default). forgectrl shows a value it does not take as
+    unset while the driver reads the file's, so a key in the file that
+    forgectrl does not show is a refusal too."""
+    have = s.get(PULSE_TICKS_KEY) or ''
+    if not have and conf_get(PULSE_TICKS_KEY):
+        return '%s is %s in %s, a value forgectrl does not take' % (
+            PULSE_TICKS_KEY, conf_get(PULSE_TICKS_KEY), CONF)
     try:
-        with open(CONF) as f:
-            lines = f.read().splitlines()
-    except OSError:
-        return False
-    out, done = [], False
-    for line in lines:
-        head = line.split('#', 1)[0]
-        if '=' in head and head.split('=', 1)[0].strip() == key:
-            if done:
-                continue
-            out.append('%s = %s' % (key, val))
-            done = True
-        else:
-            out.append(line)
-    if not done:
-        out.append('%s = %s' % (key, val))
-    try:
-        mode = os.stat(CONF).st_mode & 0o777
-        with open(CONF + '.tmp', 'w') as f:
-            f.write('\n'.join(out) + '\n')
-        os.chmod(CONF + '.tmp', mode)
-        os.replace(CONF + '.tmp', CONF)
-    except OSError:
-        return False
-    return True
+        ticks = float(have) if have else float(PULSE_TICKS_DEFAULT)
+    except ValueError:
+        return '%s is %r' % (PULSE_TICKS_KEY, have)
+    if ticks != period:
+        return '%s is %s%s' % (PULSE_TICKS_KEY, have or PULSE_TICKS_DEFAULT,
+                               '' if have else ' (unset, the driver default)')
+    return None
 
 
 def grbl_setting(g, key):
@@ -728,37 +930,40 @@ def drill_dladder(g):
         return 2
     print('dose model: density (%s)'
           % ('set in ' + CONF if conf_get('laser_power_model') else 'driver default'))
+    # The drill writes no setting: the dose curve must be off, or S is bent
+    # through the measured light curve and no rung fires the density it
+    # prints, and the base period must already be the one asked for.
+    settings = fc_settings()
+    why = ("forgectrl's settings cannot be read" if settings is None
+           else curve_refusal(settings) or period_refusal(period, settings))
+    if why:
+        print('PRECONDITION FAILED: %s. Set laser_dose_curve = off and %s = %d'
+              % (why, PULSE_TICKS_KEY, period))
+        print('on the panel (Settings), run the drill, and put both back after:')
+        print('the drill writes no setting itself.')
+        return 2
     # The core maps S onto the level this model renders as density, and
     # $35/$36 are its floor and ceiling. Read them rather than assuming:
     # with a floor set, the ladder is testing the shipping mapping, and
-    # every rung sits higher than its commanded percent.
-    floor = grbl_setting(g, '$35')
-    ceil = grbl_setting(g, '$36')
-    rpm_max = grbl_setting(g, '$30')
-    rpm_min = grbl_setting(g, '$31')
-    if None in (floor, ceil, rpm_max, rpm_min) or rpm_max <= rpm_min:
-        print('PRECONDITION FAILED: cannot read $30/$31/$35/$36 (%s/%s/%s/%s)'
-              % (rpm_max, rpm_min, floor, ceil))
+    # every rung sits higher than its commanded percent. The floor is the
+    # one this run's arm loads from laser_floor_density, not the last
+    # arm's $35.
+    rpm_max, rpm_min, _, ceil = read_mapping(g)
+    floor = arm_floor(settings)
+    if None in (ceil, rpm_max, rpm_min) or rpm_max <= rpm_min:
+        print('PRECONDITION FAILED: cannot read $30/$31/$36 (%s/%s/%s)'
+              % (rpm_max, rpm_min, ceil))
         return 2
     min_value = int(PWM_PERIOD * floor / 100.0)
     max_value = int(PWM_PERIOD * ceil / 100.0)
     gradient = (max_value - min_value) / (rpm_max - rpm_min)
-    print('mapping: $30=%g $31=%g $35=%g $36=%g -> density %.1f%%..%.1f%%'
+    print('mapping: $30=%g $31=%g $35=%g (the floor the arm loads) $36=%g -> density %.1f%%..%.1f%%'
           % (rpm_max, rpm_min, floor, ceil,
              100.0 * min_value / PWM_PERIOD, 100.0 * max_value / PWM_PERIOD))
     if floor > 0.0:
         print('a floor is set, so the rungs below it all land on it - that is')
         print('the shipping mapping, not the raw range.')
-    if conf_set('laser_pulse_ticks', str(period)):
-        print('laser_pulse_ticks = %d (written to %s)' % (period, CONF))
-    else:
-        have = conf_get('laser_pulse_ticks')
-        if have != str(period):
-            print('PRECONDITION FAILED: cannot write %s from here, and' % CONF)
-            print('laser_pulse_ticks is %r, not %d. Set it on the board.'
-                  % (have, period))
-            return 2
-        print('laser_pulse_ticks already %d' % period)
+    print('%s = %d, laser_dose_curve = off' % (PULSE_TICKS_KEY, period))
 
     # What each rung actually emits. The on-count is dithered between
     # adjacent integers, so the burst below is the mean.
@@ -853,8 +1058,10 @@ def drill_dladder(g):
     print('The base period does not decide the low end: below the minimum')
     print('the pulse interval is min_ticks x tick / density, which the')
     print('period cancels out of. What sets the bottom is the density')
-    print('floor ($35), so a rung that fails is telling you to raise it.')
-    return samples
+    print('floor (laser_floor_density, loaded into $35 at every arm), so a')
+    print('rung that fails is telling you to raise it.')
+    print('Put %s and laser_dose_curve back on the panel when the ladders are done.' % PULSE_TICKS_KEY)
+    return 0 if emis and max(emis) > 0 else 1
 
 
 # --- performance curve ladder ---------------------------------------------
@@ -993,28 +1200,22 @@ def _linfit(xs, ys):
 from gfbench import degc as _degc
 
 
-def pcurve_levels(g, pcts):
+def pcurve_levels(g, pcts, settings=None):
     """(pct, S, level) per rung: the level is what the core maps S onto
-    with the settings in force, as a fraction of full (duty/127 under
-    analog, density under density). None when a setting cannot be read."""
-    floor = grbl_setting(g, '$35')
-    ceil = grbl_setting(g, '$36')
-    rpm_max = grbl_setting(g, '$30')
-    rpm_min = grbl_setting(g, '$31')
-    if None in (floor, ceil, rpm_max, rpm_min) or rpm_max <= rpm_min:
-        return None, (rpm_max, rpm_min, floor, ceil)
-    min_value = int(PWM_PERIOD * floor / 100.0)
-    max_value = int(PWM_PERIOD * ceil / 100.0)
-    gradient = (max_value - min_value) / (rpm_max - rpm_min)
+    with the settings in force and the dose curve off, as a fraction of
+    full (duty/127 under analog, density under density); given forgectrl's
+    settings, at the floor this run's arm loads rather than the $35 of the
+    last arm. None when a setting cannot be read."""
+    m = read_mapping(g)
+    if not mapping_ok(m):
+        return None, m
+    if settings is not None:
+        m = with_arm_floor(m, settings)
     levels = []
     for pct in pcts:
-        sval = int(round(rpm_max * pct / 100.0))
-        if sval <= rpm_min:
-            level = 0
-        else:
-            level = min(int((sval - rpm_min) * gradient) + min_value, max_value)
-        levels.append((pct, sval, level / float(PWM_PERIOD)))
-    return levels, (rpm_max, rpm_min, floor, ceil)
+        sval = int(round(m[0] * pct / 100.0))
+        levels.append((pct, sval, level_of(sval, m)))
+    return levels, m
 
 
 def pcurve_analyze(samples, rungs, head_trim=PCURVE_TRIM_HEAD_S,
@@ -1208,17 +1409,16 @@ def drill_pcurve(g):
         return 2
     print('=== laser performance curve: %s model, %d rungs + repeat, F%d, %g mm each ==='
           % (model, len(pcts), feed, length))
+    settings = fc_settings()
+    if refused_unless_raw('pcurve', settings):
+        return 2
     print('constant power (M3): the commanded level is the tested level.')
-    levels, (rpm_max, rpm_min, floor, ceil) = pcurve_levels(g, pcts)
+    levels, (rpm_max, rpm_min, floor, ceil) = pcurve_levels(g, pcts, settings)
     if levels is None:
         print('PRECONDITION FAILED: cannot read $30/$31/$35/$36 (%s/%s/%s/%s)'
               % (rpm_max, rpm_min, floor, ceil))
         return 2
-    print('mapping: $30=%g $31=%g $35=%g $36=%g' % (rpm_max, rpm_min, floor, ceil))
-    if floor > 0.0:
-        print('a floor is set, so the low rungs land on it: this run records')
-        print('the shipping mapping. To measure the curve itself set $35=0')
-        print('and restart the controller first.')
+    print('mapping: $30=%g $31=%g $35=%g (the floor the arm loads) $36=%g' % (rpm_max, rpm_min, floor, ceil))
     unit = 'density' if model == 'density' else 'duty'
     # The drift witness is a mid-ladder rung drawn again at the end: it
     # has real signal (the bottom rung sits at the threshold and reads
@@ -1351,7 +1551,11 @@ def drill_pcurve(g):
     print('presence witness and the thermopile is the whole story. A knee')
     print('where the delta stops rising before 100%% is the ceiling S1000')
     print('should map to. The material remains the witness that it lased.')
-    return res
+    print('Put laser_floor_density and laser_dose_curve back on the panel.')
+    # A ladder that ran its lines with nothing lit is no curve.
+    if not res['curve']['fired']:
+        print('PCURVE FAIL: no rung read lit (laser_on_sampled)')
+    return 1 if aborted or not res['curve']['fired'] else 0
 
 
 # --- the depth witness: CW patches at speed against density patches ---------
@@ -1360,12 +1564,12 @@ def drill_pcurve(g):
 # material decides whether that is the tube or the sensor. A patch is a
 # serpentine of G1 lines at one level and one feed; under constant power
 # (M3) the dose per unit area is light x time, so a row of CW patches
-# (S1000: the discharge continuous) at feeds F600/dose is a reference
-# ladder of known relative dose, and a row of density patches at F600 is
-# matched to it by engrave depth. The CW patch a density patch matches
-# reads that density's light fraction straight off the stock, with the
-# thermopile's prediction printed beside it. The lines alternate
-# direction so no rapid crosses a fill; judge the middle of each patch,
+# (S1000: the discharge continuous) at the reference feed / dose is a
+# reference ladder of known relative dose, and a row of density patches at
+# the reference feed is matched to it by engrave depth. The CW patch a
+# density patch matches reads that density's light fraction straight off
+# the stock, with the thermopile's prediction printed beside it. The lines
+# alternate direction so no rapid crosses a fill; judge the middle of each patch,
 # since under constant power the ends carry the acceleration and read
 # darker at the fast feeds.
 # Defaults, all overridable on the command line (dpatch [F] [pitch] [length]).
@@ -1380,8 +1584,8 @@ DPATCH_PITCH = 0.3                       # mm between lines
 DPATCH_GAP_X = 3.0                       # mm between patches along X
 DPATCH_ROW_GAP = 3.0                     # mm between the two rows
 DPATCH_FEED = 1500                       # the reference feed, 25 mm/s
-DPATCH_CW_DOSES = (1.0, 0.8, 0.6, 0.5, 0.35, 0.25)   # row A: S1000 at F600/dose
-DPATCH_DENSITY_PCT = (100, 80, 60, 45, 30)            # row B: at F600
+DPATCH_CW_DOSES = (1.0, 0.8, 0.6, 0.5, 0.35, 0.25)   # row A: S1000 at feed / dose
+DPATCH_DENSITY_PCT = (100, 80, 60, 45, 30)            # row B: at the reference feed
 DPATCH_SETTLE_S = 2.0                    # laser off before each patch
 # The thermopile curves, light as a fraction of CW, for the labels: the
 # period-20 density ladder (E3) and the analog duty ladder (E1, whose
@@ -1415,7 +1619,14 @@ def drill_dpatch(g):
     model = 'density'                   # the only model on hardware
     tp_curve = DPATCH_TP_P20
     unit = 'density'
-    levels, (rpm_max, rpm_min, floor, ceil) = pcurve_levels(g, DPATCH_DENSITY_PCT)
+    # Row B's patches are matched against the thermopile's curve by their
+    # named densities, so S must map straight onto density: with the dose
+    # curve on, row B fires the light it asks for, and with a floor every
+    # patch fires above the density it names.
+    settings = fc_settings()
+    if refused_unless_raw('dpatch', settings):
+        return 2
+    levels, (rpm_max, rpm_min, floor, ceil) = pcurve_levels(g, DPATCH_DENSITY_PCT, settings)
     if levels is None:
         print('PRECONDITION FAILED: cannot read $30/$31/$35/$36 (%s/%s/%s/%s)'
               % (rpm_max, rpm_min, floor, ceil))
@@ -1424,7 +1635,7 @@ def drill_dpatch(g):
     period = (conf_get('laser_pulse_ticks') or 'driver default') if model == 'density' else None
     print('=== depth witness: CW patches at speed against %s patches at F%d ==='
           % (unit, feed_ref))
-    print('mapping: $30=%g $31=%g $35=%g $36=%g; model %s%s'
+    print('mapping: $30=%g $31=%g $35=%g (the floor the arm loads) $36=%g; model %s%s'
           % (rpm_max, rpm_min, floor, ceil, model,
              (', base period %s ticks' % period) if period else ''))
     patches = []
@@ -2507,22 +2718,16 @@ def drill_xycircle(g):
 
 
 def post_ctrl(action):
-    # http.client preserves the header-name case exactly as given.
-    import http.client
-    tok = panel_token()
-    c = http.client.HTTPConnection(HOST, CTRL_PORT, timeout=8)
-    c.putrequest('POST', '/controller/' + action)
-    c.putheader('X-ForgeFIRM-Token', tok)
-    c.putheader('Content-Length', '0')
-    c.endheaders()
-    r = c.getresponse()
-    body = r.read().decode()
-    c.close()
-    return r.status, body
+    return fc_request('POST', '/controller/' + action)
 
 
 def drill_expstop(g):
     print('=== armed kill on the expected-stop path (POST /controller/stop) ===')
+    if HOST not in LOOPBACK:
+        # forgectrl takes the stop, a write, only from loopback: from here
+        # it would be refused after the burn had begun.
+        print('REFUSED: expstop runs on the board (GF_HOST is %s)' % HOST)
+        return 2
     if not panel_token():
         raise SystemExit('set GF_TOKEN to the panel token first (or run on the board)')
     print('connect: %s' % prepare(g))
@@ -2543,11 +2748,18 @@ def drill_expstop(g):
         time.sleep(0.15)
     if not seen:
         print('no emission seen within the wait - operator did not arm? ABORT')
-        return []
+        return 1
     print('emission live (%s) - stopping the controller NOW' % smp['emission'])
     t_stop = time.time()
     code, body = post_ctrl('stop')
     print('POST /controller/stop -> %s %s (%.2f s)' % (code, body.strip(), time.time() - t_stop))
+    if code != 200:
+        # The stop was not taken: nothing here judged a stop, and the drill
+        # ends now, its closing M5 and connection close behind it. Neither
+        # stops a job in flight.
+        print('EXPSTOP FAIL: forgectrl did not take the stop. THE JOB IS STILL BURNING:')
+        print('open the lid now (the safety chain drops the laser at once).')
+        return 1
     trail = []
     for _ in range(40):                     # ~5 s at 8 Hz
         smp = sample_forgectrl()
@@ -2571,7 +2783,7 @@ def drill_expstop(g):
     print('EXPSTOP %s' % ('PASS' if ok else 'REVIEW'))
     print('the controller is left STOPPED (supervision held); resume it with '
           'the ctrlstart step once the operator has judged the stop')
-    return trail
+    return 0 if ok else 1
 
 
 # --- feed hold and resume: the pause is a corner in time ----------------------
@@ -2702,12 +2914,15 @@ def drill_ctrlstart(g):
     report /mode. No motion, no laser."""
     code, body = post_ctrl('start')
     print('POST /controller/start -> %s %s' % (code, body.strip()))
+    if code != 200:
+        print('CTRLSTART FAIL: forgectrl did not take the start (the drill runs on the board)')
+        return 1
     time.sleep(6)
     try:
         print('/mode after start: %s' % get_json('/mode'))
     except Exception as e:
         print('/mode after start: %s' % e)
-    return []
+    return 0
 
 
 def main():
@@ -2726,7 +2941,7 @@ def main():
         print(__doc__)
         return 2
     if drill == 'ctrlstart':
-        return drills[drill](None) or 0      # no controller connection needed
+        return verdict(drills[drill](None))  # no controller connection needed
     g = Grbl(HOST, PORT)
     try:
         rc = drills[drill](g)
@@ -2736,7 +2951,7 @@ def main():
             g.cmd('M5', timeout=1)
         except Exception:
             pass
-    return rc or 0          # the bench page's verdict is this exit status
+    return verdict(rc)      # the bench page's verdict is this exit status
 
 
 if __name__ == '__main__':
