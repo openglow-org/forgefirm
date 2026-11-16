@@ -44,7 +44,19 @@ import tempfile
 import time
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build-native/grblHAL_glowforge")
-PORT = 2401
+
+
+def free_port():
+    """A TCP port nothing on this host holds: two harness runs on one host
+    never meet on a fixed number."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+PORT = free_port()
 CONNECT_S = 8.0
 ANSWER_S = 5.0
 

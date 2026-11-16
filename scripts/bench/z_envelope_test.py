@@ -70,7 +70,19 @@ import tempfile
 import time
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build-native/grblHAL_glowforge")
-PORT = 2400
+
+
+def free_port():
+    """A TCP port nothing on this host holds: two harness runs on one host
+    never meet on a fixed number."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+PORT = free_port()
 
 ALARM_SOFT_LIMIT = "ALARM:2"
 
@@ -147,7 +159,7 @@ class Session:
 
     def write_setting(self, assignment):
         reply = self.send(assignment)
-        if "ok" not in reply:
+        if not re.search(r"^ok\r?$", reply, re.M):
             fail("settings write %r refused: %r" % (assignment, reply))
 
     def state(self):
@@ -178,7 +190,7 @@ class Session:
         if ALARM_SOFT_LIMIT in reply:
             self.recover()
             return True
-        if "ok" not in reply:
+        if not re.search(r"^ok\r?$", reply, re.M):
             fail("unexpected reply to %r: %r" % (gcode, reply))
         return False
 

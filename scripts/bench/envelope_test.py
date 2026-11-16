@@ -239,7 +239,7 @@ def main():
     finally:
         s.close()
     test_not_homed()
-    test_armed()
+    ct.run_case(test_armed)     # armed: a host starve runs it once more
     print("ALL PASS")
 
 

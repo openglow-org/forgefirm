@@ -32,10 +32,9 @@ job after it.
   8. every port operation ships dark. Under an open armed window, with M3
      modal and S above zero, a port jog, a canceled port jog, the refused
      jogs, and the panel operations (the tray's mode among them) add steps
-     to the shipped stream and not one FIRE tick. A jog block carries the modal spindle state, so the
-     stream's mask on jogging is the only thing that keeps a jog dark, and
-     this is what holds the port to it. The window stays open through
-     every one of them up to the home, and the home closes it
+     to the shipped stream and not one FIRE tick; a refused motor release
+     says so. The window stays open through every one of them up to the
+     home, and the home closes it
   9. "sender out" keeps senders from the network out, and only on an idle
      machine with a quiet sender: it is refused while a sender line runs
      (a dwell), within 2 s of the sender's last line, and while a program
@@ -44,6 +43,19 @@ job after it.
      is one that connects to this host's own address rather than the
      loopback; one turned away while senders are kept out is serial_test.c's
      (grblHAL-glowforge)
+ 10. a canceled port jog leaves no fire behind it. Under an open armed
+     window with M3 S500 modal, a port jog canceled by the sender's next
+     line, by the port's cancel, and by the port's client dropping, each
+     followed by a sender rapid and by a sender S0 move, ships not one
+     FIRE tick, and a cut after them is lit. A port jog refused under the
+     window leaves nothing to cancel, and the moves after it are judged
+     the same
+
+A case stops at once when its controller logs the armed clamp (the host
+kept the producer off the CPU past its lead, so the stream faulted the run
+on purpose and the case did not run). It runs once more from new
+controllers, and a second starve fails the harness; no other failure runs
+a case again.
 
 Usage: ctlport_test.py [path/to/grblHAL_glowforge]
 """
@@ -60,12 +72,108 @@ import threading
 import time
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build-native/grblHAL_glowforge")
-PORT = 2397
+
+
+def free_port():
+    """A TCP port nothing on this host holds: two harness runs on one host
+    never meet on a fixed number."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+PORT = free_port()
 
 
 def fail(msg):
+    # A check that fails in a session the host starved fails on the fault:
+    # the starve is the case's verdict.
+    watch_check()
     print("FAIL: %s" % msg)
     sys.exit(1)
+
+
+# The controller's line when the producer maps an event behind the ship
+# cursor inside an armed window: it missed its lead, and the stream faults
+# on purpose (ALARM:17, dark).
+CLAMP_LINE = "late events while the laser is armed"
+
+
+class HostStarved(Exception):
+    """The host kept the producer off the CPU past its lead inside an armed
+    window: the stream faulted the run on purpose, and the case did not
+    run (run_case runs the case once more)."""
+
+
+class StderrWatch:
+    """Reads a controller's stderr while it runs, so the pipe never fills
+    and blocks it. No session here asks for a producer stall, so the clamp
+    line means the host starved the producer. check(), which every wait,
+    every failure and the session's close call, then raises HostStarved at
+    once, with the worst lag from the run's summary line, rather than
+    leave the case to fail at a later check that the fault broke."""
+
+    def __init__(self, proc, name):
+        self.name = name
+        self.armed_check = True
+        self.lines = []
+        self.clamped = False
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self.read, args=(proc.stderr,), daemon=True)
+        self.thread.start()
+
+    def read(self, pipe):
+        for raw in iter(pipe.readline, b""):
+            line = raw.decode(errors="replace")
+            with self.lock:
+                self.lines.append(line)
+                if CLAMP_LINE in line:
+                    self.clamped = True
+
+    def text(self):
+        with self.lock:
+            return "".join(self.lines)
+
+    def check(self):
+        if not (self.clamped and self.armed_check):
+            return
+        self.armed_check = False
+        # The run's summary line, with the worst lag, follows the fault
+        # once the stream has ramped down.
+        end = time.time() + 2.0
+        while True:
+            text = self.text()
+            m = re.search(r"max behind ([\d.]+) ms", text[text.index(CLAMP_LINE):])
+            if m or time.time() >= end:
+                break
+            time.sleep(0.05)
+        raise HostStarved("[%s] host starved the producer (max behind %s ms): the stream faulted "
+                          "the armed run on purpose, and the case did not run"
+                          % (self.name, m.group(1) if m else "?"))
+
+
+WATCH = None    # the running controller's StderrWatch
+
+
+def watch_check():
+    if WATCH is not None:
+        WATCH.check()
+
+
+def run_case(case):
+    """Run one case. A case the host starved (HostStarved) runs once more,
+    from new controllers; a second starve fails the harness. No other
+    failure runs a case again."""
+    try:
+        return case()
+    except HostStarved as e:
+        print("RERUN: %s" % e)
+    try:
+        return case()
+    except HostStarved as e:
+        fail("%s; the rerun was starved too" % e)
 
 
 class Sender:
@@ -128,6 +236,7 @@ class Sender:
         self.sock.sendall((line + self.eol).encode())
         end = time.time() + timeout
         while time.time() < end:
+            watch_check()
             if self.count() > n:
                 with self.lock:
                     return self.responses[n]
@@ -143,6 +252,7 @@ class Sender:
         self.sock.sendall(b"?")
         end = time.time() + 2.0
         while time.time() < end:
+            watch_check()
             with self.lock:
                 for line in self.other[n:]:
                     m = re.match(r"<([A-Za-z]+)", line)
@@ -152,9 +262,15 @@ class Sender:
         fail("no status report")
 
     def wait_state(self, want, timeout=20.0):
+        """The state in the answers to fresh polls. Idle counts in two
+        answers in a row: a block planned and not yet started answers Idle
+        once, and is running by the next."""
         end = time.time() + timeout
+        need = 2 if want == "Idle" else 1
+        seen = 0
         while time.time() < end:
-            if self.state() == want:
+            seen = seen + 1 if self.state() == want else 0
+            if seen == need:
                 return
             time.sleep(0.1)
         fail("the controller never reached %s (now %s)" % (want, self.state()))
@@ -215,7 +331,8 @@ def publish_verdicts(path, stop):
 
 
 class Session:
-    def __init__(self, eol="\n", laser=False):
+    def __init__(self, eol="\n", laser=False, name="ctlport"):
+        global WATCH
         self.workdir = tempfile.mkdtemp(prefix="ctlport-")
         conf = os.path.join(self.workdir, "forgefirm.conf")
         with open(conf, "w") as f:
@@ -233,7 +350,8 @@ class Session:
                                         daemon=True)
             self.pub.start()
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=self.workdir, env=env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.watch = WATCH = StderrWatch(self.proc, name)
         self.sender = Sender(PORT, eol)
         self.path = os.path.join(self.workdir, "grbl.ctl")
         for _ in range(50):
@@ -248,6 +366,19 @@ class Session:
         """Past the port's sender-quiet interval."""
         time.sleep(0.45)
 
+    def port_idle(self, timeout=20.0):
+        """The port's own jog is over: Idle, and no port jog in hand. A
+        jog is judged by its own end, never by an Idle that may come
+        before it starts."""
+        end = time.time() + timeout
+        while time.time() < end:
+            watch_check()
+            st = self.port.state()
+            if st["state"] == "Idle" and not st["port_jog"]:
+                return st
+            time.sleep(0.05)
+        fail("the port never saw its jog end: %r" % self.port.state())
+
     def ticks(self):
         """(step ticks, FIRE ticks) shipped so far. A byte with bit 7 set is a
         power byte; in a tick byte 0x25 are the X, Y and Z steps and 0x10 is FIRE."""
@@ -257,6 +388,7 @@ class Session:
                 sum(1 for b in data if not b & 0x80 and b & 0x10))
 
     def close(self):
+        global WATCH
         self.port.close()
         self.sender.close()
         self.proc.send_signal(signal.SIGINT)
@@ -264,10 +396,14 @@ class Session:
             self.proc.wait(5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        self.watch.thread.join(2)
+        if WATCH is self.watch:
+            WATCH = None
         self.stop.set()
         if self.pub is not None:
             self.pub.join(2)
         shutil.rmtree(self.workdir, ignore_errors=True)
+        self.watch.check()      # a starve after the case's last wait
 
 
 def test_socket_mode(s):
@@ -287,7 +423,7 @@ def test_status_routing(s):
     r = s.port.request("jog G91 X2 F600")
     if r != "ok":
         fail("[routing] the port jog got %r, not ok" % r)
-    s.sender.wait_state("Idle")
+    s.port_idle()
     # The sender polled its status all the way through the jog. A realtime
     # character is not a line: it cancels nothing, and the jog ran whole.
     moved = s.port.state()["mpos"][0] - x0
@@ -536,7 +672,7 @@ def test_single_client(s):
 
 
 def test_port_dark():
-    s = Session(laser=True)
+    s = Session(laser=True, name="dark")
     try:
         s.sender.send("G91")
         s.sender.send("M3 S500")
@@ -553,11 +689,11 @@ def test_port_dark():
         replies = {}
         replies["state"] = s.port.request("state")
         replies["jog"] = s.port.request("jog G91 X8 F1200")
-        s.sender.wait_state("Idle")
+        s.port_idle()
         replies["jog-long"] = s.port.request("jog G91 X200 F6000")
         time.sleep(0.4)
         replies["cancel"] = s.port.request("cancel")
-        s.sender.wait_state("Idle")
+        s.port_idle()
         for words in ("G1 X5 F600", "G91 X5 F600 S900 M3", "G91 X5 F600 M4", "G91 G2 X5 I2 F600"):
             replies["jog " + words] = s.port.request("jog " + words)
         replies["release"] = s.port.request("release")      # refused: a laser job is armed
@@ -568,12 +704,15 @@ def test_port_dark():
         replies["tray out"] = s.port.request("tray out")    # the Z frame moves, the head does not
         replies["tray in"] = s.port.request("tray in")
         replies["jog-after-home"] = s.port.request("jog G91 X6 F1200")
-        s.sender.wait_state("Idle")
+        s.port_idle()
         time.sleep(0.5)
 
         steps1, fire1 = s.ticks()
         if replies["jog"] != "ok" or replies["jog-long"] != "ok" or replies["jog-after-home"] != "ok":
             fail("[dark] a port jog under the open window was refused: %r" % replies)
+        if not (replies["release"] or "").startswith("error:"):
+            fail("[dark] the motor release under the armed window got %r, not a refusal: %r"
+                 % (replies["release"], replies))
         if replies["tray out"] != "ok" or replies["tray in"] != "ok":
             fail("[dark] the tray op under the open window was refused: %r" % replies)
         if steps1 <= steps0:
@@ -591,6 +730,75 @@ def test_port_dark():
         s.close()
 
 
+def test_port_cancel_dark():
+    s = Session(laser=True, name="cancel-dark")
+    try:
+        s.sender.send("G90")
+        s.sender.send("M3 S500")
+        s.sender.send("G1 X10 F1500")
+        s.sender.wait_state("Idle")
+        if not s.sender.saw("laser armed"):
+            fail("[cancel-dark] the laser line did not arm: the case would prove nothing")
+        steps0, fire0 = s.ticks()
+        if fire0 == 0:
+            fail("[cancel-dark] the armed G1 shipped no FIRE tick: the dump cannot see emission")
+
+        replies = []
+
+        def jog():
+            s.quiet()
+            replies.append(s.port.request("jog G91 X30 F1000"))    # 1.8 s if nothing stops it
+            time.sleep(0.4)
+
+        def drop_client():
+            s.port.close()                      # the client is the dead-man
+            s.sender.wait_state("Idle")
+            s.port = PortClient(s.path)
+
+        def port_cancel():
+            s.port.request("cancel")
+            s.port_idle()
+
+        moves = ("G0 X0", "G1 X0 S0 F3000")
+        for move in moves:                      # the sender's next line cancels the jog
+            jog()
+            if s.sender.send(move, timeout=10.0) != "ok":
+                fail("[cancel-dark] the sender's %r during a port jog was not ok" % move)
+            s.sender.wait_state("Idle")
+        s.sender.send("S500")
+        for cancel in (port_cancel, drop_client):
+            for move in moves:
+                jog()
+                cancel()
+                if s.sender.send(move) != "ok":
+                    fail("[cancel-dark] the sender's %r after a canceled port jog was not ok" % move)
+                s.sender.wait_state("Idle")
+            s.sender.send("S500")
+        time.sleep(0.5)
+        steps1, fire1 = s.ticks()
+        if steps1 <= steps0:
+            fail("[cancel-dark] the moves shipped no step: the case would prove nothing")
+        if fire1 != fire0:
+            fail("[cancel-dark] a canceled port jog under an open window with M3 S500 left %d FIRE "
+                 "ticks on the moves after it (port replies %r)" % (fire1 - fire0, replies))
+
+        s.sender.send("G91")
+        s.sender.send("G1 X5 F600")             # the witness cut, at the S in force
+        s.sender.wait_state("Idle")
+        time.sleep(0.5)
+        _, fire2 = s.ticks()
+        if fire2 <= fire1 or s.sender.saw("laser armed") != 1:
+            fail("[cancel-dark] the cut after the moves ran dark or armed again (%d fire ticks, "
+                 "armed %d times): the window had closed, so the case proves nothing"
+                 % (fire2 - fire1, s.sender.saw("laser armed")))
+        print("PASS [cancel-dark]: under an open armed window with M3 S500, port jogs canceled by the "
+              "sender's line, by the port's cancel and by the client's drop (replies %s) left no FIRE "
+              "tick on the rapids and S0 moves after them; the cut after is lit (%d fire ticks)"
+              % (sorted(set(replies)), fire2 - fire1))
+    finally:
+        s.close()
+
+
 def test_reset_keeps_hook(s):
     s.sender.realtime(b"\x18")
     time.sleep(1.0)
@@ -600,7 +808,7 @@ def test_reset_keeps_hook(s):
     before = s.sender.count()
     if s.port.request("jog G91 X1 F600") != "ok":
         fail("[reset] the port jog after a soft reset was refused")
-    s.sender.wait_state("Idle")
+    s.port_idle()
     if s.sender.count() != before:
         fail("[reset] after a soft reset the port's ok went to the sender")
     print("PASS [reset]: the status hook survives a soft reset")
@@ -713,6 +921,14 @@ def test_sender_out():
 def main():
     if not os.path.exists(BIN):
         fail("no controller binary at %s" % BIN)
+    run_case(test_shared_session)
+    for case in (test_poll_crlf, test_port_dark, test_port_cancel_dark, test_sender_out):
+        run_case(case)
+    print("ALL PASS")
+
+
+def test_shared_session():
+    """The cases that share one controller."""
     s = Session()
     try:
         test_socket_mode(s)
@@ -726,10 +942,6 @@ def main():
         test_dead_man(s)
     finally:
         s.close()
-    test_poll_crlf()
-    test_port_dark()
-    test_sender_out()
-    print("ALL PASS")
 
 
 if __name__ == "__main__":

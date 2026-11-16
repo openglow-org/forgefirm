@@ -58,7 +58,7 @@ import ctlport_test as ct  # noqa: E402
 
 BIN = ct.BIN
 fail = ct.fail
-PORT = 2395
+PORT = ct.free_port()
 SPM = 2.922
 EDGE = 3.35                 # the edge's grid step is 10
 EDGE_K = 10

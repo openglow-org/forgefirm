@@ -263,7 +263,7 @@ def main():
         test_timeout_holds(s)
     finally:
         s.close()
-    test_dark()
+    ct.run_case(test_dark)      # armed: a host starve runs it once more
     print("ALL PASS")
 
 

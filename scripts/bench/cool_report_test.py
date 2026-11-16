@@ -36,7 +36,19 @@ import time
 
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/grblHAL_glowforge"
 SECRET = "0123456789abcdef0123456789abcdef"
-GRBL_PORT = 23960
+
+
+def free_port():
+    """A TCP port nothing on this host holds: two harness runs on one host
+    never meet on a fixed number."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+GRBL_PORT = free_port()
 
 
 def fail(msg):

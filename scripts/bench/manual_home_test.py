@@ -50,9 +50,9 @@ import tempfile
 import threading
 import time
 
-from ctlport_test import BIN, PortClient, Sender, fail, publish_verdicts
+from ctlport_test import BIN, PortClient, Sender, fail, free_port, publish_verdicts
 
-PORT = 2396
+PORT = free_port()
 NOTICE = "Manual home: position set where the head was placed"
 RELEASED = "Motors released"
 RUNNER_MARK = "runner-ran"
@@ -400,7 +400,10 @@ def test_stop_block_offsets(s):
     the origin."""
     s.sender.wait_state("Idle")
     s.set_mode("manual", "manual_home_x = 12.5\nmanual_home_y = 8\n")
+    armed = s.sender.saw("laser armed")
     s.sender.send("M3 S100")                    # a modal beam the jog must not carry
+    if s.sender.saw("laser armed") <= armed:
+        fail("[offsets] the M3 did not arm, so the dark move to the origin proves nothing")
     ticks, fire = s.motion_ticks(), s.fire_ticks()
     if s.sender.send("$H") != "ok":
         fail("[offsets] $H under manual with offsets was refused")

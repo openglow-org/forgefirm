@@ -133,6 +133,52 @@ over TCP, then checks the dumps against the kernel feeder contract:
      the write the way a full ring holds it) stalls nothing but the
      shipper: the producer keeps mapping at wall pace behind it, so the
      job completes lit with no clamp, no burst, and a dark end
+ 30. a laser state pushed at Idle lights nothing it did not command:
+     under M3 with the window open, a G1 to the current position (or one
+     shorter than a step, or a dot's G1 and dwell), a jog of zero length,
+     and a power override at Idle, up or down, each push a laser-on with
+     no motion to ride; the rapid or the S0 move that follows ships dark
+     on every tick, and a cut after it is lit
+ 31. a canceled jog leaves no fire behind it: under M3 S1000 with the
+     window open a jog canceled by the sender (0x85, one jog or two
+     queued), or by the cooling client on a holding verdict, is followed
+     by a rapid and by an S0 move that ship dark on every tick, under M4
+     as under M3, as after a jog that ends by itself; the report during a
+     laser jog reads spindle 0, as during a rapid; a cut at the S in
+     force, after the planner ran dry or after a completed jog, is lit
+     for its whole length. The controller port's cancels are
+     ctlport_test's
+ 32. a door byte from the sender is no door: the machine's door is the
+     lid, read by the switch module. A 0x84 during a jog under M3 S1000,
+     then a cycle start, ships no FIRE on any tick of the jog, M5 or not;
+     and a 0x84 riding a line during a cut (the second byte of a UTF-8
+     character in a comment) cancels nothing: the cut runs to its end,
+     lit, with no lid message
+ 33. a cut the planner ran dry in the middle of (the protocol thread held
+     off the CPU longer than the prepared segments last, by the
+     GFSINK_PROTO_STALL_MS test hook) relights for the rest of its block,
+     under M3 as under M4
+ 34. G28 and G30 traverse dark: with G1 modal and M3 or M4 on, a G28 or
+     G30 with an intermediate point, the incremental G28 X0 Y0, and a
+     bare G28 ship no FIRE tick, and the cuts before and after them are
+     lit
+ 35. a canned cycle traverses dark: G73, G81, G82, G83, G85 and G89
+     under M3, with G1, G0 or G2 modal before each, ship no FIRE tick on
+     any move of the cycle (the rapid to the hole, the moves in Z), and
+     the cuts between the cycles are lit; under M4 a canned block takes
+     the same static path, so this one session proves both
+ The sessions of rules 30 to 35 judge their idle gaps (rule 8) and their
+ end (rule 7) as well
+
+A session that did not ask for a stall (GFSINK_STALL_MS of the producer,
+GFSINK_WRITE_STALL_MS of the sink's write; a session that asks for one
+judges a clamp by its own checks) stops at once when the controller logs
+the armed clamp: the host kept the
+producer off the CPU past its lead, the stream faulted the run on purpose,
+and the rule did not run. The session runs once more from a new
+controller, and a second starve fails the harness; no other failure runs
+a session again. CI gives the controller cap_sys_nice, as the board runs
+it, so the producer runs SCHED_FIFO.
 
 The analog sessions select the reference mode through the config; on
 hardware the controller ignores it (density is the only product model -
@@ -154,7 +200,19 @@ import threading
 import time
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build-native/grblHAL_glowforge")
-PORT = 2399
+
+
+def free_port():
+    """A TCP port nothing on this host holds: two harness runs on one host
+    never meet on a fixed number."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+PORT = free_port()
 
 # The XY microstep mode. No session below writes xy_microsteps, so every
 # one of them runs at the driver's default (boards/glowforge.h
@@ -389,8 +447,80 @@ JOB_NEXT = [
 
 
 def fail(msg):
+    # A check that fails in a session the host starved fails on the fault:
+    # the starve is the session's verdict.
+    if WATCH is not None:
+        WATCH.check()
     print("FAIL: %s" % msg)
     sys.exit(1)
+
+
+# The controller's line when the producer maps an event behind the ship
+# cursor inside an armed window: it missed its lead, and the stream faults
+# on purpose (ALARM:17, dark). GFSINK_STALL_MS forces it.
+CLAMP_LINE = "late events while the laser is armed"
+
+
+class HostStarved(Exception):
+    """The host kept the producer off the CPU past its lead inside an armed
+    window, in a session that did not ask for a stall: the stream
+    faulted the run on purpose, and the rule did not run (run_session runs
+    the session once more)."""
+
+
+class StderrWatch:
+    """Reads a controller's stderr while it runs, so the pipe never fills
+    and blocks it. In a session that did not ask for a stall, the clamp
+    line means the host starved the producer. check(), which
+    every socket read calls, then raises HostStarved at once, with the
+    worst lag from the run's summary line, rather than leave the session
+    to fail at a later check that the fault broke."""
+
+    def __init__(self, proc, name, stall_asked):
+        self.name = name
+        self.armed_check = not stall_asked
+        self.lines = []
+        self.clamped = False
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self.read, args=(proc.stderr,), daemon=True)
+        self.thread.start()
+
+    def read(self, pipe):
+        for raw in iter(pipe.readline, b""):
+            line = raw.decode(errors="replace")
+            with self.lock:
+                self.lines.append(line)
+                if CLAMP_LINE in line:
+                    self.clamped = True
+
+    def text(self):
+        with self.lock:
+            return "".join(self.lines)
+
+    def starved(self):
+        """True once the clamp line has come in a session that did not ask
+        for a stall."""
+        return self.clamped and self.armed_check
+
+    def check(self):
+        if not self.starved():
+            return
+        self.armed_check = False
+        # The run's summary line, with the worst lag, follows the fault
+        # once the stream has ramped down.
+        end = time.time() + 2.0
+        while True:
+            text = self.text()
+            m = re.search(r"max behind ([\d.]+) ms", text[text.index(CLAMP_LINE):])
+            if m or time.time() >= end:
+                break
+            time.sleep(0.05)
+        raise HostStarved("[%s] host starved the producer (max behind %s ms): the stream faulted "
+                          "the armed run on purpose, and the rule did not run"
+                          % (self.name, m.group(1) if m else "?"))
+
+
+WATCH = None    # the running controller's StderrWatch
 
 
 def send_line(sock, line, log):
@@ -408,6 +538,8 @@ def read_avail(sock, log, timeout, until=None):
     end = time.time() + timeout
     buf = b""
     while time.time() < end:
+        if WATCH is not None:
+            WATCH.check()
         sock.settimeout(max(0.05, end - time.time()))
         try:
             data = sock.recv(4096)
@@ -425,24 +557,56 @@ def read_avail(sock, log, timeout, until=None):
     return None
 
 
+def status_text(sock, log, timeout=0.5):
+    """The first report (e.g. '<Jog|MPos:...|FS:1000,0>') after a '?' sent
+    now, or None when none comes in `timeout`. Whatever is already on its
+    way is read first. A report cannot be matched to its '?' exactly: the
+    core folds the '?' that arrive before its next protocol pass into one
+    report, and a reset drops one in flight. So a report the controller
+    made before this '?' but sent after the drain can stand in for its
+    answer, and a wait for Idle takes two Idle answers 0.2 s apart."""
+    read_avail(sock, log, 0.02)
+    n = len(log)
+    sock.sendall(b"?")
+    end = time.time() + timeout
+    while time.time() < end:
+        read_avail(sock, log, 0.05)
+        m = re.search(r"<[^>]*>", "".join(log[n:]))
+        if m:
+            return m.group(0)
+    return None
+
+
+def status_reply(sock, log, timeout=0.5):
+    """The state word (e.g. 'Hold:0') of the report that answers a '?' sent
+    now (status_text)."""
+    report = status_text(sock, log, timeout)
+    m = re.match(r"<([A-Za-z]+(?::\d)?)", report or "")
+    return m.group(1) if m else None
+
+
 def wait_idle(sock, log):
-    for _ in range(100):
-        sock.sendall(b"?")
-        read_avail(sock, log, 0.3)
-        if re.search(r"<Idle", "".join(log[-3:])):
+    """Idle in two answers in a row, 0.2 s apart: a block planned and not
+    yet started reports Idle once, and is running by the second. Seeing
+    the controller leave Idle first proves nothing more and can hang: a
+    move shorter than a poll (a dot, a G1 to the current position, a jog
+    of zero length) never answers anything but Idle."""
+    seen = 0
+    for _ in range(150):
+        seen = seen + 1 if status_reply(sock, log) == "Idle" else 0
+        if seen == 2:
             return
         time.sleep(0.2)
     fail("controller never returned to Idle")
 
 
 def wait_state(sock, log, prefix, timeout=5.0):
-    """Poll '?' until the state word starts with prefix (e.g. 'Hold:0')."""
+    """Poll '?' until the answer's state word starts with prefix (e.g.
+    'Hold:0')."""
     end = time.time() + timeout
     while time.time() < end:
-        sock.sendall(b"?")
-        read_avail(sock, log, 0.3)
-        m = re.findall(r"<([A-Za-z]+(?::\d)?)", "".join(log[-3:]))
-        if m and m[-1].startswith(prefix):
+        st = status_reply(sock, log)
+        if st is not None and st.startswith(prefix):
             return
         time.sleep(0.1)
     fail("controller never reached %s" % prefix)
@@ -495,7 +659,27 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
     enabled, so a $35 written at runtime only takes effect on the next
     controller start. env_extra adds to the controller's environment
     (the host stall knobs). The controller's log (stderr) is kept in
-    run_session.err."""
+    run_session.err.
+
+    A session the host starved (HostStarved) runs once more, from a new
+    controller; a second starve fails the harness. No other failure runs
+    a session again, and a session that asks for a stall
+    (GFSINK_STALL_MS, GFSINK_WRITE_STALL_MS) is never judged starved: its
+    own checks judge a clamp, with no rerun."""
+    args = (name, steps, conf, workdir, keep, arm_required, env_extra)
+    try:
+        return run_session_once(*args)
+    except HostStarved as e:
+        print("RERUN: %s" % e)
+    try:
+        return run_session_once(*args)
+    except HostStarved as e:
+        fail("%s; the rerun was starved too" % e)
+
+
+def run_session_once(name, steps, conf, workdir, keep, arm_required, env_extra):
+    """One launch of run_session's session."""
+    global WATCH
     if workdir is None:
         workdir = tempfile.mkdtemp(prefix="laser-test-")
     dump = os.path.join(workdir, "stream.bin")
@@ -523,11 +707,18 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
 
     stop = threading.Event()
     VERDICT_MODE["mode"] = "clean"
+    run_session.polls = []
     pub = threading.Thread(target=publish_verdicts, args=(verdict, stop), daemon=True)
     pub.start()
 
     proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=workdir, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # A stall the session asks for itself, of the producer or of the sink's
+    # write: its own checks judge a clamp (rules 28 and 29), with no rerun.
+    # One the caller's environment carries is the host's as far as the
+    # session knows.
+    stall_asked = any((env_extra or {}).get(k) for k in ("GFSINK_STALL_MS", "GFSINK_WRITE_STALL_MS"))
+    watch = WATCH = StderrWatch(proc, name, stall_asked)
     try:
         sock = None
         for _ in range(50):
@@ -537,11 +728,10 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
             except OSError:
                 time.sleep(0.1)
         if sock is None:
-            err = b""
             if proc.poll() is not None:
-                err = proc.stderr.read() or b""
+                watch.thread.join(1)
             fail("[%s] cannot connect to the controller (exit=%s)\n%s"
-                 % (name, proc.poll(), err.decode(errors="replace")))
+                 % (name, proc.poll(), watch.text()))
 
         log = []
         read_avail(sock, log, 0.5)          # banner / hello
@@ -557,6 +747,8 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
                 wait_state(sock, log, step[1], step[2] if len(step) > 2 else 5.0)
             elif isinstance(step, tuple) and step[0] == "verdict":
                 VERDICT_MODE["mode"] = step[1]
+            elif isinstance(step, tuple) and step[0] == "poll":
+                run_session.polls.append(status_text(sock, log))   # the report, as a sender sees it
             elif isinstance(step, tuple) and step[0] == "expect_text":
                 if not wait_text(sock, log, step[1], step[2] if len(step) > 2 else 5.0):
                     fail("[%s] the controller never said %r" % (name, step[1]))
@@ -573,6 +765,7 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
         # is wall-paced), then for the Idle report.
         wait_idle(sock, log)
         time.sleep(1.0)                     # let the shipper drain the tail
+        watch.check()
         text = "".join(log)
 
         run_session.text = text
@@ -586,10 +779,9 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
             proc.wait(5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        try:
-            run_session.err = (proc.stderr.read() or b"").decode(errors="replace")
-        except (OSError, ValueError):
-            run_session.err = ""
+        watch.thread.join(2)
+        run_session.err = watch.text()
+        WATCH = None
         stop.set()
         pub.join(2)
         VERDICT_MODE["mode"] = "clean"
@@ -971,21 +1163,38 @@ def check_density(name, data, levels, period, min_ticks, move_ticks=None):
 
 
 def check_mask(analog, density):
-    """Rule 13: same motion, and density fire is a subset of analog fire."""
+    """Rule 13: same motion, and density fire is a subset of analog fire.
+    The two sessions are compared move by move, each move on its own ticks
+    and the fire-gap limit around them: the idle gaps between moves are
+    wall time, and two sessions never match there."""
     ta, td = tick_bytes(analog), tick_bytes(density)
-    if len(ta) != len(td):
-        fail("[mask] tick counts differ (analog %d, density %d): the two runs "
-             "are not the same motion" % (len(ta), len(td)))
-    for i, (a, b) in enumerate(zip(ta, td)):
-        if (a & ~0x10) != (b & ~0x10):
-            fail("[mask] motion differs at tick %d (analog 0x%02x, density "
-                 "0x%02x)" % (i, a, b))
-    stray = [i for i, (a, b) in enumerate(zip(ta, td)) if (b & 0x10) and not (a & 0x10)]
-    if stray:
-        fail("[mask] density fired %d tick(s) the core never commanded, first "
-             "at %d - the model is acting as a source of emission, not a mask"
-             % (len(stray), stray[0]))
-    return sum(1 for b in td if b & 0x10), sum(1 for a in ta if a & 0x10)
+    ra, rd = motion_runs(ta), motion_runs(td)
+    if len(ra) != len(rd):
+        fail("[mask] %d moves under analog, %d under density: the two runs are not the "
+             "same motion" % (len(ra), len(rd)))
+    fire_a = fire_d = 0
+    for k, ((a0, a1), (d0, d1)) in enumerate(zip(ra, rd)):
+        lo = min(FIRE_GAP_LIMIT_TICKS, a0, d0)
+        hi = min(FIRE_GAP_LIMIT_TICKS, len(ta) - 1 - a1, len(td) - 1 - d1)
+        sa, sd = ta[a0 - lo:a1 + hi + 1], td[d0 - lo:d1 + hi + 1]
+        if len(sa) != len(sd):
+            fail("[mask] move %d is %d ticks under analog, %d under density: the two runs "
+                 "are not the same motion" % (k + 1, len(sa), len(sd)))
+        for i, (a, b) in enumerate(zip(sa, sd)):
+            if (a & ~0x10) != (b & ~0x10):
+                fail("[mask] motion differs at tick %d of move %d (analog 0x%02x, density "
+                     "0x%02x)" % (i, k + 1, a, b))
+        stray = [i for i, (a, b) in enumerate(zip(sa, sd)) if (b & 0x10) and not (a & 0x10)]
+        if stray:
+            fail("[mask] density fired %d tick(s) the core never commanded in move %d, first "
+                 "at %d - the model is acting as a source of emission, not a mask"
+                 % (len(stray), k + 1, stray[0]))
+        fire_a += sum(1 for a in sa if a & 0x10)
+        fire_d += sum(1 for b in sd if b & 0x10)
+    if fire_d != count_fire(density) or fire_a != count_fire(analog):
+        fail("[mask] FIRE outside every move (analog %d of %d, density %d of %d fire ticks on "
+             "the moves)" % (fire_a, count_fire(analog), fire_d, count_fire(density)))
+    return fire_d, fire_a
 
 
 def count_fire(data):
@@ -1014,6 +1223,334 @@ def check_cut_spans(name, ticks, n, cut_ticks, what):
             fail("[%s] %d steps in a 100-tick window under FIRE: a rapid "
                  "was cut" % (name, worst))
     return spans
+
+
+# Separate moves sit an idle gap apart in the dump (a fresh stream leads
+# with a stream depth of pad, 200 ms), far longer than any stepless stretch
+# inside one move (the accel-from-rest step, FIRE_GAP_LIMIT_TICKS at most).
+RUN_GAP_TICKS = 3 * FIRE_GAP_LIMIT_TICKS
+
+
+def motion_runs(ticks):
+    """(first step, last step) of each move in the dump, split on stepless
+    gaps longer than RUN_GAP_TICKS."""
+    runs = []
+    start = last = None
+    for i, b in enumerate(ticks):
+        if b & 0x25:
+            if start is None:
+                start = i
+            elif i - last > RUN_GAP_TICKS:
+                runs.append((start, last))
+                start = i
+            last = i
+    if start is not None:
+        runs.append((start, last))
+    return runs
+
+
+def fire_on_run(ticks, run):
+    """FIRE ticks on a move and within the fire-gap limit of its ends: a
+    lit move's FIRE leads its first step and trails its last by less."""
+    a = max(0, run[0] - FIRE_GAP_LIMIT_TICKS)
+    b = min(len(ticks), run[1] + FIRE_GAP_LIMIT_TICKS)
+    return sum(1 for t in ticks[a:b] if t & 0x10)
+
+
+def check_runs(name, data, marks, what):
+    """Judge every move of a session by its mark, in order: 'd' ships no
+    FIRE tick, 'l' is lit over at least half its ticks (a cut at S500 and
+    up under the floored density model renders more), and '-' is not
+    judged; '*' and a mark judge every move before the last by that mark,
+    one at least. The last mark is the witness cut: lit, and the only arm
+    of the session, so the window was open through every move judged dark
+    and their darkness is the stream's, never a closed window's. The idle
+    gaps between the moves are judged too: no FIRE tick away from every
+    step (rule 8), and the stream ends dark (rule 7)."""
+    ticks = tick_bytes(data)
+    runs = motion_runs(ticks)
+    check_fire_gaps(name, data)
+    check_termination(name, data)
+    if marks.startswith("*"):
+        # Every move before the witness is judged by the mark that
+        # follows the star, however many moves there are: a hold splits
+        # one jog into two.
+        if len(runs) < 2:
+            fail("[%s] %d moves in the stream: nothing before the witness to judge" % (name, len(runs)))
+        marks = marks[1] * (len(runs) - 1) + marks[2:]
+    if len(runs) != len(marks):
+        fail("[%s] %d moves in the stream, expected %d (%s): %s"
+             % (name, len(runs), len(marks), marks, runs))
+    if run_session.text.count("laser armed") != 1:
+        fail("[%s] armed %d times: the window closed under the session, so its dark moves "
+             "prove nothing" % (name, run_session.text.count("laser armed")))
+    out = []
+    for i, (run, mark) in enumerate(zip(runs, marks)):
+        lit = fire_on_run(ticks, run)
+        out.append(lit)
+        if mark == "d" and lit:
+            fail("[%s] move %d of %d shipped %d FIRE ticks over %d ticks of motion: %s"
+                 % (name, i + 1, len(runs), lit, run[1] - run[0] + 1, what))
+        if mark == "l" and lit < 0.5 * (run[1] - run[0] + 1):
+            fail("[%s] move %d of %d is lit over %d of its %d ticks: a cut ran dark (%s)"
+                 % (name, i + 1, len(runs), lit, run[1] - run[0] + 1, what))
+    return out
+
+
+# The cut that closes every session of rules 30 to 33: relative, at its own
+# S, under whatever spindle mode is modal.
+WITNESS = ["G91", "G1 X5 F600 S500", WAIT_IDLE]
+
+
+def rule_30_idle_push():
+    """Rule 30: a laser state pushed at Idle lights nothing it did not
+    command. Each push is the only lit request since the last M5, so each
+    move judged dark is the push's own."""
+    name = "idle-push"
+    steps = ["G90", "G21", "M3 S1000", WAIT_IDLE,
+             "G0 X10", WAIT_IDLE,                       # M3 at Idle, then a rapid
+             "G1 X10 F600", WAIT_IDLE,                  # a G1 to the current position
+             "G0 X20", WAIT_IDLE,
+             "M5", "M3", "G1 X20 S1000", "G4 P0.2",     # a dot: G1 on the spot, a dwell
+             "G0 X30", WAIT_IDLE,
+             "M5", "M3", "G1 X30.001 S1000",            # a G1 shorter than one step
+             "G0 X40", WAIT_IDLE,
+             "M5", "M3 S0", "G1 X40 S1000",             # S0, then a G1 on the spot at S1000
+             "G1 X60 S0 F3000", WAIT_IDLE,
+             "M5", "G0", "M3 S1000", "$J=G91 X0 F1000",  # a jog of zero length
+             "G0 X70", WAIT_IDLE] + WITNESS
+    data = run_session(name, steps, conf=DENSITY_CONF_FLOORED)
+    lit = check_runs(name, data, "ddddddl",
+                     "a G1 on the spot, a dot, a sub-step G1 or a zero-length jog left a laser-on "
+                     "behind for the next move, which no motion carried")
+    print("PASS [%s]: after M3 at Idle, a G1 on the spot, a dot, a sub-step G1, an on-the-spot "
+          "G1 at S1000 under S0 and a zero-length jog, the rapids and the S0 move shipped dark; "
+          "the cut after is lit (%d)" % (name, lit[-1]))
+
+    name = "idle-override"
+    steps = ["G90", "G21", "G1 F1200", "M3 S500", "G1 X10", "G0 X20", WAIT_IDLE,
+             ("rt", b"\x9a"), ("sleep", 0.3),           # the power override up, at Idle
+             "G0 X40", WAIT_IDLE,
+             "M5", "G1 F1200", "M3 S500", "G1 X50", "G0 X60", WAIT_IDLE,
+             ("rt", b"\x9b"), ("sleep", 0.3),           # and down
+             "G0 X80", WAIT_IDLE] + WITNESS
+    data = run_session(name, steps, conf=DENSITY_CONF_FLOORED)
+    lit = check_runs(name, data, "-d-dl",
+                     "a power override at Idle pushed a laser-on that the next rapid carried")
+    print("PASS [%s]: a power override up and down at Idle, each after a cut and a rapid, left the "
+          "next rapid dark; the cut after is lit (%d)" % (name, lit[-1]))
+
+
+# A jog of 1.8 s at 1000 mm/min, canceled 0.4 s in, mid-motion.
+JOG_LONG = "$J=G91 X30 F1000"
+JOG_BACK = "$J=G91 X-30 F1000"
+
+
+def jog_canceled(jog, by):
+    """The steps of a jog canceled mid-motion: by the sender's 0x85, or by
+    the cooling client on a holding verdict (it cancels a jog the moment a
+    verdict holds)."""
+    if by == "0x85":
+        return [jog, ("sleep", 0.4), ("rt", b"\x85"), WAIT_IDLE]
+    return [jog, ("sleep", 0.4), ("verdict", "hold"), ("sleep", 1.0),
+            ("verdict", "clean"), ("sleep", 1.0), WAIT_IDLE]
+
+
+def rule_31_canceled_jog():
+    """Rule 31: a canceled jog leaves no fire behind it. Every cancel comes
+    from a fresh M3 S1000 at Idle (an M5 before it, in a session with an
+    earlier cancel), so the laser-on the jog could leave behind is the one
+    pushed at Idle, and the move after the cancel is judged dark."""
+    m3 = ["G90", "G21", "M3 S1000", WAIT_IDLE]
+    fresh = ["M5", "M3 S1000", WAIT_IDLE]
+    sessions = (
+        ("jog-cancel", m3 + ["$J=G91 X10 F1000", WAIT_IDLE, "G0 X40", WAIT_IDLE]  # a jog that ends
+         + [JOG_BACK, ("sleep", 0.2), ("poll",), ("sleep", 0.2), ("rt", b"\x85"), WAIT_IDLE]
+         + ["G0 X60", WAIT_IDLE]
+         + fresh + ["$J=G91 X15 F1000", "$J=G91 X15 F1000",       # two jogs queued
+                    ("sleep", 0.4), ("rt", b"\x85"), WAIT_IDLE, "G0 X0", WAIT_IDLE]
+         + fresh + jog_canceled(JOG_LONG, "0x85") + ["G1 X0 S0 F3000", WAIT_IDLE],
+         "ddddddddl"),
+        ("jog-cancel-m4", ["G90", "G21", "M4 S1000", WAIT_IDLE] + jog_canceled(JOG_LONG, "0x85")
+         + ["G0 X0", WAIT_IDLE], "ddl"),
+        ("jog-hold", m3 + jog_canceled(JOG_LONG, "hold") + ["G0 X0", WAIT_IDLE]
+         + fresh + jog_canceled(JOG_LONG, "hold") + ["G1 X0 S0 F3000", WAIT_IDLE], "ddddl"),
+    )
+    for name, steps, marks in sessions:
+        data = run_session(name, steps + WITNESS, conf=DENSITY_CONF_FLOORED)
+        lit = check_runs(name, data, marks,
+                         "a canceled jog left the modal S1000 lit for the move after it")
+        if run_session.polls:
+            # The sender's view of a laser jog: it runs at zero power, as a
+            # rapid does, so the report's spindle speed reads 0 while the
+            # modal S stays 1000 for the next cut.
+            report = run_session.polls[-1] or ""
+            m = re.search(r"\|FS:[\d.]+,([\d.]+)", report)
+            if not report.startswith("<Jog") or not m:
+                fail("[%s] the poll during the jog read %r: no jog to judge" % (name, report))
+            if float(m.group(1)) != 0.0:
+                fail("[%s] the report during a laser jog under M3 S1000 reads spindle %s, not 0: "
+                     "the jog was planned at the modal power (%r)" % (name, m.group(1), report))
+        print("PASS [%s]: the jogs and the move after the cancel shipped dark; the cut after is "
+              "lit (%d)" % (name, lit[-1]))
+
+    # A cut at the S in force, with no S word since the last, is lit for
+    # its whole length after the planner ran dry and after a jog that ended
+    # by itself: nothing that keeps a jog or a rapid dark darkens the job.
+    name = "same-s-cuts"
+    steps = ["G90", "G21", "G1 F1200", "M3 S1000", "G1 X5", WAIT_IDLE,
+             "G1 X10", WAIT_IDLE, "$J=G91 X10 F1000", WAIT_IDLE, "G1 X25", WAIT_IDLE]
+    data = run_session(name, steps, conf=DENSITY_CONF_FLOORED)
+    lit = check_runs(name, data, "lldl", "a cut at the S in force ran dark")
+    runs = motion_runs(tick_bytes(data))
+    for k, what in ((1, "after the planner ran dry"), (3, "after a completed jog")):
+        span = runs[k][1] - runs[k][0] + 1
+        if lit[k] < 0.9 * span:
+            fail("[%s] the cut at the S in force %s is lit over %d of its %d ticks: it must be "
+                 "lit for its whole length" % (name, what, lit[k], span))
+    print("PASS [%s]: cuts at the S in force after the planner ran dry and after a completed jog "
+          "are lit over their length (%d and %d fire ticks)" % (name, lit[1], lit[3]))
+
+
+def rule_32_door_byte():
+    """Rule 32: a door byte from the sender is no door."""
+    door = ["$J=G91 X20 F600", ("sleep", 0.6), ("rt", b"\x84"), ("sleep", 0.5), ("rt", b"~"),
+            WAIT_IDLE]
+    for name, steps in (("door-byte", ["G90", "G21", "M3 S1000", WAIT_IDLE] + door),
+                        ("door-byte-m5", ["G90", "G21", "M3 S1000", "M5", WAIT_IDLE] + door
+                         + ["M3 S500"])):
+        data = run_session(name, steps + WITNESS, conf=DENSITY_CONF_FLOORED)
+        lit = check_runs(name, data, "*dl",
+                         "a 0x84 during a jog under M3 S1000 and a cycle start ran the rest of the "
+                         "jog as a lit cycle")
+        print("PASS [%s]: a 0x84 and a cycle start during a jog shipped no FIRE tick; the cut "
+              "after is lit (%d)" % (name, lit[-1]))
+
+    # The second byte of 'n with acute' (UTF-8 C5 84), in a comment of a
+    # line sent while a cut runs.
+    name = "door-byte-comment"
+    steps = ["G90", "G21", "G1 F1200", "M3 S500", "G1 X20", "G1 X25 (\u0144)", WAIT_IDLE]
+    data = run_session(name, steps, conf=DENSITY_CONF_FLOORED)
+    text = run_session.text
+    if "lid opened" in text or "<Door" in text:
+        fail("[%s] a 0x84 riding a comment took the door: %r" % (name, text[-300:]))
+    ticks = tick_bytes(data)
+    xsteps = sum(1 for t in ticks if t & 0x01)
+    if abs(xsteps - round(25 * STEPS_PER_MM)) > 2:
+        fail("[%s] %d X steps, expected %d: the cut did not run to its end"
+             % (name, xsteps, round(25 * STEPS_PER_MM)))
+    lit = check_runs(name, data, "l", "the cut was cut short")
+    print("PASS [%s]: a 0x84 in a comment during a cut canceled nothing: the cut ran its %d X "
+          "steps, lit (%d)" % (name, xsteps, lit[0]))
+
+
+def rule_33_starve_mid_block():
+    """Rule 33: a cut that the planner ran dry in the middle of relights
+    for the rest of its block. The protocol-thread stall test hook
+    (GFSINK_PROTO_STALL_MS) holds the protocol thread off the CPU once, a
+    second into the cut, longer than the prepared segments last: the
+    producer runs out mid-block, the run ends, and the same block runs on
+    as a second run. The cut's first segment carried the level (a rapid
+    came before it), so under M3 no later segment of the block carries
+    one; the run-start re-assert lights the rest. M4 updates every
+    segment."""
+    for mode in ("M3", "M4"):
+        name = "starve-%s" % mode.lower()
+        steps = ["G90", "G21", "%s S1000" % mode, WAIT_IDLE, "G0 X5", WAIT_IDLE,
+                 "G1 X40 F1200", WAIT_IDLE] + WITNESS
+        data = run_session(name, steps, conf=DENSITY_CONF_FLOORED,
+                           env_extra={"GFSINK_PROTO_STALL_MS": "600"})
+        # The rapid, the cut's two runs on either side of the starve, the
+        # witness: a cut that shows as one run had no starve to judge.
+        lit = check_runs(name, data, "dlll", "the rest of the cut after the starve ran dark")
+        print("PASS [%s]: the cut ran dry mid-block and its rest relit (%d and %d FIRE ticks on "
+              "either side of the starve)" % (name, lit[1], lit[2]))
+
+
+def rule_34_go_home_dark():
+    """Rule 34: G28 and G30 traverse dark. Both are non-modal, so the cut's
+    G1 stays modal through them; in laser mode their moves (to the
+    intermediate point, and to the stored position) are restricted laser
+    motions, planned at zero power under M3 and M4 alike, while the cut
+    before each and after each stays lit."""
+    for mode in ("M3", "M4"):
+        name = "go-home-%s" % mode.lower()
+        # Short moves: the rule judges the level a traversal is planned at.
+        cut = ["G1 X6", WAIT_IDLE]
+        steps = (["G90", "G21", "G28.1", "G30.1", "G1 F1200", "%s S1000" % mode] + cut
+                 + ["G28 X8 Y0", WAIT_IDLE] + cut                  # via an intermediate point
+                 + ["G91", "G28 X0 Y0", "G90", WAIT_IDLE] + cut    # the post idiom
+                 + ["G30 X8 Y0", WAIT_IDLE] + cut
+                 + ["G28", WAIT_IDLE] + cut)                       # straight to the stored position
+        data = run_session(name, steps, conf=DENSITY_CONF_FLOORED)
+        lit = check_runs(name, data, "ldldldldl",
+                         "a G28 or G30 traversal carried the modal power of the cut before it")
+        print("PASS [%s]: four G28/G30 traversals with G1 modal shipped dark; the five cuts around "
+              "them are lit (%s)" % (name, lit[0::2]))
+
+
+def rule_35_canned_dark():
+    """Rule 35: a canned cycle traverses dark. In laser mode G73, G81, G82,
+    G83, G85 and G89 are restricted laser motions: every move of a cycle
+    (the rapid to the hole, the rapid to R, the feeds in Z, the retracts)
+    is planned at zero power, whatever motion mode was modal before it
+    (G1, G0 and G2 each come before two of the six), and the cuts between
+    the cycles are lit. The one session, canned-m3, proves the rule under
+    M4 as well: a restricted block is never rate-adjusted, so under M4 a
+    canned block is planned static at zero, on the same path as under M3
+    (rule 34 keeps its M4 half, where the core takes another path: no
+    forced sync). The Z moves step a few
+    times a millimeter, so a cycle shows as a rapid and a run of single Z
+    steps: every move that is no cut is judged dark, the cuts are counted,
+    and Z steps between two cuts show that a cycle ran there. Z stays
+    inside the lens's envelope (its reference is 3.42 here), and the moves
+    are short: what the rule judges is the level each move is planned at,
+    not its length."""
+    cycles = [
+        "G1 X56 Y50",                               # a cut: G1 modal
+        "G81 X53 Y53 Z3.0 R3.5 F600", "G80",
+        "G1 X58 Y53 F1200",                         # a cut: G1 modal
+        "G82 X53 Y50 Z3.0 R3.5 P0.05 F600", "G80",
+        "G0 X50 Y50",                               # a rapid: G0 modal
+        "G83 X53 Y53 Z3.0 R3.5 Q0.25 F600", "G80",
+        "G0 X50 Y53",
+        "G73 X53 Y50 Z3.0 R3.5 Q0.25 F600", "G80",
+        "G2 X57 Y50 I2 J0 F1200",                   # a cut: G2 modal
+        "G85 X53 Y53 Z3.0 R3.5 F600", "G80",
+        "G2 X49 Y53 I-2 J0 F1200",                  # a cut: G2 modal
+        "G89 X53 Y50 Z3.0 R3.5 P0.05 F600", "G80",
+        "G1 X58 Y50 F1200",                         # the cut after
+    ]
+    cuts = 5
+    name = "canned-m3"
+    steps = ["G90", "G21", "G0 X50 Y50", WAIT_IDLE, "F1200", "M3 S1000"]
+    for line in cycles:
+        steps += [line] if line == "G80" else [line, WAIT_IDLE]
+    data = run_session(name, steps, conf=DENSITY_CONF_FLOORED)
+    ticks = tick_bytes(data)
+    runs = motion_runs(ticks)
+    check_fire_gaps(name, data)
+    check_termination(name, data)
+    if run_session.text.count("laser armed") != 1:
+        fail("[%s] armed %d times: the window closed under the session, so its dark moves "
+             "prove nothing" % (name, run_session.text.count("laser armed")))
+    lit = []
+    for i, run in enumerate(runs):
+        fire = fire_on_run(ticks, run)
+        if fire >= 0.5 * (run[1] - run[0] + 1):
+            lit.append(i)
+        elif fire:
+            fail("[%s] move %d of %d is no cut and shipped %d FIRE ticks over %d ticks of "
+                 "motion: a canned cycle ran at the modal power"
+                 % (name, i + 1, len(runs), fire, run[1] - run[0] + 1))
+    if len(lit) != cuts:
+        fail("[%s] %d lit moves, expected the %d cuts: %s" % (name, len(lit), cuts, runs))
+    for a, b in zip(lit, lit[1:]):
+        if not any(t & 0x20 for r in runs[a + 1:b] for t in ticks[r[0]:r[1] + 1]):
+            fail("[%s] no Z step between cut %d and cut %d: no canned cycle ran there"
+                 % (name, lit.index(a) + 1, lit.index(b) + 1))
+    print("PASS [%s]: six canned cycles and the rapids between them shipped no FIRE tick "
+          "(%d moves); the five cuts between the cycles are lit" % (name, len(runs) - cuts))
 
 
 def main():
@@ -1352,6 +1889,8 @@ def main():
              ("rt", b"\x18"), ("sleep", 0.5)]
     data = run_session("sender-drop", steps, conf=DENSITY_CONF_FLOORED)
     ticks = tick_bytes(data)
+    check_fire_gaps("sender-drop", data)
+    check_termination("sender-drop", data)
     # No cycle follows the hold here, so the stream ends on the hold's
     # deceleration: the stop is the tick after the last step.
     step = [1 if t & 0x25 else 0 for t in ticks]
@@ -1364,9 +1903,9 @@ def main():
     dark = check_decel_dark("sender-drop", ticks, (stop, stop),
                             "the gate must follow the window closed on the sender change")
     seq = latch_transitions(run_session.latch)
-    if seq[:2] != ["unlock", "lock"]:
+    if seq != ["unlock", "lock"]:
         fail("[sender-drop] latch ownership sequence %s, expected unlock (arm), lock "
-             "(the sender change)" % seq)
+             "(the sender change), and nothing after it: the reset unlocks nothing" % seq)
     print("PASS [sender-drop]: the sender change held the job with the decel dark from %d "
           "ticks before the stop, latch %s" % (dark, seq))
 
@@ -1522,6 +2061,14 @@ def main():
         fail("[jog-dark] the cut after the jogs ran dark (%d fire ticks)" % cut_fire)
     print("PASS [jog-dark]: two jogs under M3 S1000 shipped dark (%d fire ticks), the "
           "cut after them lit (%d)" % (jog_fire, cut_fire))
+
+    # --- rules 30 to 32: no fire state outlives what commanded it --------
+    rule_30_idle_push()
+    rule_31_canceled_jog()
+    rule_32_door_byte()
+    rule_33_starve_mid_block()
+    rule_34_go_home_dark()
+    rule_35_canned_dark()
 
     # --- rule 23: the rolloff shapes against the block's own S ----------
     # Under the default gamma 2, a second cut at S1000 queued behind the

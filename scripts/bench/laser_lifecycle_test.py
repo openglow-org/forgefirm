@@ -105,6 +105,12 @@ cooling verdict is published hermetically (GF_VERDICT_FILE), the same
 overrides the emission harness uses, and the switches are driven through
 the file-backed test source (GF_SWITCH_FILE: the EV_SW word as an integer).
 
+A case stops at once when its controller logs the armed clamp (the host
+kept the producer off the CPU past its lead, so the stream faulted the run
+on purpose and the case did not run). It runs once more from new
+controllers, and a second starve fails the harness; no other failure runs
+a case again.
+
 Usage: laser_lifecycle_test.py [path-to-binary]
        (default ./build-native/grblHAL_glowforge)
 """
@@ -120,7 +126,19 @@ import threading
 import time
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build-native/grblHAL_glowforge")
-PORT = 2398
+
+
+def free_port():
+    """A TCP port nothing on this host holds: two harness runs on one host
+    never meet on a fixed number."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+PORT = free_port()
 
 ARMED = "laser armed"
 DISARMED = "laser disarmed - latch locked"
@@ -142,14 +160,103 @@ SW_LOOP_OPEN = SW_CLOSED | (1 << 5)
 
 
 def fail(msg):
+    # A check that fails in a session the host starved fails on the fault:
+    # the starve is the case's verdict.
+    if WATCH is not None:
+        WATCH.check()
     print("FAIL: %s" % msg)
     sys.exit(1)
+
+
+def check(cond, msg):
+    """A check that holds under python -O too, where an assert is gone."""
+    if not cond:
+        fail(msg)
+
+
+# The controller's line when the producer maps an event behind the ship
+# cursor inside an armed window: it missed its lead, and the stream faults
+# on purpose (ALARM:17, dark).
+CLAMP_LINE = "late events while the laser is armed"
+
+
+class HostStarved(Exception):
+    """The host kept the producer off the CPU past its lead inside an armed
+    window: the stream faulted the run on purpose, and the case did not
+    run (run_case runs the case once more)."""
+
+
+class StderrWatch:
+    """Reads a controller's stderr while it runs, so the pipe never fills
+    and blocks it. No session here asks for a producer stall, so the clamp
+    line means the host starved the producer. check(), which every socket
+    read, every failure and the session's close call, then raises
+    HostStarved at once, with the worst lag from the run's summary line,
+    rather than leave the case to fail at a later check that the fault
+    broke."""
+
+    def __init__(self, proc, name):
+        self.name = name
+        self.armed_check = True
+        self.lines = []
+        self.clamped = False
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self.read, args=(proc.stderr,), daemon=True)
+        self.thread.start()
+
+    def read(self, pipe):
+        for raw in iter(pipe.readline, b""):
+            line = raw.decode(errors="replace")
+            with self.lock:
+                self.lines.append(line)
+                if CLAMP_LINE in line:
+                    self.clamped = True
+
+    def text(self):
+        with self.lock:
+            return "".join(self.lines)
+
+    def check(self):
+        if not (self.clamped and self.armed_check):
+            return
+        self.armed_check = False
+        # The run's summary line, with the worst lag, follows the fault
+        # once the stream has ramped down.
+        end = time.time() + 2.0
+        while True:
+            text = self.text()
+            m = re.search(r"max behind ([\d.]+) ms", text[text.index(CLAMP_LINE):])
+            if m or time.time() >= end:
+                break
+            time.sleep(0.05)
+        raise HostStarved("[%s] host starved the producer (max behind %s ms): the stream faulted "
+                          "the armed run on purpose, and the case did not run"
+                          % (self.name, m.group(1) if m else "?"))
+
+
+WATCH = None    # the running controller's StderrWatch
+
+
+def run_case(case):
+    """Run one case. A case the host starved (HostStarved) runs once more,
+    from new controllers; a second starve fails the harness. No other
+    failure runs a case again."""
+    try:
+        return case()
+    except HostStarved as e:
+        print("RERUN: %s" % e)
+    try:
+        return case()
+    except HostStarved as e:
+        fail("%s; the rerun was starved too" % e)
 
 
 def read_avail(sock, log, timeout, until=None):
     end = time.time() + timeout
     buf = b""
     while time.time() < end:
+        if WATCH is not None:
+            WATCH.check()
         sock.settimeout(max(0.05, end - time.time()))
         try:
             data = sock.recv(4096)
@@ -191,14 +298,44 @@ def wait_for(log, needle, timeout, sock=None):
             read_avail(sock, log, 0.2)
         else:
             time.sleep(0.1)
-    return False
+    return needle in "".join(log)     # what the last read brought in
+
+
+def poll_reply(sock, log, timeout=0.5):
+    """The first report after a '?' sent now, or "" when none comes in
+    `timeout`. Whatever is already on its way is read first. A report
+    cannot be matched to its '?' exactly: the core folds the '?' that
+    arrive before its next protocol pass into one report, and a reset
+    drops one in flight. So a report the controller made before this '?'
+    but sent after the drain can stand in for its answer, and a wait for
+    Idle takes two Idle answers in a row."""
+    read_avail(sock, log, 0.02)
+    n = len(log)
+    sock.sendall(b"?")
+    end = time.time() + timeout
+    while time.time() < end:
+        read_avail(sock, log, 0.05)
+        m = re.search(r"<[^>]*>", "".join(log[n:]))
+        if m:
+            return m.group(0)
+    return ""
+
+
+def state_word(report):
+    """The state word of a report (e.g. 'Run', 'Hold:0', 'Door:1', 'Idle')."""
+    m = re.match(r"<([A-Za-z]+(?::\d)?)", report)
+    return m.group(1) if m else ""
 
 
 def wait_idle(sock, log):
-    for _ in range(100):
-        sock.sendall(b"?")
-        read_avail(sock, log, 0.3)
-        if re.search(r"<Idle", "".join(log[-3:])):
+    """Idle in two answers in a row, 0.2 s apart: a block planned and not
+    yet started answers Idle once, and is running by the second. Seeing
+    the controller leave Idle first proves nothing more and can hang: a
+    move shorter than a poll never answers anything but Idle."""
+    seen = 0
+    for _ in range(150):
+        seen = seen + 1 if state_word(poll_reply(sock, log)) == "Idle" else 0
+        if seen == 2:
             return
         time.sleep(0.2)
     fail("controller never returned to Idle")
@@ -288,10 +425,12 @@ class Session:
                                     args=(verdict, self.stop, self.verdict),
                                     daemon=True)
         self.pub.start()
+        global WATCH
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)],
                                      cwd=self.workdir, env=env,
                                      stdout=subprocess.DEVNULL,
                                      stderr=subprocess.PIPE)
+        self.watch = WATCH = StderrWatch(self.proc, name)
         self.log = []
         self.sock = self.connect()
 
@@ -303,11 +442,10 @@ class Session:
                 return s
             except OSError:
                 time.sleep(0.1)
-        err = b""
         if self.proc.poll() is not None:
-            err = self.proc.stderr.read() or b""
+            self.watch.thread.join(1)
         fail("[%s] cannot connect to the controller (exit=%s)\n%s"
-             % (self.name, self.proc.poll(), err.decode(errors="replace")))
+             % (self.name, self.proc.poll(), self.watch.text()))
 
     def set_switches(self, word):
         tmp = self.switch_file + ".tmp"
@@ -345,32 +483,33 @@ class Session:
             return True
 
     def state(self):
-        """One '?' report's state word (e.g. 'Run', 'Hold:0', 'Door:1', 'Idle')."""
-        self.sock.sendall(b"?")
-        read_avail(self.sock, self.log, 0.3)
-        m = re.findall(r"<([A-Za-z]+(?::\d)?)", "".join(self.log[-4:]))
-        return m[-1] if m else ""
+        """The state word of the answer to a fresh '?' (e.g. 'Run',
+        'Hold:0', 'Door:1', 'Idle')."""
+        return state_word(poll_reply(self.sock, self.log))
 
     def wait_state(self, prefix, timeout):
+        """The state word once it starts with prefix, or None. Idle counts
+        in two answers in a row (wait_idle): a block planned and not yet
+        started answers Idle once, and so does a run the planner ran dry
+        in the middle of a move, until the protocol starts it again."""
         end = time.time() + timeout
+        need = 2 if prefix == "Idle" else 1
+        seen = 0
         while time.time() < end:
             st = self.state()
-            if st.startswith(prefix):
+            seen = seen + 1 if st.startswith(prefix) else 0
+            if seen == need:
                 return st
             time.sleep(0.1)
         return None
 
     def mpos_x(self):
-        self.sock.sendall(b"?")
-        read_avail(self.sock, self.log, 0.3)
-        m = re.findall(r"MPos:(-?[\d.]+)", "".join(self.log[-4:]))
-        return float(m[-1]) if m else None
+        m = re.search(r"MPos:(-?[\d.]+)", poll_reply(self.sock, self.log))
+        return float(m.group(1)) if m else None
 
     def mpos_z(self):
-        self.sock.sendall(b"?")
-        read_avail(self.sock, self.log, 0.3)
-        m = re.findall(r"MPos:-?[\d.]+,-?[\d.]+,(-?[\d.]+)", "".join(self.log[-4:]))
-        return float(m[-1]) if m else None
+        m = re.search(r"MPos:-?[\d.]+,-?[\d.]+,(-?[\d.]+)", poll_reply(self.sock, self.log))
+        return float(m.group(1)) if m else None
 
     def setting(self, n):
         """A $-setting's value, from a $$ dump."""
@@ -406,6 +545,7 @@ class Session:
         return "".join(self.log).count(DISARMED)
 
     def close(self):
+        global WATCH
         try:
             self.sock.close()
         except OSError:
@@ -415,8 +555,12 @@ class Session:
             self.proc.wait(5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        self.watch.thread.join(2)
+        if WATCH is self.watch:
+            WATCH = None
         self.stop.set()
         self.pub.join(2)
+        self.watch.check()      # a starve after the case's last read
         shutil.rmtree(self.workdir, ignore_errors=True)
 
 
@@ -445,27 +589,27 @@ def test_status_files():
     s = Session("state-files", disarm_s=30)
     try:
         st = read_state(s, '"connected":true')
-        assert '"state":"Idle"' in st, "state file lacks Idle: %r" % st
-        assert '"connected":true' in st, "sender not reported connected: %r" % st
-        assert '"armed":false' in st, "armed before any job: %r" % st
-        assert '"model":"density"' in st and '"floor_pct":10' in st, \
-            "model/floor missing (the floor must be derived from boot): %r" % st
-        assert '"curve":"bench-default"' in st, \
-            "the curve in force is not published: %r" % st
-        assert '"modals":"[GC:' in st, "modal report missing: %r" % st
+        check('"state":"Idle"' in st, "state file lacks Idle: %r" % st)
+        check('"connected":true' in st, "sender not reported connected: %r" % st)
+        check('"armed":false' in st, "armed before any job: %r" % st)
+        check('"model":"density"' in st and '"floor_pct":10' in st,
+              "model/floor missing (the floor must be derived from boot): %r" % st)
+        check('"curve":"bench-default"' in st,
+              "the curve in force is not published: %r" % st)
+        check('"modals":"[GC:' in st, "modal report missing: %r" % st)
         ts0 = float(st.split('"ts_mono":')[1].split(',')[0])
 
         cfg = open(os.path.join(s.workdir, "grbl.settings")).read()
-        assert "$35=" in cfg and "$30=" in cfg, "settings file lacks $ lines"
+        check("$35=" in cfg and "$30=" in cfg, "settings file lacks $ lines")
 
         # The derived floor is in force from boot, before any arm.
-        assert "$35=10" in cfg, "the derived floor is not in $$ from boot: %r" % [
-            l for l in cfg.splitlines() if l.startswith("$35")]
+        check("$35=10" in cfg, "the derived floor is not in $$ from boot: %r" % [
+              l for l in cfg.splitlines() if l.startswith("$35")])
         # The armed window reaches the file.
         send_line(s.sock, "G91", s.log)
         send_line(s.sock, "M3 S100", s.log)
         st = read_state(s, '"armed":true')
-        assert '"armed":true' in st, "armed window not published: %r" % st
+        check('"armed":true' in st, "armed window not published: %r" % st)
         send_line(s.sock, "M5", s.log)
         send_line(s.sock, "M2", s.log)
 
@@ -475,9 +619,9 @@ def test_status_files():
         s.sock = s.connect()
         st = read_state(s, '"connected":true')
         gen1 = int(st.split('"generation":')[1].split(',')[0])
-        assert gen1 > gen0, "generation did not advance on reconnect (%d -> %d)" % (gen0, gen1)
+        check(gen1 > gen0, "generation did not advance on reconnect (%d -> %d)" % (gen0, gen1))
         ts1 = float(st.split('"ts_mono":')[1].split(',')[0])
-        assert ts1 > ts0, "ts_mono did not advance"
+        check(ts1 > ts0, "ts_mono did not advance")
         print("PASS [state-files]: published, armed/switch/revert followed, "
               "generation %d -> %d" % (gen0, gen1))
     finally:
@@ -491,23 +635,23 @@ def test_laser_keys_reload():
     s = Session("keys-reload", disarm_s=30, conf_extra="laser_corner_gamma = 1.5\n")
     try:
         st = read_state(s, '"gamma":1.50')
-        assert '"gamma":1.50' in st, "the gamma from the conf is not in force at boot: %r" % st
+        check('"gamma":1.50' in st, "the gamma from the conf is not in force at boot: %r" % st)
         send_line(s.sock, "G91", s.log)
         send_line(s.sock, "M4 S100", s.log)
         st = read_state(s, '"armed":true')
-        assert '"armed":true' in st, "armed window not published: %r" % st
+        check('"armed":true' in st, "armed window not published: %r" % st)
         send_line(s.sock, "G1 X2 F600", s.log)
         conf = os.path.join(s.workdir, "forgefirm.conf")
         with open(conf, "w") as f:
             f.write("laser_disarm_s = 30\nlaser_corner_gamma = 1.25\nlaser_dose_curve = off\n"
                     "laser_floor_density = 0\n")
         send_line(s.sock, "M102", s.log)
-        assert wait_for(s.log, "laser keys reloaded: corner gamma 1.25, curve off, floor 0 %", 5, s.sock), \
-            "M102 did not report the reload: %r" % s.log[-6:]
+        check(wait_for(s.log, "laser keys reloaded: corner gamma 1.25, curve off, floor 0 %", 5, s.sock),
+              "M102 did not report the reload: %r" % s.log[-6:])
         st = read_state(s, '"gamma":1.25')
-        assert '"gamma":1.25' in st and '"curve":"off"' in st and '"floor_pct":0' in st, \
-            "the reloaded keys did not reach the state file: %r" % st
-        assert '"armed":true' in st, "the reload closed the armed window: %r" % st
+        check('"gamma":1.25' in st and '"curve":"off"' in st and '"floor_pct":0' in st,
+              "the reloaded keys did not reach the state file: %r" % st)
+        check('"armed":true' in st, "the reload closed the armed window: %r" % st)
         send_line(s.sock, "G1 X2 F600", s.log)
         send_line(s.sock, "M5", s.log)
         send_line(s.sock, "M2", s.log)
@@ -1028,13 +1172,18 @@ def test_cancel_and_abort():
         s.close()
 
 
-HOME_SESSION_CMD = "sleep 47.25"
+# The homing session's command carries this run's own tag (its process id,
+# in the sleep's fraction), so another run of this harness on the host is
+# never counted for it.
+HOME_SESSION_CMD = "sleep 47.%06d" % os.getpid()
 
 
 def home_sessions():
     """How many processes of the web-service homing session's command are
-    running (the command is one no other process on the host uses)."""
-    r = subprocess.run(["pgrep", "-f", HOME_SESSION_CMD], capture_output=True, text=True)
+    running (the command is this run's own: no other process on the host
+    uses it)."""
+    r = subprocess.run(["pgrep", "-f", re.escape(HOME_SESSION_CMD) + "$"],
+                       capture_output=True, text=True)
     return len(r.stdout.split())
 
 
@@ -1488,27 +1637,28 @@ def test_stalled_job_does_not_run_on_dark():
 def main():
     if not os.path.isfile(BIN):
         fail("controller binary not found at %s" % BIN)
-    test_stalled_job_does_not_run_on_dark()
-    test_manual_home_closes_the_window()
-    test_window_does_not_outlive_its_job()
-    test_rearm_waits_for_the_engine()
-    test_resume_under_a_pause_verdict_stays_held()
-    test_sender_change_during_rearm_cancels()
-    test_status_files()
-    test_laser_keys_reload()
-    test_sender_change_holds_and_rearms()
-    test_rx_overrun_aborts()
-    test_resume_after_grace()
-    test_button_wait_arms()
-    test_lid_open_in_wait()
-    test_button_pause_resume()
-    test_lid_cancels_and_returns()
-    test_pause_then_lid_cancel_returns_to_the_job_start()
-    test_cancel_and_abort()
-    test_homing_abort_keeps_z_hold()
-    test_lid_cancel_from_hold()
-    test_lid_policy_hold()
-    test_sigterm_mid_job()
+    for case in (test_stalled_job_does_not_run_on_dark,
+                 test_manual_home_closes_the_window,
+                 test_window_does_not_outlive_its_job,
+                 test_rearm_waits_for_the_engine,
+                 test_resume_under_a_pause_verdict_stays_held,
+                 test_sender_change_during_rearm_cancels,
+                 test_status_files,
+                 test_laser_keys_reload,
+                 test_sender_change_holds_and_rearms,
+                 test_rx_overrun_aborts,
+                 test_resume_after_grace,
+                 test_button_wait_arms,
+                 test_lid_open_in_wait,
+                 test_button_pause_resume,
+                 test_lid_cancels_and_returns,
+                 test_pause_then_lid_cancel_returns_to_the_job_start,
+                 test_cancel_and_abort,
+                 test_homing_abort_keeps_z_hold,
+                 test_lid_cancel_from_hold,
+                 test_lid_policy_hold,
+                 test_sigterm_mid_job):
+        run_case(case)
     print("PASS: the armed-window lifecycle holds")
 
 
