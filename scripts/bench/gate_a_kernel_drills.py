@@ -257,6 +257,7 @@ def drill_k3():
         os.write(fd, stream)
         wr('cnc/run', 1)
         time.sleep(0.15)                     # inside the accel ramp
+        wr('cnc/laser_latch_cooling', 0)     # the cooling holder: no engine runs here
         wr('cnc/laser_latch', 0)
         print('latch UNLOCKED mid-ramp; interlock=%s (bit 3 should read 0)'
               % rd('cnc/interlock_circuit'))

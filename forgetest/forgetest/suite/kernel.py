@@ -594,6 +594,9 @@ def _k3_phase(ctx):
             dev.write(stream)
             wr("cnc/run", 1)
             time.sleep(0.15)                # inside the accel ramp
+            # The takeover's final close set both holders and no engine runs
+            # to release its own: the test releases it, then unlocks.
+            wr("cnc/laser_latch_cooling", 0)
             wr("cnc/laser_latch", 0)
             ilk = rd("cnc/interlock_circuit")
             ctx.log("K3: latch UNLOCKED mid-ramp; interlock=%s (bit 3 should read 0)", ilk)
@@ -649,6 +652,7 @@ def _fire_phase(ctx, mode):
             ctx.log("fire U: streaming=1, the terminal end-of-data will be a TRUE UNDERRUN")
         try:
             if unlock:
+                wr("cnc/laser_latch_cooling", 0)    # no engine runs in the takeover
                 wr("cnc/laser_latch", 0)
                 ctx.log("fire %s: latch UNLOCKED for this run", mode)
             wr("cnc/run", 1)
@@ -844,6 +848,7 @@ def resume_lead(ctx):
                 ctx.sleep(0.5)
                 dev.write(stream)
                 try:
+                    wr("cnc/laser_latch_cooling", 0)    # no engine runs in the takeover
                     wr("cnc/laser_latch", 0)
                     t0 = time.time()
                     wr("cnc/resume", lead)

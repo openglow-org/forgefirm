@@ -112,6 +112,7 @@ try:
         print('streaming=1: terminal end-of-data will be a TRUE UNDERRUN (expected)')
 
     if unlock:
+        wr('cnc/laser_latch_cooling', 0)   # the cooling holder: no engine runs here
         wr('cnc/laser_latch', 0)   # UNLOCK for this run only
         print('latch UNLOCKED for phase %s run' % mode)
 
