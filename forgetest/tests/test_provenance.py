@@ -289,11 +289,12 @@ class ProvenanceTests(unittest.TestCase):
     def test_a_variable_that_changes_what_runs_is_not_clean(self):
         # forgectrl told to run its controller from elsewhere (the override
         # stays in its environment while it runs), a bench knob in the
-        # controller's, Python's bytecode and library from elsewhere, and
-        # the controller's sink in a file
+        # controller's, Python's bytecode and library from elsewhere, the
+        # controller's sink in a file, and the acceptance tool's host-run
+        # mark, under which its hand-back skips what it cannot reach
         for env in (b"PATH=/usr/bin\0FORGECTRL_GRBL_BIN=/data/grbl-dev\0", b"GFSINK_LEAD_MS=80\0",
                     b"PYTHONPYCACHEPREFIX=/data/pyc\0", b"PYTHONPLATLIBDIR=../../data/x/lib\0",
-                    b"GFSINK=/tmp/sink.bin\0"):
+                    b"GFSINK=/tmp/sink.bin\0", b"FORGETEST_HOST_RUN=1\0"):
             self.end(100)
             self.process(100, "usr/bin/forgectrl", ["/usr/bin/forgectrl"], env=env)
             self.assertFalse(self.clean(), env)
@@ -377,6 +378,7 @@ class RunnerRecordsTests(unittest.TestCase):
 
     def test_the_verdict_is_recorded_and_a_change_during_the_run_counts(self):
         tmp = tempfile.mkdtemp(prefix="forgetest-prov-run-")
+        helpers.host_run(self)
         try:
             t = helpers.make_test("fake.pass", [("forgectrl", "src/main.c")])
             log = Log(os.path.join(tmp, "results.jsonl"))

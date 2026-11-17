@@ -40,15 +40,56 @@ evidence, and surfaced on the page. The pre-run pass attributes leftovers
 to the previous run; the post-run pass attributes them to the run itself.
 The machine is restored either way - a leftover is a defect in the test
 that made it, not a reason to hand the dirt on.
+
+Emission first, then motion: a pass reads the laser's readbacks and
+locks the latch before it waits for or judges anything (the runner lets
+the bench actuator go only after that), then ends an armed window and a
+job still moving before it waits on a diagnostic, the cameras or the
+cooling engine. A read that decides whether a job is still there and goes
+unanswered stands the machine down as if one were, and a window found
+armed later in the pass is ended at once. The latch and the window are read
+before everything the pass asks for that ends a controller's session (a
+controller stop, mode change or start, a settings write-back that can
+restart the controller, a connection to the Grbl port: forgectrl locks the
+latch on every controller exit, erasing an unlock unseen), and the latch
+again at the end of the pass, independent of forgectrl, and locked when
+clear or unreadable. Every
+leftover on the laser's safety state goes to the runner the moment it is
+read (on_safety), which applies the safety rule (runner._safety_found).
+
+A side that does not answer is never read as a clean one. forgectrl is
+waited for once at the start of a pass (FC_WAIT_S); a request that then
+goes unanswered is a leftover of its own, and so is a kernel whose state
+cannot be read. Only a host run (FORGETEST_HOST_RUN=1, the unit tests,
+which have neither) skips them, and says so.
 """
 import json
 import os
+import re
 import struct
 import subprocess
 import time
 
 from . import hw
+from .campaign import SAFETY_ITEMS
 from .log import now_ts
+
+# A host run: the unit tests run the runner and the hand-back with no
+# forgectrl and no kernel module, by design, and set this to "1". The
+# hand-back then skips a side that does not answer, with a line in the
+# log. Nothing on a machine sets it, and the provenance check refuses a
+# process that carries it (provenance.SUBSTITUTES), so a run recorded
+# under it is never clean.
+def host_run():
+    return os.environ.get("FORGETEST_HOST_RUN") == "1"
+
+
+# forgectrl is waited for once at the start of a pass: a takeover's end or
+# a restart the run made can still be bringing it up. After a request goes
+# unanswered, the rest of that pass asks no more for FC_SILENCE_S, and the
+# miss is a leftover.
+FC_WAIT_S = 60
+FC_SILENCE_S = 30
 
 # GRBL-mode resting values (kernel attribute -> value as read back), as a
 # fresh boot of the dev image leaves them (2026-08-16 bench dump).
@@ -63,6 +104,7 @@ from .log import now_ts
 # coolant flow watch, when an owner turns it on, holds it at idle (see
 # Baseline._heater_side).
 HEATER_ATTR = "thermal/heater_pwm"
+PUMP_ATTR = "thermal/water_pump_on"
 # How far the heater may sit from the duty the coolant flow watch reports
 # while it holds, in counts (2 % of 65535): the hold moves its duty a little
 # every half second, and the heater and the watch are read apart.
@@ -142,7 +184,57 @@ IDLE_READBACKS = [
     ("cnc/faults", "0"),
 ]
 
+# The laser's readbacks: the FIRE line and LASER_ON. Read first, before
+# either relock: a lock makes the FIRE pad an input, which then reads low.
+LASER_READBACKS = ("cnc/laser_enable", "cnc/laser_on")
+
 LATCH_BIT = 0x08                    # interlock_circuit bit 3: latch locked
+
+# The leftovers on the laser's safety state (campaign.SAFETY_ITEMS: the
+# latch, as the kernel and forgectrl read it, and LASER_READBACKS). Each one
+# a pass judges goes to the runner the moment it is read (on_safety), which
+# applies the safety rule; found before a run, it also stops the run: the run
+# would be judged on a machine the pass has just relocked.
+assert set(LASER_READBACKS) <= set(SAFETY_ITEMS)
+
+# A side the pass could not read at all, and what a value it could not read
+# is found as: neither is a state anything left (Leftover.judged).
+BLIND_ITEMS = ("forgectrl", "kernel sysfs")
+UNREADABLE = "unreadable"
+
+# The attributes whose fixed value follows the XY microstep mode
+# (fixed_sysfs): with the mode unread they are not judged.
+XY_MODE_SYSFS = ("cnc/x_mode", "cnc/y_mode", "cnc/step_freq", "cnc/ramp_rate")
+
+# The controller's $ settings (technical/forgefirm/grblhal-driver.md, "The
+# XY scale" and "Laser control"). The derived ones the driver makes from
+# forgectrl's settings, in RAM (the scale from xy_microsteps, $35 from the
+# laser floor at every arm): the settings
+# hand-back judges what they come from, and a job's arm moves $35, so they
+# are logged, not judged. The pinned ones the driver re-asserts at every
+# settings dispatch: one that differs is a leftover, not written. A laser
+# setting that differs is a leftover, not written: the laser's settings
+# are not the bench's to set. Every other one is written back through the
+# Grbl port, and is a leftover too.
+# $63, $341 and $673 are pinned: the driver re-asserts them at every
+# settings dispatch. $22 is not: the driver pins its homing bits only, and
+# the other bits are the sender's.
+GRBL_DERIVED_SETTINGS = ("$35", "$100", "$101")
+GRBL_PINNED_SETTINGS = ("$32", "$44", "$45", "$46", "$63", "$102", "$341", "$673")
+GRBL_LASER_SETTINGS = ("$30", "$31", "$33", "$34", "$36")
+GRBL_SETTING_LINE = re.compile(r"^\$(\d+)=(.*)$")
+
+
+def parse_grbl_settings(text):
+    """{"$N": value} from the controller's $$ view, or None."""
+    if not isinstance(text, str):
+        return None
+    out = {}
+    for line in text.splitlines():
+        m = GRBL_SETTING_LINE.match(line.strip())
+        if m:
+            out["$" + m.group(1)] = m.group(2).strip()
+    return out or None
 
 BUTTON_LEDS = ("button_led_1", "button_led_2", "button_led_3")
 
@@ -350,6 +442,12 @@ class Leftover:
         self.expected = expected
         self.action = action        # "restored" | "unrestorable" | "waited" | "failed: ..."
 
+    def judged(self):
+        """Whether the pass judged a state at all: not a side it could not
+        read (forgectrl silent, the kernel or a readback unreadable). What it
+        could not judge stops a run but is charged to nobody (runner.py)."""
+        return self.item not in BLIND_ITEMS and self.found != UNREADABLE
+
     def as_dict(self):
         return {"item": self.item, "found": self.found, "expected": self.expected,
                 "action": self.action}
@@ -362,15 +460,26 @@ class Baseline:
     """One instance per run: capture() before, check() around, restore()
     after. `log` is a callable(str); every line is prefixed 'baseline:'."""
 
-    _unreachable_until = 0.0        # class-wide: skip forgectrl for a while after a miss
-
-    def __init__(self, log, abort=None):
+    def __init__(self, log, abort=None, on_safety=None):
         self._log = log
         self.abort = abort or (lambda: False)
+        # on_safety(leftovers): the runner's safety rule, called the moment a
+        # pass judges a leftover on the laser's safety state, before it waits
+        # on anything after that read
+        self.on_safety = on_safety
         self.captured = None
         self.forgectrl = None
         self.mode = None            # the controller mode in force (per enforce)
         self.run_notices = []       # the cooling notices the run made (per post pass)
+        # This instance's silence after an unanswered request, and the paths
+        # that went unanswered; both start over with every pass.
+        self._unreachable_until = 0.0
+        self.missed = []
+        self._asked_misses = 0      # requests forgectrl was asked and did not answer
+        self._left = []             # the pass's leftovers, for findings made inside a step
+        self.switch_found = []      # what switch_mode's latch read found
+        self._armed_named = False   # a window this pass already named cool.armed
+        self._named_window = None   # (leftover, what): the window _latch_before named
 
     def log(self, msg):
         self._log("baseline: " + msg)
@@ -381,17 +490,63 @@ class Baseline:
             self.forgectrl = hw.Forgectrl()
         return self.forgectrl
 
+    def _miss(self, path):
+        if path not in self.missed:
+            self.missed.append(path)
+
     def fc_get(self, path):
-        if time.time() < Baseline._unreachable_until:
+        """(status, body), or (None, None) when forgectrl did not answer. A
+        miss is kept (self.missed) and silences this instance for
+        FC_SILENCE_S, so one slow daemon costs one timeout, not one per
+        request; every request the silence turns away is a miss too."""
+        if time.time() < self._unreachable_until:
+            self._miss(path)
             return None, None
         try:
             st, body = self.fc().get(path)
         except hw.HwError:
-            Baseline._unreachable_until = time.time() + 30
-            return None, None
+            st, body = None, None
         if st is None:
-            Baseline._unreachable_until = time.time() + 30
+            self._unreachable_until = time.time() + FC_SILENCE_S
+            self._miss(path)
+            self._asked_misses += 1
         return st, body
+
+    def fc_dict(self, path):
+        """One of forgectrl's JSON reports, or None. An answer that is not a
+        200 with a JSON object is a miss as well: the hand-back cannot judge
+        what it cannot read."""
+        st, body = self.fc_get(path)
+        if st == 200 and isinstance(body, dict):
+            return body
+        if st is not None:
+            self._miss("%s (%s)" % (path, st))
+            self._asked_misses += 1
+        return None
+
+    def await_forgectrl(self, timeout=None):
+        """Wait for forgectrl to answer /mode, once, at the start of a pass:
+        up to FC_WAIT_S, or one try on a host run. Its /mode answer when it
+        answers (the pass judges from that one, so no second read can miss);
+        otherwise None, the miss is kept and the pass asks no more."""
+        if timeout is None:
+            timeout = 0 if host_run() else FC_WAIT_S
+        t0 = time.time()
+        while True:
+            try:
+                st, body = self.fc().get("/mode")
+            except hw.HwError:
+                st, body = None, None
+            if st == 200 and isinstance(body, dict):
+                return body
+            if time.time() - t0 >= timeout or self.abort():
+                break
+            time.sleep(1.0)
+        self._miss("/mode")
+        self._unreachable_until = time.time() + FC_SILENCE_S
+        self.log("forgectrl did not answer within %d s%s" % (
+            timeout, " (a host run: the service side is skipped)" if host_run() else ""))
+        return None
 
     def fc_post(self, path, **kw):
         try:
@@ -404,6 +559,14 @@ class Baseline:
         forgectrl does not answer)."""
         st, body = self.fc_get("/settings")
         return xy_mode_of(body if st == 200 and isinstance(body, dict) else None)
+
+    def xy_mode_read(self):
+        """As xy_mode, or None when the settings cannot be read on a machine
+        (a host run, with no forgectrl at all, reads the default)."""
+        body = self.fc_dict("/settings")
+        if body is None and not host_run():
+            return None
+        return xy_mode_of(body)
 
     def wait_settled(self, timeout=SETTLE_S, unreachable_s=10):
         """Block until forgectrl reports a settled supervisor: motion
@@ -423,7 +586,8 @@ class Baseline:
                 st, body = None, None
             if st is None and heard is None and time.time() - t0 >= unreachable_s:
                 self.log("forgectrl unreachable for %d s - not waiting for it" % unreachable_s)
-                Baseline._unreachable_until = time.time() + 30
+                self._unreachable_until = time.time() + FC_SILENCE_S
+                self._miss("/mode")
                 return None
             if st == 200 and isinstance(body, dict):
                 heard = time.time()
@@ -499,6 +663,11 @@ class Baseline:
                     return False, "cloud_enabled=1 for the test -> %s %s" % (st, body)
                 self.log("cloud mode turned on for the test (cloud_enabled was %r)"
                          % (settings.get("cloud_enabled") or ""))
+        # The switch stops the controller in force, and forgectrl locks the
+        # latch as it does: what the latch reads now is read first (the
+        # runner stops the run on a finding here, switch_found).
+        self.switch_found = []
+        self._latch_before("a mode switch", self.switch_found)
         self.nohunt_on(want)
         st, body = self.fc_post("/mode", data={"controller": want})
         if st != 200:
@@ -509,6 +678,9 @@ class Baseline:
         if mode.get("mode") != want or mode.get("controller") != "running":
             return False, "%s mode did not come up: %s" % (want, mode)
         if want == "grbl":
+            # the probe connects to the Grbl port, which ends another
+            # sender's window (the controller relocks): read first
+            self._latch_before("a Grbl port connection", self.switch_found)
             w = self._wait("Grbl port", lambda: hw.grbl_port_open(2), GRBL_PORT_S)
             if w is None:
                 return False, "grbl controller is running but the Grbl port never opened"
@@ -516,42 +688,83 @@ class Baseline:
 
     # -- capture -------------------------------------------------------
     def capture(self):
-        """Record the preserved state before a run."""
+        """Record the preserved state before a run. What forgectrl did not
+        answer is in self.missed: the runner does not start a run whose
+        state could not be captured, since the post pass would then have
+        nothing to compare."""
         cap = {"sysfs": {}, "position": read_position(), "frame": counter_frame(),
-               "settings": None, "mode": None, "notices": None}
+               "settings": None, "mode": None, "notices": None, "grbl": None}
         for attr in PRESERVED_SYSFS:
             cap["sysfs"][attr] = hw.sysfs_read(attr)
         # The cooling notices that stand before the run: the post pass tells
         # the run's own from them (None: not read, so none can be told).
-        st, body = self.fc_get("/cool/status")
-        if st == 200 and isinstance(body, dict):
+        body = self.fc_dict("/cool/status")
+        if body is not None:
             cap["notices"] = notice_marks(body.get("notices"))
-        st, body = self.fc_get("/settings")
-        if st == 200 and isinstance(body, dict):
+        body = self.fc_dict("/settings")
+        if body is not None:
             cap["settings"] = {k: v for k, v in body.items()
                                if isinstance(v, str) and k not in UNPRESERVED_SETTINGS}
-        st, body = self.fc_get("/mode")
-        if st == 200 and isinstance(body, dict):
+        body = self.fc_dict("/mode")
+        if body is not None:
             cap["mode"] = body.get("mode")
+            # The GRBL controller's $ settings, while one runs (forgectrl's
+            # copy of its $$ view; a 404 is no controller).
+            if body.get("mode") == "grbl" and body.get("controller") == "running":
+                cap["grbl"] = self.grbl_settings()
         self.captured = cap
         return cap
 
+    def grbl_settings(self):
+        """The running GRBL controller's $ settings, or None."""
+        st, text = self.fc_get("/grbl/settings")
+        return parse_grbl_settings(text) if st == 200 else None
+
     # -- check + restore -----------------------------------------------
-    def enforce(self, phase, captured=None):
+    def enforce(self, phase, captured=None, after_laser=None):
         """Bring the machine to the baseline; returns the list of leftovers.
         phase is 'pre' or 'post' (log wording only). captured is the
-        preserved state to hand back (post) - None compares nothing."""
+        preserved state to hand back (post) - None compares nothing.
+        after_laser(left), when given, runs right after the latch is locked
+        and before anything is waited for (the runner's release of the
+        bench actuator); what it appends to left is a leftover too. The
+        latch is read and locked at the start and again at the end; every
+        safety finding goes to on_safety as it is read."""
         left = []
+        self._left = left
         self.mode = None
         self._phase = phase
+        self._unreachable_until = 0.0
+        self.missed = []
+        self._stood_down = False
+        self._settled_on = None
+        self._asked_misses = 0
+        self._misses_at_stand_down = 0
+        self._armed_named = False
+        self._named_window = None
         # the counters' scale is the mode the run counted under, read
         # before the kernel side puts the settings' mode back
         self._counter_spm = counter_steps_per_mm()
-        self._forgectrl_side(left, captured)
+        # Emission first: nothing is waited for before the laser is judged
+        # and the latch is locked.
+        self._laser_side(left)
+        if after_laser is not None:
+            after_laser(left)
+        mode = self.await_forgectrl()
+        if mode is not None:
+            self._forgectrl_side(left, captured, mode)
         self._kernel_side(left)
         self._lamp_side(left)
         self._ext_side(left)
         self._preserved(left, captured)
+        # a pass forgectrl did not answer at its start can still name a
+        # window later, once the silence has run out (_latch_before)
+        if mode is not None or self._named_window is not None:
+            self._last_window(left)
+        self._final_latch(left)
+        if self.missed and not host_run():
+            left.append(Leftover("forgectrl", "not answering (%s)" % ", ".join(self.missed), "answering",
+                                 "failed: what forgectrl owns was not judged"))
         if left:
             self.log("%s: %d leftover(s): %s" % (phase, len(left), "; ".join(str(x) for x in left)))
         else:
@@ -582,49 +795,278 @@ class Baseline:
         instead of saying it.
 
         Returns the /mode body the machine settled on, or None."""
+        self._stood_down = True
+        # forgectrl locks the latch on every controller exit: what it reads
+        # now is read first, or the stop would erase an unlock unseen
+        self._latch_before("a stand-down")
         self.log("baseline: standing the machine down (%s): stopping the controller" % why)
         st, _b = self.fc_post("/controller/stop")
         if st != 200:
             self.log("baseline: stand-down: /controller/stop -> %s" % st)
         deadline = time.time() + 30
         while time.time() < deadline and not self.abort():
-            body = self.fc_get("/mode")[1] or {}
+            body = self.fc_dict("/mode") or {}
             if body.get("controller") != "running":
                 break
             time.sleep(1.0)
+        # a cloud client comes back without the service's hunt, as every
+        # client the baseline starts does
+        self.nohunt_on(self.mode)
         st, _b = self.fc_post("/controller/start")
         if st != 200:
+            self.nohunt_off()
             self.log("baseline: stand-down: /controller/start -> %s" % st)
-        return self.wait_settled()
+        # A settle cut short (an Abort, a silent spell) says nothing of where
+        # the supervisor is: /mode is read once more, past any silence, and
+        # with no answer the supervisor is taken as unknown, so no branch
+        # after this starts a controller again on the body from before the
+        # stand-down.
+        self._settled_on = (self.wait_settled() or self._mode_now()
+                            or {"mode": self.mode, "controller": "unknown"})
+        self._misses_at_stand_down = self._asked_misses
+        return self._settled_on
+
+    def _mode_now(self):
+        """One /mode read that no silence turns away, or None."""
+        try:
+            st, body = self.fc().get("/mode")
+        except hw.HwError:
+            return None
+        return body if st == 200 and isinstance(body, dict) else None
+
+    def _latch_before(self, what, left=None):
+        """The reads before anything the pass or the runner asks for that ends
+        a controller's session: a controller stop, mode change or start, a
+        settings write-back that can restart the controller, a connection to
+        the Grbl port. forgectrl's supervisor locks the latch on every
+        controller exit (and a Grbl connection ends another sender's window
+        and relocks), so an unlock found only after one would be erased
+        unseen. A clear bit 3 is locked and goes through the safety rule
+        ("unlocked before <what>"); so does a window still armed, once a
+        pass (cool.armed), since what follows can end it. What became of
+        that window is said at the pass's last read of it (_last_window).
+        Returns what it found."""
+        if host_run() and hw.sysfs_read("cnc/state") is None:
+            return []
+        found = []
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        if ilk is not None and not (ilk & LATCH_BIT):
+            try:
+                hw.sysfs_write("cnc/laser_latch", "1")
+                act = "restored"
+            except OSError as e:
+                act = "failed: %s" % e
+            found.append(Leftover("laser_latch", "unlocked before %s (interlock 0x%x)" % (what, ilk), "locked", act))
+        if not self._armed_named:
+            c = self.fc_dict("/cool/status")
+            if c is not None and c.get("armed"):
+                self._armed_named = True
+                x = Leftover("cool.armed", "%s/armed=True/hold=%s before %s" % (c.get("phase"), c.get("hold"), what),
+                             "unarmed", "read again after %s" % what)
+                self._named_window = (x, what)
+                found.append(x)
+        if found:
+            self._safety(self._left if left is None else left, found)
+        return found
+
+    def _settled_mode(self, mode):
+        """The /mode body to judge the supervisor by: the one a stand-down
+        since the last call settled on, else `mode`. A branch acting on the
+        body from before a stand-down would start a controller again."""
+        body, self._settled_on = self._settled_on, None
+        if isinstance(body, dict):
+            self.mode = body.get("mode") or self.mode
+            return body
+        return mode
+
+    def _safety(self, left, found):
+        """Leftovers on the laser's safety state: kept, and the judged ones
+        handed to the runner at once (on_safety), which never breaks the
+        pass."""
+        left.extend(found)
+        judged = [x for x in found if x.judged()]
+        if judged and self.on_safety is not None:
+            try:
+                self.on_safety(judged)
+            except Exception as e:  # noqa: BLE001 - the pass goes on whatever the record did
+                self.log("the safety finding could not be recorded at once: %s: %s" % (type(e).__name__, e))
+
+    def _fail_closed(self, what):
+        """A read that decides whether a job is still there went unanswered:
+        the machine is stood down as if it were (the stop goes through
+        fc_post, which no silence turns away). Once for a spell of silence:
+        a read the silence turns away after a stand-down stands nothing down
+        again, but a request forgectrl was asked after the stand-down
+        settled and did not answer does."""
+        if not self._stood_down or self._asked_misses > self._misses_at_stand_down:
+            self.stand_down("%s went unanswered: a job may still be there" % what)
 
     def cloud_mode(self):
         return self.mode == "cloud"
 
-    def _forgectrl_side(self, left, captured=None):
-        st, mode = self.fc_get("/mode")
-        if st != 200 or not isinstance(mode, dict):
-            self.log("forgectrl not answering - service-side checks skipped")
+    def _laser_side(self, left):
+        """Emission first. The laser's readbacks are read before anything is
+        waited for and before the lock: a lock makes the FIRE pad an input,
+        which then reads low, so a FIRE line driven at idle shows only in a
+        read taken before it. Then the latch is locked, whatever it read: a
+        lock is never refused and never fires anything (it sets the
+        controller's holder bit and parks FIRE in high impedance), so it is
+        written before forgectrl is asked anything. A latch found unlocked,
+        or a readback that cannot be read, is a leftover; only a host run
+        with no kernel module at all skips them."""
+        reads = [(attr, hw.sysfs_read(attr)) for attr in LASER_READBACKS]
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        try:
+            hw.sysfs_write("cnc/laser_latch", "1")
+            act = "restored"
+        except OSError as e:
+            act = "failed: %s" % e
+        if host_run() and hw.sysfs_read("cnc/state") is None:
+            return                  # no kernel module here: the kernel side says so
+        found = [Leftover(attr, UNREADABLE if got is None else got, "0", "unrestorable")
+                 for attr, got in reads if got != "0"]
+        if ilk is None or not (ilk & LATCH_BIT):
+            found.append(Leftover("laser_latch", UNREADABLE if ilk is None else "unlocked (interlock 0x%x)" % ilk,
+                                  "locked", act))
+        self._safety(left, found)
+
+    def _final_latch(self, left):
+        """The latch read again at the end of the pass, independent of
+        forgectrl, and locked when clear or unreadable: a controller that
+        unlocked after the lock at the start (a client arming late) is found
+        here, whatever forgectrl answered in between."""
+        if host_run() and hw.sysfs_read("cnc/state") is None:
             return
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        if ilk is not None and ilk & LATCH_BIT:
+            return
+        try:
+            hw.sysfs_write("cnc/laser_latch", "1")
+            act = "restored"
+        except OSError as e:
+            act = "failed: %s" % e
+        if ilk is not None:
+            self._safety(left, [Leftover("laser_latch", "unlocked at the end of the pass (interlock 0x%x)" % ilk,
+                                         "locked", act)])
+        elif not any(x.item == "laser_latch" for x in left):
+            # readable at the start, unreadable now: named, judged nowhere
+            self._safety(left, [Leftover("laser_latch", UNREADABLE, "locked", act)])
+
+    def _end_armed(self, left):
+        """An armed window still open is a job still there, and it is ended
+        at once, before the waits on a diagnostic, the cameras and the
+        cooling engine. The engine publishes once a tick, and a read inside
+        the tick after a job ended can still show its window, so an arm is
+        read again past that tick first. A first read that goes unanswered
+        (or that a /status miss just before it silenced) says nothing of
+        the window, and the machine is stood down as if it were open."""
+        c = self.fc_dict("/cool/status")
+        if c is None:
+            self._fail_closed("/cool/status")
+            return
+        if c.get("armed"):
+            self._window(left, c)
+
+    def _window(self, left, c, named=None):
+        """A read that showed the window armed, wherever the pass took it
+        (_end_armed, _pump_side, the kernel side's read, _last_window): read
+        again past the engine's tick, and a window still armed is named
+        (cool.armed) and ended by a stand-down. A re-read that goes
+        unanswered says nothing of the window: it stands until a read says it
+        closed. A window _latch_before named already (named) is not named
+        again: a stand-down here sets its action."""
+        if self._wait("cool publish",
+                      lambda: (self.fc_dict("/cool/status") or {"armed": True}).get("armed") is False,
+                      COOL_PUBLISH_S) is not None:
+            return
+        found = named[0].found if named is not None else "%s/armed=True/hold=%s" % (c.get("phase"), c.get("hold"))
+        x = named[0] if named is not None else self._armed(left, found)
+        self.stand_down("an armed window is still open (%s)" % found)
+        ended = self._wait("disarmed",
+                           lambda: (self.fc_dict("/cool/status") or {"armed": True}).get("armed") is False,
+                           COOL_PUBLISH_S)
+        x.action = "restored (stood the machine down)" if ended is not None else "failed: still armed"
+
+    def _last_window(self, left):
+        """The window read once more, before the pass's last latch read: a
+        window _latch_before named before something that did not end it (a
+        settings write-back that restarts nothing), or one that opened after
+        the kernel side's read, is still armed here, and goes through
+        _window. A read that goes unanswered says nothing of a window named
+        before it, which goes through _window as well."""
+        named, self._named_window = self._named_window, None
+        if named is not None:
+            named[0].action = "ended after %s" % named[1]
+        c = self.fc_dict("/cool/status")
+        if (c or {}).get("armed") or (c is None and named is not None):
+            self._window(left, c or {}, named)
+
+    def _armed(self, left, found):
+        """An armed window confirmed past the engine's tick is a session
+        waiting for its press, which the client unlocks the latch for: the
+        laser's safety state is wrong whether or not the latch read unlocked
+        at the moment the pass looked, so it goes through the safety rule
+        (cool.armed), before the stand-down that ends it."""
+        self._armed_named = True
+        x = Leftover("cool.armed", found, "unarmed", "standing the machine down")
+        self._safety(left, [x])
+        return x
+
+    def _forgectrl_side(self, left, captured, mode):
+        """forgectrl's side, from the /mode answer the pass waited for."""
         self.mode = mode.get("mode")
+        # Emission first: forgectrl's reading of the latch (the only one when
+        # the kernel's cannot be read), then a window still armed. The lock is
+        # written again on a latch forgectrl reads unlocked: the pass locked
+        # it at its start, and a controller can unlock it after that (the
+        # cloud client's arm), which this read is the first to see.
+        s = self.fc_dict("/status")
+        if s is not None and s.get("laser_locked") is False:
+            try:
+                hw.sysfs_write("cnc/laser_latch", "1")
+                act = "restored"
+            except OSError as e:
+                act = "failed: %s" % e
+            self._safety(left, [Leftover("laser_locked", False, True, act)])
+        self._end_armed(left)
+        mode = self._settled_mode(mode)
+        # Then motion. With a controller running (motion verified, or the
+        # probe skipped), the supervisor's own start is over and motion is a
+        # job's: it is ended before the waits below. A supervisor still
+        # starting moves the head itself (the liveness probe, the lens
+        # sweep, with no controller running yet): that motion is waited out
+        # with the settle below, and judged after it.
+        settled = mode.get("controller") == "running"
+        if settled:
+            self._state_side(left)
+            mode = self._settled_mode(mode)
         # a diagnostic left running seizes the thermal hardware: abort it
-        st, d = self.fc_get("/diag/status")
-        if st == 200 and isinstance(d, dict) and d.get("running"):
+        d = self.fc_dict("/diag/status")
+        if d is not None and d.get("running"):
             self.fc_post("/diag/abort")
-            w = self._wait("diag idle", lambda: not (self.fc_get("/diag/status")[1] or {}).get("running"), 60)
+            w = self._wait("diag idle", lambda: (self.fc_dict("/diag/status") or {"running": True})
+                           .get("running") is False, 60)
             left.append(Leftover("diag", d.get("tool"), "not running",
                                  "aborted" if w is not None else "failed: still running"))
         # the camera engine stops itself 10 s after the last client
-        st, c = self.fc_get("/cam/status")
-        if st == 200 and isinstance(c, dict) and c.get("running"):
-            w = self._wait("cam idle", lambda: not (self.fc_get("/cam/status")[1] or {}).get("running"),
-                           CAM_IDLE_S)
+        c = self.fc_dict("/cam/status")
+        if c is not None and c.get("running"):
+            w = self._wait("cam idle", lambda: (self.fc_dict("/cam/status") or {"running": True})
+                           .get("running") is False, CAM_IDLE_S)
             if w is None:
                 left.append(Leftover("cam.running", True, False, "failed: still running"))
+        # A stand-down whose settle forgectrl did not answer left the
+        # supervisor unknown: it is read once more, and an answer is judged
+        # as any other (a standby read now is no body from before the
+        # stand-down, and its start is safe).
+        if mode.get("controller") == "unknown":
+            mode = self.wait_settled() or mode
         # supervisor: the mode the run found (or declared), controller
         # running, motion verified. A mode the run changed without
         # declaring it is handed back through the switch.
         want = (captured or {}).get("mode") or mode.get("mode") or "grbl"
         if mode.get("mode") != want:
+            self._latch_before("a mode change")
             self.nohunt_on(want)
             st, body = self.fc_post("/mode", data={"controller": want})
             if st != 200:
@@ -634,6 +1076,7 @@ class Baseline:
             left.append(Leftover("mode", mode.get("mode"), want,
                                  "restored" if mode.get("mode") == want else "failed: %s %s" % (st, body)))
         if mode.get("controller") == "motion-fault":
+            self._latch_before("a controller start")
             self.nohunt_on(want)
             st, body = self.fc_post("/mode", data={"controller": want})
             if st != 200:
@@ -643,6 +1086,7 @@ class Baseline:
                                  "restored" if mode.get("controller") == "running"
                                  else "failed: %s" % mode.get("controller")))
         elif mode.get("controller") == "standby":
+            self._latch_before("a controller start")
             self.nohunt_on(mode.get("mode"))
             st, body = self.fc_post("/controller/start")
             if st != 200:
@@ -651,6 +1095,10 @@ class Baseline:
             left.append(Leftover("controller", "standby", "running",
                                  "restored" if mode.get("controller") == "running"
                                  else "failed: %s" % mode.get("controller")))
+        elif mode.get("controller") == "unknown":
+            # unanswered past the stand-down and again here: nothing is known
+            # of the supervisor (named, judged nowhere)
+            left.append(Leftover("controller", UNREADABLE, "running/verified", "failed: not judged"))
         elif mode.get("controller") != "running" or mode.get("motion") != "verified":
             before = (mode.get("controller"), mode.get("motion"))
             mode = self.wait_settled() or mode
@@ -666,35 +1114,44 @@ class Baseline:
             else:
                 left.append(Leftover("controller", "%s/%s" % before, "running/verified",
                                      "failed: %s/%s" % (mode.get("controller"), mode.get("motion"))))
-        # machine state through /status
-        st, s = self.fc_get("/status")
-        if st == 200 and isinstance(s, dict):
-            if s.get("state") != "idle":
-                # An underrun is the run's: the engine ran out of bytes and
-                # the fault is acknowledged here. Any other state is the
-                # machine finishing what it was given - the ring draining
-                # to the end of a job - and it reaches idle on its own.
-                underrun = s.get("state") == "underrun"
-                if underrun:
-                    try:
-                        hw.sysfs_write("cnc/stop", "1")     # ack
-                    except OSError:
-                        pass
-                w = self._wait("idle", lambda: (self.fc_get("/status")[1] or {}).get("state") == "idle", IDLE_S)
-                if w is not None and not underrun:
-                    self.log("state: %s reached idle on its own after %.0f s; the machine "
-                             "finishing, not a leftover" % (s.get("state"), w))
-                else:
-                    left.append(Leftover("state", s.get("state"), "idle",
-                                         "waited" if w is not None else "failed: not idle"))
-            if s.get("laser_locked") is False:
-                try:
-                    hw.sysfs_write("cnc/laser_latch", "1")
-                    act = "restored"
-                except OSError as e:
-                    act = "failed: %s" % e
-                left.append(Leftover("laser_locked", False, True, act))
+        if not settled:
+            self._state_side(left)
         self._cool_side(left, captured)
+        self._pump_side(left)
+
+    def _state_side(self, left):
+        """The machine at rest, through /status. A read that goes unanswered
+        says nothing of a job still moving, and the machine is stood down as
+        if one were."""
+        s = self.fc_dict("/status")
+        if s is None:
+            self._fail_closed("/status")
+            return
+        if s.get("state") != "idle":
+            # An underrun is the run's: the engine ran out of bytes and
+            # the fault is acknowledged here. Any other state is the
+            # machine finishing what it was given - the ring draining
+            # to the end of a job - and it reaches idle on its own.
+            underrun = s.get("state") == "underrun"
+            if underrun:
+                try:
+                    hw.sysfs_write("cnc/stop", "1")     # ack
+                except OSError:
+                    pass
+            idle = lambda: (self.fc_dict("/status") or {}).get("state") == "idle"     # noqa: E731
+            w = self._wait("idle", idle, IDLE_S)
+            if w is not None and not underrun:
+                self.log("state: %s reached idle on its own after %.0f s; the machine "
+                         "finishing, not a leftover" % (s.get("state"), w))
+            else:
+                act = "waited"
+                if w is None:
+                    # A machine that does not reach idle is still doing
+                    # what a run left it: the controller's stop ends it.
+                    self.stand_down("the machine is still %s" % s.get("state"))
+                    act = ("restored (stood the machine down)" if self._wait("idle", idle, IDLE_S) is not None
+                           else "failed: not idle")
+                left.append(Leftover("state", s.get("state"), "idle", act))
 
     def _run_notices(self, notices, before):
         """The notices of faults that cleared on their own, after a run.
@@ -741,9 +1198,12 @@ class Baseline:
                         n.get("times"), again, fate))
 
     def _cool_side(self, left, captured=None):
-        """The cooling engine idle, unarmed, holding nothing."""
-        st, c = self.fc_get("/cool/status")
-        if st != 200 or not isinstance(c, dict):
+        """The cooling engine idle, unarmed, holding nothing. A read that goes
+        unanswered says nothing of a window armed since the first look, and
+        the machine is stood down as if one were."""
+        c = self.fc_dict("/cool/status")
+        if c is None:
+            self._fail_closed("/cool/status")
             return
         # A failure a run left unacknowledged blocks the next job.
         a = c.get("attention") or {}
@@ -762,7 +1222,7 @@ class Baseline:
             return
         found = "%s/armed=%s/hold=%s" % (c.get("phase"), c.get("armed"), c.get("hold"))
         idle = lambda: (lambda x: x.get("phase") == "idle" and not x.get("armed")     # noqa: E731
-                        and not x.get("hold"))(self.fc_get("/cool/status")[1] or {})
+                        and not x.get("hold"))(self.fc_dict("/cool/status") or {})
         # The engine publishes once a tick (1 Hz). A read inside the tick
         # after a run ended still shows the run: a diagnostic's hold until
         # the engine has the hardware back, a fail tier's hold until the
@@ -773,10 +1233,9 @@ class Baseline:
         # is still there.
         if c.get("armed") or c.get("hold"):
             free = lambda: (lambda x: bool(x) and not x.get("armed")                  # noqa: E731
-                            and not x.get("hold"))(self.fc_get("/cool/status")[1] or {})
+                            and not x.get("hold"))(self.fc_dict("/cool/status") or {})
             if self._wait("cool publish", free, COOL_PUBLISH_S) is not None:
-                st, c2 = self.fc_get("/cool/status")
-                c = c2 if st == 200 and isinstance(c2, dict) else {}
+                c = self.fc_dict("/cool/status") or {}
                 self.log("cool: %s was the engine's last word on the run; its next tick reads "
                          "%s/armed=%s/hold=%s" % (found, c.get("phase"), c.get("armed"), c.get("hold")))
                 if c.get("phase") == "idle":
@@ -789,7 +1248,38 @@ class Baseline:
         # calling it a leftover is not, because nothing was left -
         # the machine was still finishing.
         dirt = bool(c.get("armed") or c.get("hold"))
-        w = self._wait("cool idle", idle, COOL_IDLE_S)
+        # A window armed past the engine's tick is a job (a client that armed
+        # late, a print still loading when the run ended): waiting does not
+        # end it, and the machine is stood down at once, here or the moment
+        # a read during the wait below shows one, or goes unanswered (which
+        # says nothing of a window opening behind it).
+        armed = {"found": found} if c.get("armed") else {}
+
+        def idle_or_armed():
+            x = self.fc_dict("/cool/status")
+            if x is None:
+                armed.update(found="%s, then unanswered during the wait" % found, unanswered=True)
+                return True
+            if x.get("armed"):
+                armed["found"] = "%s/armed=True/hold=%s" % (x.get("phase"), x.get("hold"))
+                return True
+            return x.get("phase") == "idle" and not x.get("hold")
+        w = None if armed else self._wait("cool idle", idle_or_armed, COOL_IDLE_S)
+        if armed:
+            if armed.get("unanswered"):
+                # a hold left behind is the run's whatever the read; a phase
+                # alone was nothing left, and the silence after it is no state
+                # anything left (judged nowhere, charged to nobody)
+                x = Leftover("cool", armed["found"] if dirt else UNREADABLE, "idle/unarmed/no hold",
+                             "standing the machine down")
+                left.append(x)
+            else:
+                x = self._armed(left, armed["found"])
+            self.stand_down("the cooling engine is %s" % armed["found"])
+            w = self._wait("cool idle", idle, COOL_IDLE_S)
+            x.action = ("restored (stood the machine down)" if w is not None
+                        else "failed: still %s" % armed["found"])
+            return
         if w is not None and not dirt:
             self.log("cool: %s ended on its own after %.0f s; the engine's own post-job "
                      "work, not a leftover" % (found, w))
@@ -805,6 +1295,46 @@ class Baseline:
             act = "restored (stood the machine down)"
         left.append(Leftover("cool", found, "idle/unarmed/no hold",
                              act if w is not None else "failed: still %s" % found))
+
+    def _pump_side(self, left):
+        """The coolant pump runs whenever the engine idles in its own
+        posture. The engine writes it on at its start and at each release (a
+        diagnostic's, a quiet hold's), and no tick writes it again, so a pump
+        a run switched off stays off into the next job, which fires on it:
+        no fire gate reads the pump. A quiet hold still standing (every fan
+        off, and the pump with it when a bench tool asked) is the run's, and
+        its release puts the engine's posture back, the fans' duties with it.
+        The duties themselves are the engine's to keep: its tick reads each
+        back and writes again the one it did not command. In any other phase,
+        or under a diagnostic, the pump is the engine's or the tool's."""
+        c = self.fc_dict("/cool/status")
+        if c is None:
+            return
+        if c.get("quiet_hold"):
+            st, _ = self.fc_post("/cool/quiet", data={"on": "0"})
+            c = self.fc_dict("/cool/status") or {}
+            left.append(Leftover("cool.quiet_hold", True, False,
+                                 "restored (released)" if st == 200 and c.get("quiet_hold") is False
+                                 else "failed: %s" % st))
+        if c.get("armed"):
+            # a window opened since the cooling engine's read
+            self._window(left, c)
+            return
+        if c.get("phase") != "idle" or c.get("quiet_hold") or c.get("hold"):
+            return
+        d = self.fc_dict("/diag/status")
+        if d is None or d.get("running"):
+            return
+        got = hw.sysfs_read(PUMP_ATTR)
+        if got is None or got == "1":
+            return
+        try:
+            hw.sysfs_write(PUMP_ATTR, "1")
+            back = hw.sysfs_read(PUMP_ATTR)
+            act = "restored" if back == "1" else "failed: reads %s" % back
+        except OSError as e:
+            act = "failed: %s" % e
+        left.append(Leftover(PUMP_ATTR, got, "1", act))
 
     def _ext_side(self, left):
         """A campaign's machine is extension-free. What a test made and
@@ -916,26 +1446,48 @@ class Baseline:
 
     def _kernel_side(self, left):
         if hw.sysfs_read("cnc/state") is None:
-            self.log("kernel sysfs not present - kernel-side checks skipped")
+            if host_run():
+                self.log("kernel sysfs not present (a host run) - kernel-side checks skipped")
+            else:
+                # On a machine the kernel side is the latch, the readbacks,
+                # the ring and the module's values: none of it is judged.
+                left.append(Leftover("kernel sysfs", "cnc/state unreadable", "readable",
+                                     "failed: the kernel side was not judged"))
             return
+        # The laser's readbacks and the latch were judged first (_laser_side).
         for attr, want in IDLE_READBACKS:
+            if attr in LASER_READBACKS:
+                continue
             got = hw.sysfs_read(attr)
             if got is not None and got != want:
                 left.append(Leftover(attr, got, want, "unrestorable"))
-        ilk = hw.sysfs_int("cnc/interlock_circuit")
-        if ilk is not None and not (ilk & LATCH_BIT):
-            try:
-                hw.sysfs_write("cnc/laser_latch", "1")
-                act = "restored"
-            except OSError as e:
-                act = "failed: %s" % e
-            left.append(Leftover("laser_latch", "unlocked (interlock 0x%x)" % ilk, "locked", act))
         residue = read_ring_residue()
         if residue:
             left.append(Leftover("pulse ring", "%d unplayed bytes" % residue, "0 (nothing queued)",
                                  "unrestorable: the next run would replay them first"))
-        for attr, want in fixed_sysfs(self.xy_mode()):
+        # The values that follow the XY microstep mode are judged against
+        # the mode the settings name; with the settings unread they are left
+        # as found and named, never written for a default mode. The GRBL
+        # controller's own values are judged only in GRBL mode: with the mode
+        # unread (forgectrl silent) they may be another controller's, and they
+        # are left and named. Under a program still playing none of them is
+        # written: it would unmask an axis or change a current mid-move (the
+        # kernel state is named above).
+        xy = self.xy_mode_read()
+        mode_unread = self.mode is None and not host_run()
+        playing = hw.sysfs_read("cnc/state") == "running"
+        unjudged, unknown, held = [], [], []
+        for attr, want in fixed_sysfs(xy or XY_MODE_DEFAULT):
             if self.cloud_mode() and attr in GRBL_CONTROLLER_SYSFS:
+                continue
+            if playing and attr in GRBL_CONTROLLER_SYSFS:
+                held.append(attr)
+                continue
+            if mode_unread and attr in GRBL_CONTROLLER_SYSFS:
+                unknown.append(attr)
+                continue
+            if xy is None and attr in XY_MODE_SYSFS:
+                unjudged.append(attr)
                 continue
             got = hw.sysfs_read(attr)
             if got is None or got == want:
@@ -947,11 +1499,22 @@ class Baseline:
             except OSError as e:
                 act = "failed: %s" % e
             left.append(Leftover(attr, got, want, act))
+        if unjudged:
+            left.append(Leftover("xy_microsteps", UNREADABLE, "the settings' mode",
+                                 "failed: %s not judged" % ", ".join(unjudged)))
+        if unknown:
+            left.append(Leftover("controller mode", UNREADABLE, "the mode in force",
+                                 "failed: %s not judged" % ", ".join(unknown)))
+        if held:
+            self.log("a program still plays: the controller's values (%s) are not written under it"
+                     % ", ".join(held))
         self._heater_side(left)
         # A fault that still stands keeps the engine's red flash up: that is
         # the machine's own state, not a leftover (the attention check above
         # names the fault).
         st, c = self.fc_get("/cool/status")
+        if st == 200 and isinstance(c, dict) and c.get("armed"):
+            self._window(left, c)       # a window opened since the cooling engine's read
         red_standing = st == 200 and isinstance(c, dict) and (c.get("attention") or {}).get("standing")
         for name in BUTTON_LEDS:
             got = read_led(name)
@@ -1019,6 +1582,7 @@ class Baseline:
         if not (isinstance(mode, dict) and mode.get("mode") == "grbl"
                 and mode.get("controller") == "running"):
             return "unrestorable: no running GRBL controller"
+        self._latch_before("a Grbl port connection")
         try:
             with hw.Grbl() as g:
                 rep = g.status_report()
@@ -1107,10 +1671,19 @@ class Baseline:
         for r in captured.get("restart_clients") or []:
             left.append(Leftover("cloud client at the %s" % r["where"], r["found"], r["expected"],
                                  "not restored: a cloud test starts the client it needs"))
+        # What else the takeover's end found: an underrun it acknowledged, a
+        # forgectrl that did not start or answer (runner.Takeover).
+        for r in captured.get("restart_leftovers") or []:
+            left.append(Leftover(r["item"], r["found"], r["expected"], r["action"]))
+        self._grbl_settings_side(left, captured.get("grbl"))
         was = captured.get("settings")
         if was:
-            st, body = self.fc_get("/settings")
-            if st == 200 and isinstance(body, dict):
+            body = self.fc_dict("/settings")
+            if body is not None:
+                # a settings write can restart the controller (xy_microsteps
+                # under GRBL), and forgectrl's stop locks the latch
+                if any(body.get(k) != v for k, v in was.items()):
+                    self._latch_before("a settings hand-back")
                 for k, v in was.items():
                     if body.get(k) == v:
                         continue
@@ -1118,6 +1691,47 @@ class Baseline:
                                else self.fc_post("/settings", data={k: v}))
                     left.append(Leftover("settings." + k, body.get(k), v,
                                          "restored" if st2 == 200 else "failed: %s %s" % (st2, b2)))
+
+    def _grbl_settings_side(self, left, was):
+        """The GRBL controller's $ settings as the run found them, compared
+        while the same mode runs (the settings hand-back after this can
+        restart the controller), by the groups above."""
+        if not was or self.mode != "grbl":
+            return
+        now = self.grbl_settings()
+        if now is None:
+            return                  # no controller to compare: the controller leftover names it
+        changed = sorted((k for k in was if now.get(k) != was[k]), key=lambda k: int(k[1:]))
+        derived = [k for k in changed if k in GRBL_DERIVED_SETTINGS]
+        if derived:
+            self.log("grbl: %s, derived from the settings, moved during the run (%s); not judged here"
+                     % (", ".join(derived), ", ".join("%s %s -> %s" % (k, was[k], now.get(k)) for k in derived)))
+        changed = [k for k in changed if k not in GRBL_DERIVED_SETTINGS]
+        if not changed:
+            return
+        restore = [k for k in changed if k not in GRBL_PINNED_SETTINGS + GRBL_LASER_SETTINGS]
+        back = {}
+        if restore:
+            self._latch_before("a Grbl port connection")
+            try:
+                with hw.Grbl() as g:
+                    for k in restore:
+                        reply = g.command("%s=%s" % (k, was[k]))
+                        if reply and reply[-1] == "ok":
+                            got = parse_grbl_settings("\n".join(g.command(k))) or {}
+                            back[k] = "restored" if got.get(k) == was[k] else "failed: reads %s" % got.get(k)
+                        else:
+                            back[k] = "failed: %s" % ("; ".join(reply) or "no reply")
+            except (hw.HwError, OSError) as e:
+                back = {k: back.get(k) or "failed: %s" % e for k in restore}
+        for k in changed:
+            if k in GRBL_PINNED_SETTINGS:
+                act = "not restored: the driver pins it"
+            elif k in GRBL_LASER_SETTINGS:
+                act = "not restored: a laser setting"
+            else:
+                act = back[k]
+            left.append(Leftover("grbl." + k, now.get(k), was[k], act))
 
 
 # ------------------------------------------------------------ boot reference

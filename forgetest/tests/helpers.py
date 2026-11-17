@@ -20,6 +20,49 @@ from forgetest import manifest as manifest_mod  # noqa: E402
 CLEAN = {"clean": True, "why": [], "ran": {}}
 
 
+def host_run(case=None):
+    """Mark a host run (baseline.host_run): the tests that run the runner or
+    the hand-back with no forgectrl and no kernel module say so, and the
+    hand-back skips those sides instead of failing the run on them. With a
+    test case the mark goes with the test; without one the caller takes it
+    down (end_host_run, for a class-wide setup)."""
+    os.environ["FORGETEST_HOST_RUN"] = "1"
+    if case is not None:
+        case.addCleanup(end_host_run)
+
+
+def end_host_run():
+    os.environ.pop("FORGETEST_HOST_RUN", None)
+
+
+def latch_drives_interlock(case):
+    """The fake sysfs tree's latch as the kernel's: a write of
+    cnc/laser_latch drives interlock_circuit bit 3 (set on a lock, clear on
+    an unlock), as LATCH_RESET does, and a lock parks FIRE, so the FIRE and
+    LASER_ON readbacks read 0 after it, for the rest of the test."""
+    from unittest import mock
+    from forgetest import hw
+    real = hw.sysfs_write
+
+    def write(attr, value):
+        real(attr, value)
+        if attr != "cnc/laser_latch":
+            return
+        lock = str(value).strip() == "1"
+        path = hw.sysfs_root() + "cnc/interlock_circuit"
+        if os.path.exists(path):
+            with open(path) as f:
+                ilk = int(f.read().split()[0], 0)
+            with open(path, "w") as f:
+                f.write(str((ilk | 0x08) if lock else (ilk & ~0x08)))
+        for readback in ("cnc/laser_enable", "cnc/laser_on"):
+            if lock and os.path.exists(hw.sysfs_root() + readback):
+                real(readback, "0")
+    p = mock.patch.object(hw, "sysfs_write", write)
+    p.start()
+    case.addCleanup(p.stop)
+
+
 class ScriptedProvenance:
     """provenance.Provenance as the runner calls it: each check answers
     with the next verdict of the script, the last one repeating."""
@@ -210,11 +253,39 @@ class Clock:
 
 # ------------------------------------------------------- fake forgectrl
 
+def supervisor_locks():
+    """The latch locked, as forgectrl locks it when a controller's session
+    ends or begins: bit 3 of the fake sysfs tree's interlock word reads
+    locked after it. Nothing when the test has no tree. FakeForgectrl calls
+    it where forgectrl does (see do_POST)."""
+    from forgetest import hw
+    root = hw.sysfs_root()
+    if not os.path.isdir(root + "cnc"):
+        return
+    try:
+        hw.sysfs_write("cnc/laser_latch", "1")
+    except OSError:
+        return
+    path = root + "cnc/interlock_circuit"
+    if os.path.exists(path):
+        with open(path) as f:
+            ilk = int(f.read().split()[0], 0)
+        with open(path, "w") as f:
+            f.write(str(ilk | 0x08))
+
+
 class FakeForgectrl:
     """A stand-in for the machine-services daemon on localhost: canned
     JSON for the endpoints the suite reads, a mutable `state` the test
     scripts, every POST recorded, and an optional `on_post(path, form)`
-    hook returning (status, body) to script the daemon's reactions.
+    hook returning (status, body) to script the daemon's reactions. Where
+    forgectrl locks the latch, the fake locks it too (supervisor_locks),
+    after the hook, unless the hook refused the request: a stop with a
+    controller running (super.c stop_locked), a GRBL controller's start (it
+    locks at its init, stepper_stream.c; the supervisor's spawn and the
+    cloud client write no latch), a mode switch that stops a running
+    controller, and a settings write of xy_microsteps that restarts a
+    running GRBL controller (main.c restart_grbl).
     Point the suite at it with FORGECTRL_URL (see start/stop)."""
 
     def __init__(self):
@@ -277,10 +348,24 @@ class FakeForgectrl:
                 raw = self.rfile.read(n).decode() if n else ""
                 form = dict(_up.parse_qsl(raw if raw else query, keep_blank_values=True))
                 fake.posts.append((path, form))
+                mode = fake.state["mode"]
+                running = mode.get("controller") == "running"
+                locks = ((path == "/controller/stop" and running)
+                         or (path == "/controller/start" and not running and mode.get("mode") == "grbl")
+                         or (path == "/mode" and form.get("controller")
+                             and ((running and form.get("controller") != mode.get("mode"))
+                                  or (not running and form.get("controller") == "grbl")))
+                         or (path == "/settings" and "xy_microsteps" in form and running
+                             and mode.get("mode") == "grbl"
+                             and form["xy_microsteps"] != fake.state["settings"].get("xy_microsteps")))
                 if fake.on_post:
                     r = fake.on_post(path, form)
                     if r is not None:
+                        if locks and r[0] < 400:
+                            supervisor_locks()
                         return self._send(*r)
+                if locks:
+                    supervisor_locks()
                 if path == "/mode" and form.get("controller"):
                     fake.state["mode"] = dict(fake.state["mode"], mode=form["controller"], controller="running",
                                               pid=fake.state["mode"].get("pid", 0) + 1)
@@ -294,7 +379,9 @@ class FakeForgectrl:
         self._srv.daemon_threads = True
         self._srv.block_on_close = False        # never wait on a lingering connection
         self.url = "http://127.0.0.1:%d" % self._srv.server_address[1]
-        self._th = _threading.Thread(target=self._srv.serve_forever, daemon=True)
+        # a short poll: stop() waits for the serving loop's next poll
+        self._th = _threading.Thread(target=self._srv.serve_forever, kwargs={"poll_interval": 0.05},
+                                     daemon=True)
 
     def start(self):
         self._th.start()
@@ -326,6 +413,9 @@ class FakeGrbl:
         self.extra = b""            # text pushed to the client on the next poll
         self.reset_to = None        # the state a soft reset (^X) lands in, when set
         self.on_command = None      # called with every command line received
+        self.settings = {}          # "$N" -> value: "$N=V" sets one, "$N" reports it
+        self.pinned = {}            # "$N" -> the value a write answers ok to and does not change
+        self.unanswered = 0         # this many '?' go unanswered (a reset that ate them)
         self._sock = _socket.socket()
         self._sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
@@ -368,6 +458,9 @@ class FakeGrbl:
                 while buf:
                     if buf[0:1] == b"?":
                         buf = buf[1:]
+                        if self.unanswered > 0:
+                            self.unanswered -= 1
+                            continue
                         out += ("<%s|MPos:%.3f,%.3f,%.3f|FS:0,0>\r\n" % (self.state, *self.mpos)).encode()
                     elif buf[0] in (0x18, 0x85, 0x7E, 0x21):
                         if buf[0] == 0x18:
@@ -380,6 +473,12 @@ class FakeGrbl:
                         self.sent.append(line.strip().decode("utf-8", "replace"))
                         if self.on_command:
                             self.on_command(self.sent[-1])
+                        key, eq, val = self.sent[-1].partition("=")
+                        if key[:1] == "$" and key[1:].isdigit():
+                            if eq:
+                                self.settings[key] = self.pinned.get(key, val)
+                            elif key in self.settings:
+                                out += ("%s=%s\r\n" % (key, self.settings[key])).encode()
                         out += b"ok\r\n"
                     else:
                         break

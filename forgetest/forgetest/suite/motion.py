@@ -10,8 +10,10 @@ Ported from `scripts/bench/pacing_test.py` (protocol-loop pacing) and
 and round-trip; the laser stays latched (the tests never touch it); the
 suite is the only Grbl client while a test runs.
 """
+import contextlib
 import json
 import os
+import signal
 import struct
 import time
 
@@ -571,6 +573,11 @@ def microstep_modes(ctx):
               "no head accelerometer found (i2c %s): the motion witness is missing", hw.HEAD_ACCEL_I2C)
     was = (fc.settings() or {}).get("xy_microsteps") or ""
     ev["xy_microsteps_before"] = was or "(unset)"
+    # The scale the test found, judged again once the setting is put back:
+    # a typed $100 that stuck would leave the machine at another scale.
+    with ctx.grbl() as g:
+        scale0 = {key: grbl_setting(g, key) for key in ("$100", "$101")}
+    ev["scale_before"] = scale0
     results = []
     try:
         for mode in _baseline.XY_MODES:
@@ -641,6 +648,10 @@ def microstep_modes(ctx):
         ev["modes"] = results
         set_xy_mode(ctx, fc, was)
         ev["xy_microsteps_after"] = (fc.settings() or {}).get("xy_microsteps") or "(unset)"
+    with ctx.grbl() as g:
+        ev["scale_after"] = {key: grbl_setting(g, key) for key in ("$100", "$101")}
+    ctx.check(ev["scale_after"] == scale0, "the scale was not put back: $100/$101 read %s, %s when the "
+              "test began", ev["scale_after"], scale0)
     ctx.log("PASS: %s", "; ".join("x%d: %.3f mm, drift %.3f, accel %d"
                                   % (r["mode"], r["kernel_out_mm"], r["drift_mm"], max(r["accel_p2p"]))
                                   for r in results))
@@ -805,6 +816,51 @@ def _return_x(ctx, delta_mm):
     machine_idle(ctx)
 
 
+CONTROLLER_COMM = "grblHAL_glowfor"         # the controller's /proc comm (15 characters)
+
+
+@contextlib.contextmanager
+def _stopped(ctx, pid):
+    """The controller SIGSTOPped for the block, and SIGCONT on every way out
+    of it, a failed check or an Abort among them: a controller left stopped
+    still reads running to the supervisor and answers nothing. The SIGCONT
+    goes only to a pid that is still the controller's, never to one reaped
+    and given to another process."""
+    os.kill(pid, signal.SIGSTOP)
+    try:
+        yield
+    finally:
+        try:
+            with open("/proc/%d/comm" % pid) as f:
+                comm = f.read().strip()
+        except OSError:
+            comm = None
+        if comm == CONTROLLER_COMM:
+            os.kill(pid, signal.SIGCONT)
+        else:
+            ctx.log("pid %d is no longer the controller (%s): no SIGCONT", pid, comm)
+
+
+def _energize_after(ctx, g, fc):
+    """A release the drill did not end itself (a failed check, an Abort):
+    $ME, or a controller restart when the port does not take it, so the
+    machine is not handed on released and in alarm."""
+    try:
+        r = g.command("$ME")
+    except (hw.HwError, OSError) as e:
+        r = ["%s: %s" % (type(e).__name__, e)]
+    if r and r[-1] == "ok":
+        ctx.log("the motors energized after the release ($ME)")
+        return
+    try:
+        st1 = fc.post("/controller/stop")[0]
+        st2 = fc.post("/controller/start")[0]
+    except hw.HwError as e:
+        st1 = st2 = str(e)
+    ctx.log("$ME was not taken after the release (%s): the controller restarted (stop %s, start %s)",
+            r, st1, st2)
+
+
 @test("motion.deadman", title="Dead-man: controller kill, controller hang, forgectrl restart mid-move, "
                              "a kill during the web-service homing",
       subsystem="motion", kind="auto", mode="grbl", est_min=6,
@@ -895,20 +951,20 @@ def deadman(ctx):
         g.command("G91")
         g.command("G1X30F300", timeout=0.5)
         ctx.sleep(1.0)
-        _os.kill(pid1, _signal.SIGSTOP)
-        ctx.log("SIGSTOP sent to controller pid %d mid-move", pid1)
-        t0 = time.time()
-        kstate = None
-        while time.time() - t0 < 10:
-            kstate = hw.sysfs_read("cnc/state")
-            if kstate == "underrun":
-                break
-            ctx.sleep(0.05)
-        halt_s = round(time.time() - t0, 2)
-        ev["sigstop"] = {"kernel_state": kstate, "halt_s": halt_s, "latch_locked": latch_locked(),
-                         "underruns": hw.sysfs_int("cnc/underruns", 0)}
-        ctx.log("after SIGSTOP: kernel %s in %s s, latch locked %s, underruns %s -> %s",
-                kstate, halt_s, latch_locked(), underruns0, ev["sigstop"]["underruns"])
+        with _stopped(ctx, pid1):
+            ctx.log("SIGSTOP sent to controller pid %d mid-move", pid1)
+            t0 = time.time()
+            kstate = None
+            while time.time() - t0 < 10:
+                kstate = hw.sysfs_read("cnc/state")
+                if kstate == "underrun":
+                    break
+                ctx.sleep(0.05)
+            halt_s = round(time.time() - t0, 2)
+            ev["sigstop"] = {"kernel_state": kstate, "halt_s": halt_s, "latch_locked": latch_locked(),
+                             "underruns": hw.sysfs_int("cnc/underruns", 0)}
+            ctx.log("after SIGSTOP: kernel %s in %s s, latch locked %s, underruns %s -> %s",
+                    kstate, halt_s, latch_locked(), underruns0, ev["sigstop"]["underruns"])
         # The controller comes back from the hang to find its stream
         # faulted and the core in a critical alarm (17, motor fault). The
         # core refuses an unlock until a soft reset (error 79), and the
@@ -917,7 +973,6 @@ def deadman(ctx):
         # producer armed again. Reset, unlock, and the controller moves
         # again without a restart (the position is not trusted until a
         # re-home, so the move is a jog).
-        _os.kill(pid1, _signal.SIGCONT)
         ctx.sleep(1.0)
         st = g.status_report()["state"]
         ev["sigstop"]["state_after_cont"] = st
@@ -969,9 +1024,8 @@ def deadman(ctx):
         g.command("G91")
         g.command("G1X30F300", timeout=0.5)     # ~6 s of motion
         ctx.sleep(1.0)
-        _os.kill(pid2, _signal.SIGSTOP)
-        time.sleep(0.1)
-        _os.kill(pid2, _signal.SIGCONT)
+        with _stopped(ctx, pid2):
+            time.sleep(0.1)
         ctx.log("SIGSTOP 100 ms sent to controller pid %d mid-move", pid2)
         peak, states, st = wait_idle(ctx, g, 30)
         g.command("G90")
@@ -1385,77 +1439,85 @@ def motor_release(ctx):
         clean_slate(ctx, g)
         r = g.command("$MD")
         ctx.check(not any(x.startswith("error") for x in r), "$MD refused at idle: %s", r)
-        text = "\n".join(r) + drain_text(g, 1.0)
-        ev["released_currents"] = list(_step_currents())
-        ev["state_released"] = g.status_report()["state"]
-        ev["kernel_state_released"] = hw.sysfs_read("cnc/state")
-        ev["faults_released"] = hw.sysfs_int("cnc/faults")
-        ev["homed_axes_released"] = fc.status().get("homed_axes")
-        ctx.log("$MD: step currents %s, %s, cnc/state %s, faults %s, homed_axes %s",
-                ev["released_currents"], ev["state_released"], ev["kernel_state_released"],
-                ev["faults_released"], ev["homed_axes_released"])
-        ctx.check(ev["released_currents"] == ["0", "0"],
-                  "the step currents read %s after $MD, not 0 and 0", ev["released_currents"])
-        ctx.check(ev["state_released"].startswith("Alarm"), "not locked in alarm: %s", ev["state_released"])
-        ctx.check(ev["kernel_state_released"] == "idle", "the kernel left idle: %s", ev["kernel_state_released"])
-        ctx.check(ev["faults_released"] == 0, "a driver fault on release: %s", ev["faults_released"])
-        ctx.check(not (ev["homed_axes_released"] or 0) & 3, "X or Y still referenced while released")
-        ctx.check("Motors released" in text, "the sender was not told the motors are released")
+        # From here the gantry is released: every way out of the drill ends
+        # it, a failed check or an Abort among them.
+        energized = False
+        try:
+            text = "\n".join(r) + drain_text(g, 1.0)
+            ev["released_currents"] = list(_step_currents())
+            ev["state_released"] = g.status_report()["state"]
+            ev["kernel_state_released"] = hw.sysfs_read("cnc/state")
+            ev["faults_released"] = hw.sysfs_int("cnc/faults")
+            ev["homed_axes_released"] = fc.status().get("homed_axes")
+            ctx.log("$MD: step currents %s, %s, cnc/state %s, faults %s, homed_axes %s",
+                    ev["released_currents"], ev["state_released"], ev["kernel_state_released"],
+                    ev["faults_released"], ev["homed_axes_released"])
+            ctx.check(ev["released_currents"] == ["0", "0"],
+                      "the step currents read %s after $MD, not 0 and 0", ev["released_currents"])
+            ctx.check(ev["state_released"].startswith("Alarm"), "not locked in alarm: %s", ev["state_released"])
+            ctx.check(ev["kernel_state_released"] == "idle", "the kernel left idle: %s", ev["kernel_state_released"])
+            ctx.check(ev["faults_released"] == 0, "a driver fault on release: %s", ev["faults_released"])
+            ctx.check(not (ev["homed_axes_released"] or 0) & 3, "X or Y still referenced while released")
+            ctx.check("Motors released" in text, "the sender was not told the motors are released")
 
-        # The rotors have relaxed by now: from here on the head is still.
-        ctx.sleep(1.0)
-        k0 = _kernel_position()
-        t0 = time.time()
-        refusals = {}
-        for line in ("$J=G91X10F2400", "G0X10", "$X"):
-            refusals[line] = _refused(ctx, g, line)
-            ctx.check(refusals[line], "%s was accepted while the motors are released", line)
-        ctx.sleep(1.0)
-        p2px, p2py, n = accel.p2p(t0)
-        ev["released_accel_p2p"] = [p2px, p2py, n]
-        ctx.check(n > 0, "no accelerometer samples in the released window")
-        ctx.check(max(p2px, p2py) < hw.ACCEL_P2P_MOVING,
-                  "the head moved while released (accel p2p x=%d y=%d)", p2px, p2py)
-        g.realtime(0x18)
-        ctx.sleep(2)
-        g.drain()
-        refusals["^X then $X"] = _refused(ctx, g, "$X")
-        ctx.check(refusals["^X then $X"], "a soft reset and $X unlocked a released machine")
-        ev["state_after_reset"] = g.status_report()["state"]
-        ctx.check(ev["state_after_reset"].startswith("Alarm"),
-                  "a soft reset unlocked a released machine: %s", ev["state_after_reset"])
-        k1 = _kernel_position()
-        ev["refusals"] = refusals
-        ev["kernel_position"] = [list(k0), list(k1)]
-        ctx.log("refused while released: %s; accel p2p x=%d y=%d over %d samples; kernel record %s -> %s",
-                refusals, p2px, p2py, n, k0, k1)
-        ctx.check(k1 == k0, "the kernel played something while released: %s -> %s", k0, k1)
+            # The rotors have relaxed by now: from here on the head is still.
+            ctx.sleep(1.0)
+            k0 = _kernel_position()
+            t0 = time.time()
+            refusals = {}
+            for line in ("$J=G91X10F2400", "G0X10", "$X"):
+                refusals[line] = _refused(ctx, g, line)
+                ctx.check(refusals[line], "%s was accepted while the motors are released", line)
+            ctx.sleep(1.0)
+            p2px, p2py, n = accel.p2p(t0)
+            ev["released_accel_p2p"] = [p2px, p2py, n]
+            ctx.check(n > 0, "no accelerometer samples in the released window")
+            ctx.check(max(p2px, p2py) < hw.ACCEL_P2P_MOVING,
+                      "the head moved while released (accel p2p x=%d y=%d)", p2px, p2py)
+            g.realtime(0x18)
+            ctx.sleep(2)
+            g.drain()
+            refusals["^X then $X"] = _refused(ctx, g, "$X")
+            ctx.check(refusals["^X then $X"], "a soft reset and $X unlocked a released machine")
+            ev["state_after_reset"] = g.status_report()["state"]
+            ctx.check(ev["state_after_reset"].startswith("Alarm"),
+                      "a soft reset unlocked a released machine: %s", ev["state_after_reset"])
+            k1 = _kernel_position()
+            ev["refusals"] = refusals
+            ev["kernel_position"] = [list(k0), list(k1)]
+            ctx.log("refused while released: %s; accel p2p x=%d y=%d over %d samples; kernel record %s -> %s",
+                    refusals, p2px, p2py, n, k0, k1)
+            ctx.check(k1 == k0, "the kernel played something while released: %s -> %s", k0, k1)
 
-        # forgectrl reads the release too: cloud homing moves the head, so the
-        # switch is refused (for the release where cloud mode is enabled, for
-        # cloud mode being off where it is not; the mode stays either way).
-        st, body = fc.post("/mode", data={"controller": "cloud"})
-        text = body if isinstance(body, str) else json.dumps(body)
-        cloud_on = str(fc.settings().get("cloud_enabled", "")).lower() in ("1", "true", "yes", "on")
-        ev["mode_cloud_released"] = {"status": st, "body": text, "cloud_enabled": cloud_on}
-        ctx.log("POST /mode controller=cloud while released -> %s %s", st, text)
-        ctx.check(st == 409, "a switch to cloud mode while released -> %s, expected 409", st)
-        if cloud_on:
-            ctx.check("released" in text, "the refusal does not name the release: %r", text)
-        ctx.check(fc.get("/mode")[1].get("mode") == "grbl", "the mode changed under a released gantry")
-        ctx.check(_step_currents() == ("0", "0"),
-                  "something energized the motors: step currents %s", _step_currents())
+            # forgectrl reads the release too: cloud homing moves the head, so the
+            # switch is refused (for the release where cloud mode is enabled, for
+            # cloud mode being off where it is not; the mode stays either way).
+            st, body = fc.post("/mode", data={"controller": "cloud"})
+            text = body if isinstance(body, str) else json.dumps(body)
+            cloud_on = str(fc.settings().get("cloud_enabled", "")).lower() in ("1", "true", "yes", "on")
+            ev["mode_cloud_released"] = {"status": st, "body": text, "cloud_enabled": cloud_on}
+            ctx.log("POST /mode controller=cloud while released -> %s %s", st, text)
+            ctx.check(st == 409, "a switch to cloud mode while released -> %s, expected 409", st)
+            if cloud_on:
+                ctx.check("released" in text, "the refusal does not name the release: %r", text)
+            ctx.check(fc.get("/mode")[1].get("mode") == "grbl", "the mode changed under a released gantry")
+            ctx.check(_step_currents() == ("0", "0"),
+                      "something energized the motors: step currents %s", _step_currents())
 
-        r = g.command("$ME")
-        ctx.check(not any(x.startswith("error") for x in r), "$ME refused: %s", r)
-        ctx.sleep(0.5)
-        ev["energized_currents"] = list(_step_currents())
-        ev["faults_energized"] = hw.sysfs_int("cnc/faults")
-        ev["state_energized"] = g.status_report()["state"]
-        ctx.check(tuple(ev["energized_currents"]) == HOLD_CURRENTS,
-                  "the step currents read %s after $ME, not the hold currents", ev["energized_currents"])
-        ctx.check(ev["faults_energized"] == 0, "a driver fault on energize: %s", ev["faults_energized"])
-        ctx.check(ev["state_energized"].startswith("Idle"), "not idle after $ME: %s", ev["state_energized"])
+            r = g.command("$ME")
+            energized = not any(x.startswith("error") for x in r)
+            ctx.check(energized, "$ME refused: %s", r)
+            ctx.sleep(0.5)
+            ev["energized_currents"] = list(_step_currents())
+            ev["faults_energized"] = hw.sysfs_int("cnc/faults")
+            ev["state_energized"] = g.status_report()["state"]
+            ctx.check(tuple(ev["energized_currents"]) == HOLD_CURRENTS,
+                      "the step currents read %s after $ME, not the hold currents", ev["energized_currents"])
+            ctx.check(ev["faults_energized"] == 0, "a driver fault on energize: %s", ev["faults_energized"])
+            ctx.check(ev["state_energized"].startswith("Idle"), "not idle after $ME: %s", ev["state_energized"])
+        finally:
+            if not energized:
+                _energize_after(ctx, g, fc)
 
     # The drivers are alive: the machine's own witness says so. The liveness
     # probe is built for the accelerometer (a slow, rough move sampled for

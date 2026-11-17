@@ -4,9 +4,97 @@
 # SPDX-License-Identifier:    MIT
 
 """camera.* - the lid camera pipeline through forgectrl."""
+import http.client
+import threading
+import time
+
 from ..catalog import test
 from .. import hw
 from ..baseline import LID_LAMP_ATTR
+
+# A lid-camera stream stops within a frame or so of the lid opening: what
+# it may deliver after the lid is seen open, in frames of the size it was
+# delivering before, and the time it may take to end.
+STREAM_FRAMES_AFTER_EDGE = 3
+STREAM_END_S = 5.0
+JPEG_SOI = b"\xff\xd8"
+
+
+class StreamWatch:
+    """A running MJPEG stream, read in a thread as fast as it arrives, so
+    nothing piles up in the socket buffers and every chunk has the time it
+    came: what the stream sent after a moment is measured, not a backlog.
+    Only a transport error ends the read; a judgment is never made here."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.chunks = []            # (arrival time, bytes, frame starts in it)
+        self.end = None             # (time, how) once the stream ended
+        self._carry = b""
+        self._th = threading.Thread(target=self._loop, daemon=True, name="forgetest-stream")
+        self._th.start()
+
+    def _loop(self):
+        read = getattr(self.stream, "read1", None) or self.stream.read
+        while True:
+            try:
+                data = read(65536)
+            except (OSError, http.client.HTTPException, ValueError) as e:
+                self.end = (time.time(), type(e).__name__)
+                return
+            if not data:
+                self.end = (time.time(), "EOF")
+                return
+            # a marker split between two reads is counted with the second
+            self.chunks.append((time.time(), len(data), (self._carry + data).count(JPEG_SOI)))
+            self._carry = data[-1:]
+
+    def wait_frames(self, n, timeout):
+        """True once n frames have arrived; False at the timeout or the end."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if sum(c[2] for c in list(self.chunks)) >= n:
+                return True
+            if self.end is not None:
+                return False
+            time.sleep(0.05)
+        return False
+
+    def after_edge(self, t_edge, end_s=STREAM_END_S):
+        """What the stream delivered after t_edge, read once it ended or
+        end_s later: whether it ended, the frames and bytes after the edge,
+        and a frame's size before it."""
+        deadline = time.time() + end_s
+        while self.end is None and time.time() < deadline:
+            time.sleep(0.05)
+        chunks = list(self.chunks)
+        before = [c for c in chunks if c[0] <= t_edge]
+        after = [c for c in chunks if c[0] > t_edge]
+        frames_before = sum(c[2] for c in before)
+        return {"ended": self.end is not None, "how": self.end[1] if self.end else None,
+                "frames": sum(c[2] for c in after), "bytes": sum(c[1] for c in after),
+                "frame_bytes": sum(c[1] for c in before) // frames_before if frames_before else 0,
+                "frames_before": frames_before}
+
+    def stop(self):
+        try:
+            self.stream.close()
+        except OSError:
+            pass
+
+
+def lid_stream_failure(verdict):
+    """What camera.lid-privacy fails a lid stream for once the lid is seen
+    open (StreamWatch.after_edge's verdict), or None: a stream that has not
+    ended, or that delivered more than STREAM_FRAMES_AFTER_EDGE frames'
+    worth of bytes after the edge."""
+    if not verdict["ended"]:
+        return ("the stream was still delivering %.0f s after the lid opened (%d bytes since)"
+                % (STREAM_END_S, verdict["bytes"]))
+    if verdict["bytes"] > STREAM_FRAMES_AFTER_EDGE * verdict["frame_bytes"]:
+        return ("the stream delivered %d bytes (%d frames) after the lid opened; a frame is about %d bytes"
+                % (verdict["bytes"], verdict["frames"], verdict["frame_bytes"]))
+    return None
 
 _CAM_COVERS = [("forgectrl", "src/cam.*"), ("forgectrl", "src/camhealth.*"), ("forgectrl", "src/camlamp.*"),
                ("forgectrl", "src/debayer.*"), ("forgectrl", "src/vpu_jpeg.*"),
@@ -409,33 +497,21 @@ def lid_privacy(ctx):
     req = urllib.request.Request(fc.base + "/cam/stream?cam=lid",
                                  headers={"Host": fc.host_header()})
     stream = urllib.request.urlopen(req, timeout=15)
+    watch = StreamWatch(stream)
     try:
-        first = stream.read(4096)
-        ctx.check(b"\xff\xd8" in first, "the stream did not start before the lid test")
+        ctx.check(watch.wait_frames(2, 15), "the stream did not deliver two frames before the lid test")
         ctx.act("lid", "open", text="The stream is running.")
         # The engine tears the pipeline down on the next frame and the
-        # stream ends. Draining now returns whatever was buffered before
-        # the lid opened and then EOF; what must not happen is frames
-        # continuing to arrive indefinitely.
-        drained, ended = 0, False
-        try:
-            while True:
-                chunk = stream.read(65536)
-                if not chunk:
-                    ended = True
-                    break
-                drained += len(chunk)
-                ctx.check(drained < 8 * 1024 * 1024,
-                          "the stream was still delivering after %d bytes with the lid open",
-                          drained)
-        except Exception as e:  # noqa: BLE001 - a reset connection ends it too
-            ended = True
-            ctx.log("stream ended with %s", type(e).__name__)
-        ev["stream_bytes_after_lid_open"] = drained
-        ctx.log("stream ended after %d further buffered bytes", drained)
-        ctx.check(ended, "the stream never ended after the lid opened")
+        # stream ends. The watch has read the stream as it arrived, so what
+        # comes after the lid is seen open is what the engine sent after it,
+        # not a backlog: a frame or so, then the end.
+        verdict = watch.after_edge(time.time())
+        ev["stream_after_lid_open"] = verdict
+        ctx.log("after the lid opened: %s", verdict)
+        why = lid_stream_failure(verdict)
+        ctx.check(why is None, "%s", why)
     finally:
-        stream.close()
+        watch.stop()
 
     # --- lid open: everything is refused, and says why ------------------
     body = status()

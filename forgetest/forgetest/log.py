@@ -9,12 +9,29 @@ One JSON object per line under the data directory (default
 /data/forgetest/results.jsonl, override FORGETEST_DATA). Records:
 
   campaign    {"id","manifest_sha","catalog_hash","image"}   a campaign opened
-  result      {"campaign","test","result","fingerprint","manifest_sha",
-               "image","duration_s","evidence","answers","log","message"}
+  start       {"campaign","test","fingerprint"}   a test run starting, before
+               its first pass; {"bench"} a bench tool's (runner.py). A test
+               start no result names is a run that never ended
+               (campaign.with_lost_runs)
+  result      {"campaign","test","result","fingerprint","start","manifest_sha",
+               "image","duration_s","evidence","answers","log","message",
+               "needs_disposition","not_run","fixture_error","not_recorded",
+               "charges"}   ("start": the place of the run's start record;
+               "not_run": an ERROR before the test ran; "not_recorded": the
+               bare ERROR of a run whose result the log could not take;
+               "charges": safety leftover records the log refused, which
+               stand on the result, campaign.with_carried_charges)
   invalidate  {"reason"}       manual invalidate-all (full campaign required)
   reset       {"reason"}       explicit campaign reset
+  leftover    {"campaign","test","fingerprint","found_before", "found_after"
+               or "found_during","leftovers","message","needs_disposition",
+               "safety"}   what a pass found, charged to a test: a leftover
+               on the laser's safety state ("safety": true) by the safety
+               rule, written as it is read; any other found before a run,
+               to the test that passed just before it (runner.py)
   disposition {"test","fingerprint","reason"}   the operator's answer to a
-               FAIL or ERROR that blocks its fingerprint (campaign.py)
+               FAIL or ERROR, or a leftover, that blocks its fingerprint
+               (campaign.py)
   export      {"artifact_sha256","authorized","campaign"}
 
 Every record carries "t" (type), "ts" (UTC, ISO 8601, seconds), "seq"

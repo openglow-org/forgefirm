@@ -27,7 +27,7 @@ import helpers
 from forgetest import fixture as fx
 from forgetest import runner as runner_mod
 from forgetest.log import Log
-from forgetest.runner import Context, Run, Runner
+from forgetest.runner import Context, Failed, Run, Runner
 
 KEY = "0123456789abcdef0123456789abcdef"
 
@@ -42,6 +42,7 @@ class FakeFixture:
         self.presses = 0            # presses the device performed
         self.reply_delay = 0.0      # seconds between a press and its reply
         self.replied = 0            # delayed replies the device is done with (sent or lost)
+        self.raw = None             # (declared length, bytes): what any request answers instead
         srv = self
 
         class H(BaseHTTPRequestHandler):
@@ -69,9 +70,21 @@ class FakeFixture:
                     return False
                 return True
 
+            def _raw(self):
+                """srv.raw instead of the answer: True when sent."""
+                if srv.raw is None:
+                    return False
+                length, data = srv.raw
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(length))
+                self.end_headers()
+                self.wfile.write(data)
+                return True
+
             def do_GET(self):
                 srv.calls.append(("GET", self.path))
-                if not self._auth():
+                if not self._auth() or self._raw():
                     return
                 self._json(200, self._state())
 
@@ -79,7 +92,7 @@ class FakeFixture:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n).decode() or "{}")
                 srv.calls.append(("POST", self.path, body))
-                if not self._auth():
+                if not self._auth() or self._raw():
                     return
                 if self.path in ("/lid", "/interlock"):
                     st = body.get("state")
@@ -239,6 +252,17 @@ class ClientTests(unittest.TestCase):
             self.client(timeout=0.5, ip="127.0.0.1", port=1).act("button", "press")
         self.assertFalse(cm.exception.sent)
         self.assertEqual(self.dev.presses, 2)
+
+    def test_an_answer_the_client_cannot_read_is_the_boxs_failure(self):
+        # cut short (a wifi drop mid-reply), not JSON, not a JSON object: the
+        # runner's catch of the box's failures takes every one of them, on a
+        # release too, which reads nothing of the answer's fields
+        f = self.client(ip="127.0.0.1")
+        for length, data in ((100, b'{"device": "forge'), (8, b"not json"), (2, b"[]")):
+            with self.subTest(data=data):
+                self.dev.raw = (length, data)
+                with self.assertRaises(fx.FixtureError):
+                    f.release()
 
     def test_a_wrong_key_is_refused(self):
         f = self.client(key="wrong")
@@ -401,6 +425,21 @@ class ButtonReaderTests(unittest.TestCase):
         self.lamp((0, 300), (0, 0), (0, 0))                   # the red flash at its dark half
         self.assertTrue(hw.button_lit())
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a FIFO for the switches' event device")
+    def test_a_lid_edge_is_not_a_press(self):
+        # the presence press is the button's edge alone: a lid edge on the
+        # same switch device is not the operator at the button
+        hw = runner_mod.hw
+        dev = os.path.join(self.leds, "switches")
+        os.mkfifo(dev)
+        os.environ["GF_SWITCH_DEV"] = dev
+        self.addCleanup(os.environ.pop, "GF_SWITCH_DEV", None)
+        edges = hw.ButtonEdges()
+        self.addCleanup(edges.close)
+        with open(dev, "wb") as w:
+            w.write(hw.ButtonEdges.EVENT.pack(0, 0, hw.EV_SW, 0, 1))     # EV_SW code 0: the lid
+        self.assertIsNone(edges.wait(1, 0.3))
+
 
 class RoutingTests(unittest.TestCase):
     """The queues with a fixture up: the runner's probe is scripted."""
@@ -409,6 +448,7 @@ class RoutingTests(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="forgetest-fixture-run-")
         os.environ["FORGETEST_DATA"] = self.tmp
         os.environ["FORGETEST_MARKER"] = os.path.join(self.tmp, "marker")
+        helpers.host_run(self)                  # a fake forgectrl, no kernel module
         self.fc = helpers.FakeForgectrl().start()
         self.man = helpers.make_manifest()
         self.reg = helpers.registry(
@@ -534,6 +574,38 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(len(rec), 1)
         self.assertEqual(rec[0]["by"], "operator")
         self.assertTrue(any("press the button on the machine" in ln.lower() for ln in run.lines))
+
+    def test_a_presence_press_that_never_comes_fails_the_test(self):
+        run = Run("test", "r.live", "r.live")
+        ctx = Context(run, self.runner, self.reg["r.live"])
+        self.runner.probe_fixture(force=True)
+        self.press_button(False)
+        saved = runner_mod.PRESENCE_TIMEOUT_S
+        runner_mod.PRESENCE_TIMEOUT_S = 0.3
+        try:
+            with self.assertRaises(Failed):
+                ctx.ready("LIVE FIRE. Scrap under the head.")
+        finally:
+            runner_mod.PRESENCE_TIMEOUT_S = saved
+        self.assertFalse(run.fixture_takeover)
+
+    def test_a_failed_press_with_the_button_unreadable_asks_the_operator(self):
+        # Unreadable LEDs say nothing of whether the press was taken: the
+        # operator is asked, and the record keeps it a person's.
+        run = Run("test", "r.live", "r.live")
+        ctx = Context(run, self.runner, self.reg["r.live"])
+        self.runner.probe_fixture(force=True)
+        self.stub.arm_press = True
+        self.stub.fail = True
+        saved = runner_mod.hw.button_asks
+        runner_mod.hw.button_asks = lambda: None
+        try:
+            self.assertFalse(ctx.press_now())
+            self.assertIsNotNone(run.notice)
+            self.assertEqual(run.evidence["actions"][-1]["by"], "operator")
+        finally:
+            run.finished = {"result": "PASS", "message": "", "duration_s": 0}     # ends the notice's watch
+            runner_mod.hw.button_asks = saved
 
     def test_the_presence_press_hands_the_arm_press_to_the_actuator(self):
         """The bench's standing opt-in is not needed once the operator has

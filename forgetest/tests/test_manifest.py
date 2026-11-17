@@ -698,6 +698,18 @@ class CatalogTests(unittest.TestCase):
                     self.assertFalse(name == "forgetest" or name.startswith("forgetest."),
                                      "%s imports %s by its absolute name, which no hash follows: import it "
                                      "relatively (from .. or from .)" % (os.path.basename(mod), name))
+        # The runner runs every test with what it imports of the package: the
+        # bench actuator makes a test's presses, the log is how a result
+        # lands. Each module it imports is a judge, or one named here that
+        # judges nothing about the machine.
+        not_judges = {"artifact.py", "campaign.py", "catalog.py", "provenance.py"}
+        with open(os.path.join(os.path.dirname(paths[0]), "runner.py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1:
+                for name in ([node.module] if node.module else [a.name for a in node.names]):
+                    self.assertIn(name + ".py", set(catalog.SHARED_JUDGES) | not_judges,
+                                  "runner.py imports %s, which no fingerprint carries" % name)
 
 
 class ImplementationHashTests(unittest.TestCase):

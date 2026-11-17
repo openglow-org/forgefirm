@@ -5,15 +5,19 @@
 
 """The baseline: fixed resting values are restored, preserved values are
 handed back, every deviation is a recorded leftover. Runs against a fake
-sysfs tree; forgectrl is unreachable (service-side checks skip)."""
+sysfs tree. The base fixture is a host run with no forgectrl (the service
+side is skipped, and says so); BaselineModeTests run against a fake
+forgectrl, and ForgectrlSilenceTests against one that stops answering."""
 import json
 import os
 import shutil
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
-from forgetest import baseline
+import helpers
+from forgetest import baseline, hw
 
 # The fixed machine tick at the mode an unset xy_microsteps reads as.
 # Taken from baseline rather than typed, so a change to the default mode
@@ -46,7 +50,8 @@ class BaselineFixture:
         os.environ["GF_SYSFS_ROOT"] = self.sysfs
         os.environ["GF_LEDS_ROOT"] = self.leds
         os.environ["FORGECTRL_URL"] = "http://127.0.0.1:1"      # nothing listens
-        baseline.Baseline._unreachable_until = 0.0
+        helpers.host_run(self)
+        helpers.latch_drives_interlock(self)
         self.lines = []
 
     def tearDown(self):
@@ -127,6 +132,65 @@ class BaselineTests(BaselineFixture, unittest.TestCase):
         self._attr("cnc/state", "disabled")
         left = self.bl().enforce("post", captured=None)
         self.assertEqual([(x.item, x.action) for x in left], [("cnc/state", "unrestorable")])
+
+    def test_laser_on_after_a_run_is_a_leftover(self):
+        self._attr("cnc/laser_on", "1")
+        left = self.bl().enforce("post", captured=None)
+        self.assertEqual([(x.item, x.action) for x in left], [("cnc/laser_on", "unrestorable")])
+
+    def test_the_fire_line_is_read_before_the_relock(self):
+        # A lock makes the FIRE pad an input, which then reads low: a FIRE
+        # line driven with the latch unlocked shows only in a read taken
+        # before the relock.
+        self._attr("cnc/interlock_circuit", "7")        # FIRE driven (bit 1), latch unlocked (bit 3 clear)
+        self._attr("cnc/laser_enable", "1")
+        real = hw.sysfs_write
+
+        def write(attr, value):
+            real(attr, value)
+            if attr == "cnc/laser_latch" and str(value) == "1":
+                real("cnc/laser_enable", "0")
+        with mock.patch.object(hw, "sysfs_write", write):
+            left = self.bl().enforce("post", captured=None)
+        self.assertEqual(sorted(x.item for x in left), ["cnc/laser_enable", "laser_latch"])
+        self.assertEqual(self._read("cnc/laser_latch"), "1")
+
+    def test_what_the_laser_side_cannot_read_is_a_leftover_and_the_lock_goes_in(self):
+        # unreadable at the start, readable and locked again by the end: the
+        # read at the start is the one that names it
+        os.remove(self.sysfs + "cnc/interlock_circuit")
+        os.remove(self.sysfs + "cnc/laser_on")
+        left = {x.item: x for x in self.bl().enforce(
+            "post", captured=None, after_laser=lambda found: self._attr("cnc/interlock_circuit", "45"))}
+        self.assertEqual((left["laser_latch"].found, left["cnc/laser_on"].found), ("unreadable", "unreadable"))
+        self.assertEqual(self._read("cnc/laser_latch"), "1")
+
+    def test_a_latch_word_that_turns_unreadable_by_the_end_is_named(self):
+        left = {x.item: x for x in self.bl().enforce(
+            "post", captured=None, after_laser=lambda found: os.remove(self.sysfs + "cnc/interlock_circuit"))}
+        self.assertEqual(left["laser_latch"].found, "unreadable")
+
+    def test_the_lock_is_written_on_a_machine_whose_kernel_state_cannot_be_read(self):
+        os.environ.pop("FORGETEST_HOST_RUN", None)
+        os.remove(self.sysfs + "cnc/state")
+        with mock.patch.object(baseline, "FC_WAIT_S", 0):
+            self.bl().enforce("post", captured=None)
+        self.assertEqual(self._read("cnc/laser_latch"), "1")
+
+    def test_a_lens_step_alone_is_a_leftover(self):
+        # Z is the lens, which no return moves: the X/Y dead band does not excuse it
+        b = self.bl()
+        cap = b.capture()
+        self._pos(0, 0, 2)
+        self.assertEqual([x.item for x in b.enforce("post", captured=cap)], ["position"])
+
+    def test_an_unreadable_kernel_is_a_leftover_on_a_machine(self):
+        # Only a host run skips a kernel side it cannot read.
+        os.environ.pop("FORGETEST_HOST_RUN", None)
+        os.environ["GF_SYSFS_ROOT"] = os.path.join(self.tmp, "nope") + os.sep
+        with mock.patch.object(baseline, "FC_WAIT_S", 0):
+            left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertTrue(left["kernel sysfs"].action.startswith("failed"), left["kernel sysfs"])
 
     def test_loop_heater_is_the_flow_watchs_only_at_its_duty(self):
         b = self.bl()
@@ -640,6 +704,107 @@ class ExtensionFreeTests(BaselineFixture, unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(self.root, "pkg", "org.example.notify")))
 
 
+class ForgectrlSilenceTests(BaselineFixture, unittest.TestCase):
+    """On a machine (no host run) a forgectrl that does not answer is never a
+    clean hand-back: a pass waits for it once, and what went unanswered is a
+    leftover. One miss silences only the pass it happened in."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ.pop("FORGETEST_HOST_RUN", None)
+        self.fc = helpers.FakeForgectrl().start()
+        self.addCleanup(self.fc.stop)
+        self._attr("pic/lid_led", "240")
+        p = mock.patch.object(baseline, "time", helpers.Clock())
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_daemon_gone_at_the_post_pass_is_a_leftover(self):
+        b = self.bl()
+        cap = b.capture()
+        url = self.fc.url
+        self.fc.stop()
+        os.environ["FORGECTRL_URL"] = url                   # the port is closed now
+        left = {x.item: x for x in b.enforce("post", captured=cap)}
+        self.assertTrue(left["forgectrl"].action.startswith("failed"), left["forgectrl"])
+
+    def test_one_missed_request_does_not_blind_the_pass(self):
+        # A request that times out at the start of a pass, with forgectrl
+        # answering after it: the pass waits, and the run's change is found.
+        self.fc.state["settings"]["cool_max_c"] = "30"
+        b = self.bl()
+        cap = b.capture()
+        self.fc.state["settings"]["cool_max_c"] = "40"
+        real = b.fc().get
+        missed = []
+
+        def flaky(path, **kw):
+            if not missed:
+                missed.append(path)
+                raise hw.HwError("forgectrl GET %s: timed out" % path)
+            return real(path, **kw)
+        b.fc().get = flaky
+        left = {x.item: x for x in b.enforce("post", captured=cap)}
+        self.assertEqual(missed, ["/mode"])
+        self.assertEqual(left["settings.cool_max_c"].action, "restored")
+        self.assertNotIn("forgectrl", left)
+
+    def test_the_latch_is_locked_before_forgectrl_is_waited_for(self):
+        self.fc.stop()
+        os.environ["FORGECTRL_URL"] = self.fc.url           # silent for the whole pass
+        self._attr("cnc/interlock_circuit", "37")
+        clock = baseline.time
+        t0 = clock.t
+        locked_at = []
+        real = hw.sysfs_write
+
+        def write(attr, value):
+            if attr == "cnc/laser_latch":
+                locked_at.append(clock.t)
+            real(attr, value)
+        with mock.patch.object(hw, "sysfs_write", write):
+            self.bl().enforce("post", captured=None)
+        self.assertEqual(locked_at[0], t0)
+
+    def test_with_the_mode_unread_the_controllers_values_are_left(self):
+        # forgectrl silent: a cloud program's motor mask and run current are
+        # not the GRBL controller's to put back
+        self.fc.stop()
+        os.environ["FORGECTRL_URL"] = self.fc.url
+        self._attr("cnc/motor_lock", "8")
+        self._attr("pic/x_step_current", "135")
+        left = {x.item for x in self.bl().enforce("post", captured=None)}
+        self.assertEqual((self._read("cnc/motor_lock"), self._read("pic/x_step_current")), ("8", "135"))
+        self.assertIn("controller mode", left)
+
+    def test_a_mode_the_settings_cannot_tell_leaves_the_values_that_follow_it(self):
+        # an x8 machine and one timed-out request: the settings that name the
+        # mode go unread, and nothing is written for a default mode
+        self.fc.state["settings"]["xy_microsteps"] = "8"
+        for attr, val in baseline.fixed_sysfs(8):
+            self._attr(attr, val)
+        b = self.bl()
+        real = b.fc().get
+        missed = []
+
+        def flaky(path, **kw):
+            if path == "/diag/status" and not missed:
+                missed.append(path)
+                raise hw.HwError("forgectrl GET %s: timed out" % path)
+            return real(path, **kw)
+        b.fc().get = flaky
+        left = {x.item: x for x in b.enforce("post", captured=None)}
+        self.assertEqual([self._read(a) for a in baseline.XY_MODE_SYSFS],
+                         [v for a, v in baseline.fixed_sysfs(8) if a in baseline.XY_MODE_SYSFS])
+        self.assertIn("xy_microsteps", left)
+
+    def test_a_status_report_that_is_not_an_answer_is_a_miss(self):
+        # a diagnostic behind an error status is not "not running"
+        self.fc.on_get = lambda path, q: (503, {"running": True, "tool": "fans"}) if path == "/diag/status" else None
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertIn("/diag/status", left["forgectrl"].found)
+
+
 class CloudOwnedSysfsTests(unittest.TestCase):
     """In cloud mode the cloud client configures the machine from the
     pulse header it is playing, the lens included: z_mode comes from
@@ -673,6 +838,11 @@ class PositionDeadbandTests(unittest.TestCase):
         self.assertFalse(baseline.position_quantized(None, [0, 0, 0]))
         self.assertFalse(baseline.position_quantized([0, 0, 0], None))
 
+    def test_the_dead_band_is_a_tenth_of_a_millimeter(self):
+        spm = baseline.XY_STEPS_PER_MM
+        self.assertTrue(baseline.position_quantized([0, 0, 0], [round(0.05 * spm), 0, 0], spm))
+        self.assertFalse(baseline.position_quantized([0, 0, 0], [round(0.5 * spm), 0, 0], spm))
+
 
 class BaselineModeTests(BaselineFixture, unittest.TestCase):
     """The baseline against a fake forgectrl: what the mode in force
@@ -680,9 +850,7 @@ class BaselineModeTests(BaselineFixture, unittest.TestCase):
 
     def setUp(self):
         super().setUp()
-        import helpers
         self.fc = helpers.FakeForgectrl().start()
-        baseline.Baseline._unreachable_until = 0.0
         # the lamp's settle, short: five polls, so a lamp that never holds
         # costs the suite no real seconds
         self._lamp_timing = (baseline.LID_LAMP_SETTLE_S, baseline.LID_LAMP_POLL_S)
@@ -696,6 +864,832 @@ class BaselineModeTests(BaselineFixture, unittest.TestCase):
     def cloud(self):
         self.fc.state["mode"] = {"mode": "cloud", "controller": "running", "pid": 7, "motion": "verified"}
         self.fc.state["settings"]["controller_mode"] = "cloud"
+
+    def clocked(self):
+        """The hand-back's waits on a clock that moves only when it sleeps."""
+        clock = helpers.Clock()
+        p = mock.patch.object(baseline, "time", clock)
+        p.start()
+        self.addCleanup(p.stop)
+        return clock
+
+    def lamp_at_idle(self):
+        self._attr("pic/lid_led", "240")
+
+    def restarts(self, on_stop=None):
+        """forgectrl's controller stop and start: a stop ends the job (the
+        window, the hold) and leaves the controller in standby."""
+        def on_post(path, form):
+            if path == "/controller/stop":
+                self.fc.state["mode"] = dict(self.fc.state["mode"], controller="standby")
+                self.fc.state["cool"] = {"phase": "idle", "armed": False, "hold": False}
+                if on_stop:
+                    on_stop()
+            elif path == "/controller/start":
+                self.fc.state["mode"] = dict(self.fc.state["mode"], controller="running")
+            elif path == "/diag/abort":
+                self.fc.state["diag"] = {"running": False}
+            return None
+        self.fc.on_post = on_post
+
+    def test_an_armed_window_is_ended_before_anything_is_waited_for(self):
+        # Emission first, then motion: the window a run left open is ended
+        # at once, before the diagnostic it also left is waited on.
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["cool"] = {"phase": "run", "armed": True, "hold": False}
+        self.fc.state["diag"] = {"running": True, "tool": "fans"}
+        self.restarts()
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        paths = [p for p, _ in self.fc.posts]
+        self.assertLess(paths.index("/controller/stop"), paths.index("/diag/abort"))
+        self.assertTrue(left["cool.armed"].action.startswith("restored"), left["cool.armed"])
+
+    def test_a_job_still_moving_is_stood_down_before_anything_is_waited_on(self):
+        # with a controller running, the motion is a job's: motion verified,
+        # or the probe skipped (motors released), which /mode reports unverified
+        self.clocked()
+        for motion in ("verified", "unverified"):
+            with self.subTest(motion=motion):
+                self.lamp_at_idle()
+                self.fc.posts.clear()
+                self.fc.state["mode"] = dict(self.fc.state["mode"], controller="running", motion=motion)
+                self.fc.state["status"]["state"] = "running"
+                self.fc.state["diag"] = {"running": True, "tool": "fans"}
+                self.restarts(on_stop=lambda: self.fc.state["status"].__setitem__("state", "idle"))
+                left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+                paths = [p for p, _ in self.fc.posts]
+                self.assertIn("state", left)
+                self.assertLess(paths.index("/controller/stop"), paths.index("/diag/abort"))
+
+    def test_a_supervisor_still_starting_has_its_own_motion_waited_out(self):
+        # no controller yet: the liveness probe and the lens sweep move the
+        # head for 40 s, longer than a job is given to reach idle, and that is
+        # the supervisor's own work, not a job to stand down
+        clock = self.clocked()
+        self.lamp_at_idle()
+        up = clock.t + 40
+
+        def on_get(path, q):
+            starting = clock.t < up
+            if path == "/mode":
+                return 200, dict(self.fc.state["mode"], controller="stopped" if starting else "running",
+                                 motion="unverified" if starting else "verified")
+            if path == "/status":
+                return 200, dict(self.fc.state["status"], state="running" if starting else "idle")
+            return None
+        self.fc.on_get = on_get
+        self.restarts()
+        self.bl().enforce("post", captured=None)
+        self.assertNotIn("/controller/stop", [p for p, _ in self.fc.posts])
+
+    def test_a_read_that_decides_whether_a_job_is_there_fails_closed(self):
+        # an armed window the cooling engine's report never shows (an error
+        # status on every read), and a job still moving whose state read at
+        # the stand-down check times out: each read says nothing, and the
+        # machine is stood down as if the job were there
+        self.clocked()
+        with self.subTest(missed="/cool/status"):
+            self.lamp_at_idle()
+            self.fc.state["cool"] = {"phase": "run", "armed": True, "hold": False}
+            self.fc.state["diag"] = {"running": True, "tool": "fans"}
+            self.restarts()
+            self.fc.on_get = lambda path, q: (503, {"error": "busy"}) if path == "/cool/status" else None
+            self.bl().enforce("post", captured=None)
+            paths = [p for p, _ in self.fc.posts]
+            self.assertLess(paths.index("/controller/stop"), paths.index("/diag/abort"))     # before the waits
+        with self.subTest(missed="/status"):
+            self.fc.posts.clear()
+            self.fc.state["cool"] = {"phase": "idle", "armed": False, "hold": False}
+            self.fc.state["status"]["state"] = "running"
+            self.fc.state["diag"] = {"running": True, "tool": "fans"}
+            self.restarts(on_stop=lambda: self.fc.state["status"].__setitem__("state", "idle"))
+            reads = []
+
+            def on_get(path, q):
+                if path == "/status":
+                    reads.append(path)
+                    if len(reads) == 2:                  # the first is the latch's, the second the state's
+                        return 503, {"error": "busy"}
+                return None
+            self.fc.on_get = on_get
+            self.bl().enforce("post", captured=None)
+            paths = [p for p, _ in self.fc.posts]
+            self.assertLess(paths.index("/controller/stop"), paths.index("/diag/abort"))     # before the waits
+
+    def test_a_late_arm_behind_a_miss_is_stood_down_and_its_unlock_named_first(self):
+        # a client that arms after /status (a print still loading) and one
+        # request that times out: the cooling engine's read is silenced and
+        # stands the machine down as if armed. forgectrl's stop locks the
+        # latch, so the unlock is read, locked and named before the stop.
+        self.clocked()
+        self.lamp_at_idle()
+        self.restarts()
+        b = self.bl()
+        real = b.fc().get
+
+        def get(p, **kw):
+            if p == "/cam/status":
+                self._attr("cnc/laser_latch", "0")              # the client's unlock for the press
+                self._attr("cnc/interlock_circuit", "37")
+                self.fc.state["cool"] = {"phase": "run", "armed": True, "hold": False}
+                raise hw.HwError("forgectrl GET /cam/status: timed out")
+            return real(p, **kw)
+        b.fc().get = get
+        left = {x.item for x in b.enforce("post", captured=None)}
+        self.assertIn("/controller/stop", [p for p, _ in self.fc.posts])
+        self.assertEqual((self._read("cnc/laser_latch"), "laser_latch" in left), ("1", True))
+
+    def test_the_latch_is_read_before_every_controller_change_the_pass_makes(self):
+        # a client unlocks just before the supervisor branch acts: the mode
+        # handed back, a motion fault's restart, a start from standby. Each
+        # of them stops a controller or starts one, and forgectrl's exit locks
+        # the latch, so the unlock is named before the request.
+        self.clocked()
+        for case in ("a mode change", "a motion fault", "standby"):
+            with self.subTest(case):
+                self.lamp_at_idle()
+                self._attr("cnc/interlock_circuit", "45")
+                self.fc.state["mode"] = {"mode": "grbl", "pid": 7, "motion": "verified",
+                                         "controller": {"a motion fault": "motion-fault",
+                                                        "standby": "standby"}.get(case, "running")}
+                locked_at_request = []
+
+                def on_post(path, form):
+                    if path in ("/mode", "/controller/start"):
+                        locked_at_request.append(bool(hw.sysfs_int("cnc/interlock_circuit") & baseline.LATCH_BIT))
+                        self.fc.state["mode"].update(controller="running")
+                    return None
+                self.fc.on_post = on_post
+                self.fc.on_get = lambda path, q: (self._attr("cnc/interlock_circuit", "37")
+                                                  if path == "/diag/status" else None)
+                cap = {"mode": "cloud"} if case == "a mode change" else None
+                left = [x.item for x in self.bl().enforce("post", captured=cap)]
+                self.assertEqual((locked_at_request[:1], "laser_latch" in left), ([True], True))
+
+    def unlock_at_ext(self):
+        """The latch unlocked once, while the pass looks at the extensions:
+        after every forgectrl read, before the preserved state."""
+        real = baseline.Baseline._ext_side
+        done = []
+
+        def ext(bl, left):
+            if not done:
+                done.append(1)
+                self._attr("cnc/interlock_circuit", "37")
+            return real(bl, left)
+        p = mock.patch.object(baseline.Baseline, "_ext_side", ext)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_the_latch_is_read_before_a_settings_hand_back_that_restarts_the_controller(self):
+        # xy_microsteps written back under a running GRBL controller restarts
+        # it, and forgectrl's stop locks the latch: the unlock is locked and
+        # named before the write
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["settings"]["xy_microsteps"] = "16"
+        locked_at_write = []
+
+        def on_post(path, form):
+            if path == "/settings" and "xy_microsteps" in form:
+                locked_at_write.append(bool(hw.sysfs_int("cnc/interlock_circuit") & baseline.LATCH_BIT))
+            return None
+        self.fc.on_post = on_post
+        self.unlock_at_ext()
+        left = [x.item for x in self.bl().enforce("post", captured={"settings": {"xy_microsteps": "8"},
+                                                                    "mode": "grbl"})]
+        self.assertEqual((locked_at_write, "laser_latch" in left), ([True], True))
+
+    def test_the_latch_is_read_before_the_pass_connects_to_the_grbl_port(self):
+        # a connection ends another sender's window, and the controller then
+        # relocks: the settings write-back and the return jog read it first,
+        # the return right before it connects (an unlock while it waits for
+        # the controller)
+        self.clocked()
+        for case in ("settings", "return"):
+            with self.subTest(case):
+                self._attr("cnc/interlock_circuit", "45")
+                self._pos(0, 0, 0)
+                if case == "settings":
+                    dev, view, b, cap = self.grbl_view({"$12": "0.002"})
+                    view["$12"] = "0.01"
+                    self.unlock_at_ext()
+                else:
+                    dev = helpers.FakeGrbl().start()
+                    self.addCleanup(dev.stop)
+                    self.lamp_at_idle()
+                    self.fc.on_get = None
+                    b = self.bl()
+                    cap = b.capture()
+                    self._pos(round(4 * baseline.xy_steps_per_mm(baseline.XY_MODE_DEFAULT)), 0, 0)
+                    returning = []
+                    real = baseline.Baseline._return_head
+                    p = mock.patch.object(baseline.Baseline, "_return_head",
+                                          lambda bl, *a: (returning.append(1), real(bl, *a))[1])
+                    p.start()
+                    self.addCleanup(p.stop)
+                    self.fc.on_get = lambda path, q: (self._attr("cnc/interlock_circuit", "37")
+                                                      if path == "/mode" and returning == [1]
+                                                      and not returning.append(2) else None)
+                self.addCleanup(os.environ.pop, "GRBL_HOST", None)
+                self.addCleanup(os.environ.pop, "GRBL_PORT", None)
+                at_first_line = []
+                dev.on_command = lambda line: (at_first_line.append(
+                    bool(hw.sysfs_int("cnc/interlock_circuit") & baseline.LATCH_BIT)) if not at_first_line else None)
+                left = [x.item for x in b.enforce("post", captured=cap)]
+                self.assertEqual((at_first_line[:1], "laser_latch" in left), ([True], True))
+
+    def test_a_window_seen_after_the_cooling_engines_read_is_named_and_ended(self):
+        # the pump's read, the kernel side's read, and after it (with nothing
+        # to write back, so only the pass's last read sees it; named before a
+        # settings write-back that restarts nothing, and that last read
+        # answered or not, or on a pass forgectrl did not answer at its start
+        # and answered again by then): a window opening there is read again
+        # past the tick, named cool.armed once and stood down once, at the
+        # read that saw it (before the extensions and the preserved state) or
+        # by the end of the pass
+        clock = self.clocked()
+        # reads: 1 the armed-window check, 2 the cooling engine's, 3 the
+        # pump's, 4 the kernel side's; a re-read past the tick takes three
+        for site, armed_reads in (("the pump's read", {3, 4, 5, 6}), ("the kernel side's read", None),
+                                  ("after it, nothing to write back", None),
+                                  ("after the kernel side's read", None), ("after it, the last read unanswered", None),
+                                  ("after it, forgectrl silent at the start", None)):
+            with self.subTest(site):
+                self.lamp_at_idle()
+                self.fc.posts.clear()
+                self.restarts()
+                reads, late = [], []
+                silent = [1] if site.endswith("at the start") else []
+                cap = None
+                if site.startswith("after") and not site.endswith("nothing to write back"):
+                    self.fc.state["settings"]["some_setting"] = "2"          # the run changed it
+                    cap = {"settings": {"some_setting": "1"}, "mode": "grbl"}
+
+                def on_get(path, q, armed_reads=armed_reads, site=site, silent=silent):
+                    if path == "/mode" and silent:
+                        silent.pop()                        # the pass's wait for forgectrl
+                        return 503, {"error": "busy"}
+                    if path == "/cool/status":
+                        reads.append(path)
+                        n = len(reads)
+                        stopped = "/controller/stop" in [p for p, _ in self.fc.posts]
+                        if late and site.endswith("unanswered"):
+                            late.append(n)
+                            if len(late) == 3:                  # the naming read is the first after it
+                                return 503, {"error": "busy"}
+                        armed = ((n in armed_reads) if armed_reads else (bool(late) if site.startswith("after")
+                                                                         else n >= 4) and not stopped)
+                        if armed:
+                            return 200, {"phase": "run", "armed": True, "hold": False}
+                    return None
+                self.fc.on_get = on_get
+                real = baseline.Baseline._ext_side
+                stops = lambda: [p for p, _ in self.fc.posts].count("/controller/stop")      # noqa: E731
+                at_ext = []
+                # on the silent pass, forgectrl's silence has run out by then
+                wait = baseline.FC_SILENCE_S + 1 if site.endswith("at the start") else 0
+                with mock.patch.object(baseline.Baseline, "_ext_side",
+                                       lambda bl, left: (at_ext.append(stops()), late.append(1), clock.sleep(wait),
+                                                         real(bl, left))[3]):
+                    left = self.bl().enforce("post", captured=cap)
+                self.assertEqual([x.action.split(" ")[0] for x in left if x.item == "cool.armed"], ["restored"])
+                self.assertEqual((at_ext, stops()), ([0 if site.startswith("after") else 1], 1))
+
+    def test_a_window_open_when_the_pass_ends_a_controller_is_named_first(self):
+        # a window that opens while the pass waits for a job to reach idle:
+        # the stand-down that ends both reads it first, and the pass's last
+        # read of the window says it ended
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["status"]["state"] = "running"
+        self.restarts(on_stop=lambda: self.fc.state["status"].__setitem__("state", "idle"))
+        reads = []
+
+        def on_get(path, q):
+            if path == "/cool/status":
+                reads.append(path)
+                stopped = "/controller/stop" in [p for p, _ in self.fc.posts]
+                if len(reads) > 1 and not stopped:
+                    return 200, {"phase": "run", "armed": True, "hold": False}
+            return None
+        self.fc.on_get = on_get
+        left = self.bl().enforce("post", captured=None)
+        self.assertEqual([x.action.split(" ")[0] for x in left if x.item == "cool.armed"], ["ended"])
+
+    def test_a_mode_switch_reads_the_latch_before_it(self):
+        # before the switch, and before its probe of the Grbl port, whose
+        # connection ends another sender's window (the controller relocks)
+        self.clocked()
+        self.lamp_at_idle()
+        b = self.bl()
+        self._attr("cnc/interlock_circuit", "37")               # unlocked after the pass
+        b.switch_mode("cloud")
+        self.assertEqual([x.item for x in b.switch_found], ["laser_latch"])
+        b = self.bl()
+        real = b.wait_settled
+        b.wait_settled = lambda **kw: (real(**kw), self._attr("cnc/interlock_circuit", "37"))[0]
+        with mock.patch.object(hw, "grbl_port_open", lambda timeout=5: helpers.supervisor_locks() or True):
+            b.switch_mode("grbl")
+        self.assertEqual([x.item for x in b.switch_found], ["laser_latch"])
+
+    def test_a_safety_finding_the_runner_cannot_take_never_breaks_the_pass(self):
+        def refuses(found):
+            raise RuntimeError("no room for the record")
+        self._attr("cnc/interlock_circuit", "37")
+        left = baseline.Baseline(self.lines.append, on_safety=refuses).enforce("post", captured=None)
+        self.assertIn("laser_latch", [x.item for x in left])
+
+    def test_a_miss_while_waiting_for_a_hold_stands_the_machine_down_at_once(self):
+        # the engine holds, and a read in the wait times out: a window could
+        # open behind the silence, so the machine is stood down at the miss,
+        # and the hold, read before it, is still judged the run's
+        clock = self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["cool"] = {"phase": "idle", "armed": False, "hold": True}
+        stops = []
+        self.restarts(on_stop=lambda: stops.append(clock.t))
+        b = self.bl()
+        real = b.fc().get
+        missed = []
+        t0 = clock.t
+
+        def get(p, **kw):
+            if p == "/cool/status" and clock.t >= t0 + 5 and not missed:
+                missed.append(clock.t)
+                raise hw.HwError("forgectrl GET /cool/status: timed out")
+            return real(p, **kw)
+        b.fc().get = get
+        left = b.enforce("post", captured=None)
+        self.assertTrue(stops and missed)
+        self.assertLessEqual(stops[0] - missed[0], 1.0)
+        self.assertEqual([x.judged() for x in left if x.item == "cool"], [True])
+
+    def test_a_fresh_miss_after_a_stand_down_settled_stands_the_machine_down_again(self):
+        # an armed window stood down, then the cooling engine's read answers
+        # an error: asked after the stand-down settled, that read says nothing
+        # of a window opening since, and the machine is stood down again
+        self.clocked()
+        for kind in ("an error status", "a timeout"):
+            with self.subTest(kind):
+                self.lamp_at_idle()
+                self.fc.state["cool"] = {"phase": "run", "armed": True, "hold": False}
+                stops, after = [], []
+                self.restarts(on_stop=lambda stops=stops: stops.append(1))
+                b = self.bl()
+                real = b.fc().get
+
+                def get(p, kind=kind, stops=stops, after=after, **kw):
+                    if p == "/cool/status" and stops:
+                        after.append(p)
+                        if len(after) == 2:         # the first is the stand-down's own; this is the engine's
+                            if kind == "a timeout":
+                                raise hw.HwError("forgectrl GET /cool/status: timed out")
+                            return 503, {"error": "busy"}
+                    return real(p, **kw)
+                b.fc().get = get
+                b.enforce("post", captured=None)
+                self.assertEqual(len(stops), 2)
+
+    def test_the_stand_downs_own_misses_stand_nothing_down_again(self):
+        # the stand-down's own /mode read times out, which silences forgectrl:
+        # the reads the silence turns away after it settled are no fresh miss
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["cool"] = {"phase": "run", "armed": True, "hold": False}
+        stops = []
+        self.restarts(on_stop=lambda: stops.append(1))
+        b = self.bl()
+        real = b.fc().get
+        missed = []
+
+        def get(p, **kw):
+            if p == "/mode" and stops and not missed:
+                missed.append(p)
+                raise hw.HwError("forgectrl GET /mode: timed out")
+            return real(p, **kw)
+        b.fc().get = get
+        b.enforce("post", captured=None)
+        self.assertEqual((len(stops), missed), (1, ["/mode"]))
+
+    def test_a_supervisor_unanswered_past_a_settle_is_judged_on_its_next_answer(self):
+        # forgectrl busy for 11 s after the stand-down's start: the settle
+        # gives up, the one read past the silence too, and the supervisor is
+        # read again before it is judged: running, and the client is started
+        # once; standby (the stand-down's start never landed), and it is
+        # started again
+        clock = self.clocked()
+        marker = os.path.join(self.tmp, "nohunt-marker")
+        p = mock.patch.object(baseline, "NOHUNT_MARKER", marker)
+        p.start()
+        self.addCleanup(p.stop)
+        for found, n in (("running", 1), ("standby", 2)):
+            with self.subTest(found):
+                self.lamp_at_idle()
+                self.cloud()
+                self.fc.state["mode"]["controller"] = "standby"
+                starts = []
+
+                def on_post(path, form, found=found, starts=starts):
+                    if path == "/controller/start":
+                        starts.append(clock.t)
+                        if found == "standby" and len(starts) == 1:
+                            return None                     # the stand-down's start never lands
+                        if self.fc.state["mode"]["controller"] != "running":
+                            if os.path.exists(marker):
+                                os.remove(marker)
+                            self.fc.state["mode"] = dict(self.fc.state["mode"], controller="running")
+                    elif path == "/controller/stop":
+                        self.fc.state["mode"] = dict(self.fc.state["mode"], controller="standby")
+                    return None
+                self.fc.on_post = on_post
+                missed = []
+                self.fc.on_get = lambda path, q, missed=missed: ((missed.append(path) or (503, {"error": "busy"}))
+                                                                 if path == "/cool/status" and not missed else None)
+                b = self.bl()
+                real = b.fc().get
+
+                def get(path, starts=starts, real=real, **kw):
+                    if path == "/mode" and starts and clock.t < starts[0] + 11:
+                        raise hw.HwError("forgectrl GET /mode: timed out")
+                    return real(path, **kw)
+                b.fc().get = get
+                b.enforce("post", captured=None)
+                self.assertEqual((len(starts), os.path.exists(marker)), (n, False))
+
+    def test_a_settle_cut_short_reads_the_mode_again_before_any_start(self):
+        # an Abort ends the stand-down's settle at once, after a read that
+        # timed out silenced forgectrl: the supervisor branch judges the mode
+        # read after it, past the silence, so the client is started once and
+        # the no-hunt marker goes with that start
+        self.clocked()
+        self.lamp_at_idle()
+        marker = os.path.join(self.tmp, "nohunt-marker")
+        p = mock.patch.object(baseline, "NOHUNT_MARKER", marker)
+        p.start()
+        self.addCleanup(p.stop)
+        self.cloud()
+        self.fc.state["mode"]["controller"] = "standby"
+        starts = []
+
+        def on_post(path, form):
+            if path == "/controller/start":
+                starts.append(path)
+                if self.fc.state["mode"]["controller"] != "running":
+                    if os.path.exists(marker):
+                        os.remove(marker)
+                    self.fc.state["mode"] = dict(self.fc.state["mode"], controller="running")
+            return None
+        self.fc.on_post = on_post
+        b = baseline.Baseline(self.lines.append, abort=lambda: True)
+        real = b.fc().get
+        missed = []
+
+        def get(path, **kw):
+            if path == "/cool/status" and not missed:
+                missed.append(path)
+                raise hw.HwError("forgectrl GET /cool/status: timed out")
+            return real(path, **kw)
+        b.fc().get = get
+        left = [x.item for x in b.enforce("post", captured=None)]
+        self.assertEqual((len(starts), os.path.exists(marker), "controller" in left), (1, False, False))
+
+    def test_a_window_that_arms_during_a_hold_is_stopped_within_a_tick(self):
+        # the engine holds at the pass, and a client opens its session in the
+        # wait for the hold to clear: it is a job, stood down at once
+        clock = self.clocked()
+        self.lamp_at_idle()
+        arm_at = clock.t + 10
+        stops, shown = [], []
+
+        def on_get(path, q):
+            # the window shows at one read of the wait: it is named from that
+            # read, before the stand-down that ends it reads anything
+            if path == "/cool/status":
+                if stops or shown:
+                    return 200, {"phase": "idle", "armed": False, "hold": False}
+                if clock.t < arm_at:
+                    return 200, {"phase": "idle", "armed": False, "hold": True}
+                shown.append(clock.t)
+                return 200, {"phase": "run", "armed": True, "hold": False}
+            return None
+        self.fc.on_get = on_get
+        self.restarts(on_stop=lambda: stops.append(clock.t))
+        left = [x.item for x in self.bl().enforce("post", captured=None)]
+        self.assertTrue(stops)
+        self.assertLessEqual(stops[0] - arm_at, baseline.COOL_PUBLISH_S)
+        self.assertIn("cool.armed", left)
+
+    def test_after_a_stand_down_the_supervisor_is_judged_where_it_settled(self):
+        # cloud mode with the controller in standby (a failing print's stop),
+        # and a stand-down: the client is started once, and the no-hunt
+        # marker that start was made under is gone with it
+        self.clocked()
+        self.lamp_at_idle()
+        marker = os.path.join(self.tmp, "nohunt-marker")
+        p = mock.patch.object(baseline, "NOHUNT_MARKER", marker)
+        p.start()
+        self.addCleanup(p.stop)
+        self.cloud()
+        self.fc.state["mode"]["controller"] = "standby"
+        starts = []
+
+        def on_post(path, form):
+            if path == "/controller/start":
+                starts.append(path)
+                if self.fc.state["mode"]["controller"] != "running":     # a client spawns, takes the marker
+                    if os.path.exists(marker):
+                        os.remove(marker)
+                    self.fc.state["mode"] = dict(self.fc.state["mode"], controller="running")
+            return None
+        self.fc.on_post = on_post
+        missed = []
+        self.fc.on_get = lambda path, q: ((missed.append(path) or (503, {"error": "busy"}))
+                                          if path == "/cool/status" and not missed else None)
+        self.bl().enforce("post", captured=None)
+        self.assertEqual((len(starts), os.path.exists(marker)), (1, False))
+
+    def test_a_stand_down_whose_start_is_refused_is_named(self):
+        # a job still moving, and the start after the stand-down refused (a
+        # lease): the supervisor is judged in the standby it was left in
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["status"]["state"] = "running"
+
+        def on_post(path, form):
+            if path == "/controller/stop":
+                self.fc.state["mode"] = dict(self.fc.state["mode"], controller="standby")
+                self.fc.state["status"]["state"] = "idle"
+            elif path == "/controller/start":
+                return 409, {"error": "leased"}
+            return None
+        self.fc.on_post = on_post
+        left = {x.item for x in self.bl().enforce("post", captured=None)}
+        self.assertIn("controller", left)
+
+    def test_no_controller_value_is_written_under_a_program_still_playing(self):
+        self.clocked()
+        self.lamp_at_idle()
+        self._attr("cnc/state", "running")
+        self._attr("cnc/motor_lock", "15")
+        self.bl().enforce("post", captured=None)
+        self.assertEqual(self._read("cnc/motor_lock"), "15")
+
+    def test_an_armed_window_is_stopped_with_every_later_mode_read_unanswered(self):
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["cool"] = {"phase": "run", "armed": True, "hold": False}
+        self.restarts()
+        b = self.bl()
+        real = b.fc().get
+        reads = []
+
+        def get(p, **kw):
+            if p == "/mode":
+                reads.append(p)
+                if len(reads) > 1:
+                    raise hw.HwError("forgectrl GET /mode: timed out")
+            return real(p, **kw)
+        b.fc().get = get
+        b.enforce("post", captured=None)
+        self.assertIn("/controller/stop", [p for p, _ in self.fc.posts])
+
+    def test_a_job_moving_after_the_supervisor_settles_is_stood_down(self):
+        clock = self.clocked()
+        self.lamp_at_idle()
+        up = clock.t + 10
+
+        def on_get(path, q):
+            if path == "/mode":
+                starting = clock.t < up
+                return 200, dict(self.fc.state["mode"], controller="stopped" if starting else "running",
+                                 motion="unverified" if starting else "verified")
+            return None
+        self.fc.on_get = on_get
+        self.fc.state["status"]["state"] = "running"
+        self.restarts(on_stop=lambda: self.fc.state["status"].__setitem__("state", "idle"))
+        self.bl().enforce("post", captured=None)
+        self.assertIn("/controller/stop", [p for p, _ in self.fc.posts])
+
+    def test_a_window_that_arms_after_the_first_read_is_stopped_within_a_tick(self):
+        # a print still loading when the run ended arms after the pass's
+        # first look: it is a job, and waiting does not end it
+        clock = self.clocked()
+        self.lamp_at_idle()
+        reads = []
+
+        def on_get(path, q):
+            # 1 the armed-window check; 2 the cooling engine's read and 3-5
+            # its re-reads past the tick show the window; it is named from
+            # those, before the stand-down that ends it reads anything
+            if path == "/cool/status":
+                reads.append(clock.t)
+                armed = 2 <= len(reads) <= 5 and self.fc.state["cool"].get("phase") != "idle"
+                return 200, {"phase": "run" if armed else "idle", "armed": armed, "hold": False}
+            return None
+        self.fc.state["cool"] = {"phase": "run"}
+        self.fc.on_get = on_get
+        stops = []
+        self.restarts(on_stop=lambda: stops.append(clock.t))
+        t0 = clock.t
+        left = [x.item for x in self.bl().enforce("post", captured=None)]
+        self.assertTrue(stops)
+        self.assertLessEqual(stops[0] - t0, baseline.COOL_PUBLISH_S + 1.0)
+        self.assertIn("cool.armed", left)
+
+    def test_an_unanswered_reread_of_an_armed_window_is_no_disarm(self):
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["cool"] = {"phase": "run", "armed": True, "hold": False}
+        self.restarts()
+        b = self.bl()
+        real = b.fc().get
+        reads = []
+
+        def get(path, **kw):
+            if path == "/cool/status":
+                reads.append(path)
+                if len(reads) == 2:
+                    raise hw.HwError("forgectrl GET /cool/status: timed out")
+            return real(path, **kw)
+        b.fc().get = get
+        left = {x.item for x in b.enforce("post", captured=None)}
+        self.assertIn("/controller/stop", [p for p, _ in self.fc.posts])
+        self.assertIn("cool.armed", left)               # the window is named, not taken for closed
+
+    def test_a_stand_down_in_cloud_mode_brings_the_client_back_without_the_hunt(self):
+        self.clocked()
+        for refuse in (False, True):
+            with self.subTest(refused=refuse):
+                seen = self.nohunt_marker(refuse=refuse)
+                self.cloud()
+                self.fc.state["status"]["state"] = "running"         # a print still playing at the post pass
+                self.bl().enforce("post", captured=None)
+                self.assertIn(("/controller/start", {}, True), seen)
+                # a refused start takes its marker down: the next start is not the baseline's
+                self.assertFalse(os.path.exists(baseline.NOHUNT_MARKER))
+
+    def test_a_hold_in_the_idle_phase_is_a_leftover(self):
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["cool"] = {"phase": "idle", "armed": False, "hold": True}
+        self.restarts()
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertEqual(left["cool"].found, "idle/armed=False/hold=True")
+
+    def test_a_hold_that_clears_in_the_cooldown_wait_is_still_the_runs(self):
+        clock = self.clocked()
+        self.lamp_at_idle()
+        clears = clock.t + 10                 # past the engine's publish tick, inside the cooldown wait
+        self.fc.on_get = lambda path, q: ((200, {"phase": "idle", "armed": False, "hold": clock.t < clears})
+                                          if path == "/cool/status" else None)
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertEqual(left["cool"].action, "waited")
+
+    def test_an_underrun_the_hand_back_acknowledged_is_a_leftover(self):
+        self.clocked()
+        self.lamp_at_idle()
+        acked = lambda: os.path.exists(self.sysfs + "cnc/stop")      # noqa: E731
+        self.fc.on_get = lambda path, q: ((200, dict(self.fc.state["status"],
+                                                     state="idle" if acked() else "underrun"))
+                                          if path == "/status" else None)
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertEqual((left["state"].found, left["state"].action), ("underrun", "waited"))
+        self.assertEqual(self._read("cnc/stop"), "1")
+
+    def test_forgectrls_reading_of_an_unlocked_latch_relocks_it(self):
+        # the only latch check when the kernel's word cannot be read, and the
+        # first to see a controller that unlocks after the pass's own lock
+        self.lamp_at_idle()
+        self.fc.state["status"]["laser_locked"] = False
+        unlocked, at_the_waits = [], []
+
+        def on_get(path, q):
+            if path == "/status" and not unlocked:
+                unlocked.append(1)
+                self._attr("cnc/laser_latch", "0")              # the controller unlocks after the pass's lock
+            elif path == "/diag/status":
+                at_the_waits.append(self._read("cnc/laser_latch"))
+            return None
+        self.fc.on_get = on_get
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertIn("laser_locked", left)
+        self.assertEqual(at_the_waits[:1], ["1"])               # locked again before the waits, not at the end
+
+    def test_a_diagnostic_left_running_is_aborted_and_named(self):
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["diag"] = {"running": True, "tool": "fans"}
+        self.restarts()
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertEqual((left["diag"].found, left["diag"].action), ("fans", "aborted"))
+
+    def test_a_camera_engine_still_running_is_a_leftover(self):
+        self.clocked()
+        self.lamp_at_idle()
+        self.fc.state["cam"] = {"running": True, "clients": 1}
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertTrue(left["cam.running"].action.startswith("failed"))
+
+    def test_a_setting_the_run_changed_is_written_back_and_named(self):
+        self.lamp_at_idle()
+        self.fc.state["settings"]["cool_max_c"] = "30"
+        b = self.bl()
+        cap = b.capture()
+        self.fc.state["settings"]["cool_max_c"] = "40"
+        left = {x.item: x for x in b.enforce("post", captured=cap)}
+        self.assertEqual((left["settings.cool_max_c"].found, left["settings.cool_max_c"].action), ("40", "restored"))
+        self.assertIn(("/settings", {"cool_max_c": "30"}), self.fc.posts)
+
+    def test_a_pump_left_off_at_idle_is_switched_on(self):
+        # Nothing re-asserts the pump per tick, and no fire gate reads it.
+        self.lamp_at_idle()
+        self._attr("thermal/water_pump_on", "0")
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertEqual(left["thermal/water_pump_on"].action, "restored")
+        self.assertEqual(self._read("thermal/water_pump_on"), "1")
+
+    def test_a_quiet_hold_left_standing_is_released(self):
+        self.lamp_at_idle()
+        self.fc.state["cool"] = {"phase": "idle", "armed": False, "hold": False, "quiet_hold": True}
+
+        def on_post(path, form):
+            if path == "/cool/quiet" and form.get("on") == "0":
+                self.fc.state["cool"] = dict(self.fc.state["cool"], quiet_hold=False)
+            return None
+        self.fc.on_post = on_post
+        left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertTrue(left["cool.quiet_hold"].action.startswith("restored"), left["cool.quiet_hold"])
+
+    def test_the_lamp_holds_only_on_two_reads_in_a_row(self):
+        # a fade passing through the level once is not the level held
+        reads = iter(["240", "200"] * 5)
+        with mock.patch.object(hw, "sysfs_read", lambda attr, default=None: next(reads)):
+            self.assertFalse(self.bl()._lamp_holds("240")[0])
+
+    def test_the_controllers_settings_are_handed_back_by_their_kind(self):
+        # $12 is put back through the port; a laser setting is named and not
+        # written; $100, derived from xy_microsteps, is not judged here.
+        # $63 is pinned: named, not written
+        dev, view, b, cap = self.grbl_view({"$12": "0.002", "$30": "1000", "$32": "1", "$63": "3",
+                                            "$100": "213.333", "$110": "12000"})
+        self.assertEqual(cap["grbl"], view)
+        view.update({"$12": "0.01", "$30": "500", "$32": "0", "$63": "1", "$100": "53.333", "$110": "6000"})
+        left = {x.item: x for x in b.enforce("post", captured=cap)}
+        self.assertEqual(sorted(k for k in left if k.startswith("grbl.")),
+                         ["grbl.$110", "grbl.$12", "grbl.$30", "grbl.$32", "grbl.$63"])
+        self.assertEqual(sorted(ln for ln in dev.sent if "=" in ln), ["$110=12000", "$12=0.002"])
+
+    def grbl_view(self, view):
+        """A GRBL controller whose $$ view forgectrl serves from `view`, its
+        port a fake, and the capture taken."""
+        dev = helpers.FakeGrbl().start()
+        self.addCleanup(dev.stop)
+        self.lamp_at_idle()
+        self.fc.on_get = lambda path, q: ((200, "".join("%s=%s\r\n" % kv for kv in view.items()).encode(),
+                                           "text/plain") if path == "/grbl/settings" else None)
+        b = self.bl()
+        return dev, view, b, b.capture()
+
+    def test_a_setting_the_port_does_not_keep_is_a_failed_restore(self):
+        dev, view, b, cap = self.grbl_view({"$12": "0.002"})
+        dev.pinned = {"$12": "0.01"}                        # the write answers ok and does not stick
+        view["$12"] = "0.01"
+        left = {x.item: x for x in b.enforce("post", captured=cap)}
+        self.assertTrue(left["grbl.$12"].action.startswith("failed"), left["grbl.$12"])
+
+    def test_the_settings_are_compared_only_while_the_grbl_controller_runs(self):
+        dev, view, b, cap = self.grbl_view({"$12": "0.002"})
+        view["$12"] = "0.01"
+        self.cloud()                                        # a cloud test the run declared
+        cap["mode"] = "cloud"
+        left = {x.item for x in b.enforce("post", captured=cap)}
+        self.assertNotIn("grbl.$12", left)
+        self.assertEqual([ln for ln in dev.sent if "=" in ln], [])
+
+    def test_the_pump_is_the_engines_outside_its_idle_posture(self):
+        # a cooldown runs it as the engine chooses, and a diagnostic as the
+        # tool does: the hand-back leaves it to them
+        self.clocked()
+        self.lamp_at_idle()
+        for cool, diag in (({"phase": "cooldown", "armed": False, "hold": False}, {"running": False}),
+                           ({"phase": "idle", "armed": False, "hold": False}, {"running": True, "tool": "pump"})):
+            with self.subTest(cool=cool["phase"], diag=diag["running"]):
+                self._attr("thermal/water_pump_on", "0")
+                self.fc.state["cool"], self.fc.state["diag"] = cool, diag
+                self.fc.on_post = lambda path, form: (200, {"ok": True})     # the diagnostic does not stop
+                self.bl().enforce("post", captured=None)
+                self.assertEqual(self._read("thermal/water_pump_on"), "0")
+
+    def test_a_pump_write_that_does_not_take_is_a_failed_restore(self):
+        self.lamp_at_idle()
+        self._attr("thermal/water_pump_on", "0")
+        real = hw.sysfs_write
+        with mock.patch.object(hw, "sysfs_write",
+                               lambda attr, value: None if attr == baseline.PUMP_ATTR else real(attr, value)):
+            left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertTrue(left[baseline.PUMP_ATTR].action.startswith("failed"), left[baseline.PUMP_ATTR])
 
     def nohunt_marker(self, refuse=False):
         """The no-hunt marker under the fake tree; what each POST found.

@@ -181,6 +181,12 @@ class CloudSuiteTests(unittest.TestCase):
         cloud.EMULATE_MARKER = os.path.join(self.tmp, "emulate-marker")
         cloud.EMULATOR_WORK = os.path.join(self.tmp, "emu-work")
         cloud.NOHUNT_MARKER = os.path.join(self.tmp, "nohunt-marker")
+        # the bounds on ending a print a failing test leaves: the fakes do
+        # not relock unless a test says so, so a wait here is the whole bound
+        for name in ("PARK_END_S", "STOP_END_S"):
+            p = mock.patch.object(cloud, name, 1.0)
+            p.start()
+            self.addCleanup(p.stop)
         FakeOffline.sent = []
         FakeOffline.on_send = None
         cloud.QUIET_S = 0.4
@@ -359,6 +365,29 @@ class CloudSuiteTests(unittest.TestCase):
         _, run = cut(rest, "machine:_run_loop starting run")
         run = [l for l in run if "paus" not in l and "resum" not in l]
         return pre, run
+
+    def test_a_print_a_failing_test_leaves_is_ended_before_the_failure_goes_on(self):
+        # The offline print: the service's cancel, never a press (a press
+        # during a pause resumes the print), and no stop once the cancel
+        # parked it; a cancel that did not end it, the controller's stop.
+        # The app's print: the controller's stop.
+        ctx = Context(Run("test", "cloud.x", "cloud.x"), None, helpers.make_test("cloud.x", []))
+        relock = lambda: self._attr("cnc/interlock_circuit", "45")             # noqa: E731
+        FakeOffline.on_send = lambda msg: relock() if msg.get("status") == "cancelled" else None
+        self._attr("cnc/interlock_circuit", "37")                             # the print's latch, unlocked
+        off = FakeOffline()
+        off.current = 9001
+        cloud.end_print(ctx, off)
+        self.assertEqual(FakeOffline.sent, [{"id": 9001, "action_type": "print", "status": "cancelled"}])
+        self.assertNotIn("/controller/stop", [p for p, _ in self.fc.posts])
+        self.fc.on_post = lambda path, form: relock() if path == "/controller/stop" else None
+        FakeOffline.on_send = None                                            # the cancel ends nothing
+        self._attr("cnc/interlock_circuit", "37")
+        cloud.end_print(ctx, off)
+        self.assertEqual([p for p, _ in self.fc.posts], ["/controller/stop"])
+        self._attr("cnc/interlock_circuit", "37")
+        cloud.end_print(ctx)
+        self.assertEqual([p for p, _ in self.fc.posts], ["/controller/stop", "/controller/stop"])
 
     def test_dark_print_fails_when_the_latch_is_locked_at_the_button(self):
         # The press is asked for with the lock still held (setUp's state):
@@ -586,6 +615,32 @@ class ArmedFreezeJudgeTests(unittest.TestCase):
     def test_a_freeze_in_place_before_the_run_passes(self):
         ctx = self.judge()
         self.assertGreater(ctx.evidence["freeze_led_the_run_s"], 0)
+
+    PUT_BACK = staticmethod(exthost._put_back)          # setUp stands it in
+
+    def test_a_put_back_whose_takeover_is_refused_names_the_record(self):
+        # nothing after the put-back judges the setup record: a takeover that
+        # refuses (a window still armed) writes nothing, and the record is
+        # named for the hand-back, unless the one on disk is the one found
+        for raw, named_now in (("the record found", ["setup record"]), ("record", [])):
+            with self.subTest(raw=raw):
+                named = []
+
+                class Refused:
+                    def __enter__(self):
+                        raise Failed("takeover: refused")
+
+                    def __exit__(self, *a):
+                        return False
+
+                    def _leftover(self, item, *a):
+                        named.append(item)
+                ctx = Ctx()
+                ctx.takeover = Refused
+                fc = types.SimpleNamespace(post=lambda *a, **k: (200, {}))
+                with self.assertRaises(Failed):
+                    self.PUT_BACK(ctx, fc, os.path.join(self.tmp, "work"), "1", "e1", raw, 0o755)
+                self.assertEqual(named, named_now)        # the record on disk reads "record" (setUp)
 
     def test_a_run_that_starts_before_the_freeze_fails(self):
         self.spans.update(frozen=(1006.5, 1026.0), running=(1005.2, 1024.0))

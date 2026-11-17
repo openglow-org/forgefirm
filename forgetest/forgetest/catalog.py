@@ -153,12 +153,14 @@ def source_file_sha(path):
 # behind it (hw.py), and the fresh-boot idle state judged around every
 # run (baseline.py). puls.py is the dark job the cloud and extension
 # tests print: suite/cloud.py imports it from the package (`from .. import
-# puls`), an import the sibling walk does not follow. Their text joins
-# every implementation hash: a change to one of them moves every test.
-# The rest of the package (the server, the page, the campaign rules, the
-# artifact, the manifest, this registry, the bench actuator) judges
-# nothing about the machine and stays out.
-SHARED_JUDGES = ("baseline.py", "hw.py", "puls.py", "runner.py")
+# puls`), an import the sibling walk does not follow. The runner reaches
+# two more on every run: the bench actuator (fixture.py), which makes a
+# test's presses and actions, and the result log (log.py), which is how a
+# result lands. Their text joins every implementation hash: a change to
+# one of them moves every test. The rest of the package (the server, the
+# page, the campaign rules, the artifact, the manifest, this registry)
+# judges nothing about the machine and stays out.
+SHARED_JUDGES = ("baseline.py", "fixture.py", "hw.py", "log.py", "puls.py", "runner.py")
 
 
 def shared_judge_paths():

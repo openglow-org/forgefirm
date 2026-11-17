@@ -168,6 +168,7 @@ function updateGroups(){if(!rowEls||!state)return;var busy=isBusy();
   if(pendingId===t.id&&isBusy()&&!state.running){st="<span class='st running'>starting&hellip;</span>"}
   else{st="<span class='st "+esc(s.status)+"'>"+esc(s.status||'none')+"</span>";
    if(s.required&&s.status!=='running')st+="<br><span class='req'>required: "+esc(s.reason)+"</span>";
+   if(s.leftover&&!s.leftover.answered)st+="<br><span class='tid'>leftover found after it: "+esc(s.leftover.message)+"</span>";
    if(s.reason==='disposition'&&!busy)st+="<br><a href='#' onclick='doDispose(\""+esc(t.id)+"\");return false'>record a disposition</a>"}
   if(queued[t.id])st+="<br><span class='tag queued'>queued</span>";
   setHtml(e.st,st);
@@ -181,7 +182,7 @@ function updateGroups(){if(!rowEls||!state)return;var busy=isBusy();
   setHtml(e.unmet,unmet?((ignoreReq?'unmet: ':'needs: ')+esc((s.missing_requires||[]).join(', '))):'');
   setHtml(e.note,rowMsg[t.id]?"<div class='err'>"+esc(rowMsg[t.id])+"</div>":'');
   setHtml(e.detdyn,"<b>Fingerprint:</b> <span class='mono'>"+esc((s.fingerprint||'').slice(0,16))+"</span> &middot; est. "+esc(t.est_min)+" min"+
-   (s.last?"<br><a href='/result?test="+encodeURIComponent(t.id)+"&ts="+encodeURIComponent(s.last.ts)+"'>last result record</a>":''))})}
+   (s.last&&!s.last.lost?"<br><a href='/result?test="+encodeURIComponent(t.id)+"&ts="+encodeURIComponent(s.last.ts)+"'>last result record</a>":''))})}
 function toggleDet(id){openDetails[id]=!openDetails[id];var e=$('det-'+id);if(e)e.className='details'+(openDetails[id]?' on':'')}
 function renderRun(){var r=state.running||state.last_run;var key=r?(r.kind+':'+r.id+':'+r.started):null;
  if(key!==lastRunKey)abortSent=false;

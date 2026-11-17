@@ -210,7 +210,9 @@ def fail_tier_stop(ctx):
         ctx.check(ctx.wait_for(lambda: hw.button_lit() is False, 5) is not None,
                   "the button is still lit after the acknowledgment")
     finally:
-        fc.wait_idle(30, abort=ctx.aborted)
+        # Not abort-aware: on an Abort the wait would raise at once and the
+        # thresholds would stay at 1. The settings take a write at rest.
+        fc.wait_idle(30)
         st, body = fc.post("/settings", params=orig)
         ctx.log("restore thresholds: POST /settings %s -> %s", orig, st)
     after = fc.settings()

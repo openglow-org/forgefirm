@@ -13,8 +13,9 @@ gate reads none of the redacted fields.
 The exporter serializes the campaign state with, for every catalog test,
 the winning result record (same-campaign PASS or inherited PASS, with its
 origin) and the fingerprint it was recorded under, every other result on
-that fingerprint (each FAIL, ERROR and ABORTED run, with the disposition
-that answered it), and the last invalidate-all with its place in the log.
+that fingerprint (each FAIL, ERROR and ABORTED run, and each leftover a
+later pre pass charged to it, with the disposition that answered it), and
+the last invalidate-all with its place in the log.
 The gate (scripts/acceptance-gate.py) checks the signature, then calls
 verify() with the artifact, the release build's manifest, and the catalog
 from the same source tree, and recomputes every fingerprint - a PASS
@@ -55,11 +56,13 @@ SIGN_NAMESPACE = "forgetest-acceptance"
 # The fields outside the self-hash: the hash itself, and the signature over it.
 UNHASHED = ("sha256", "signature")
 _RESULT_KEYS = ("ts", "seq", "boot", "campaign", "test", "result", "fingerprint", "manifest_sha",
-                "image", "duration_s", "message", "needs_disposition", "fixture_error", "provenance",
-                "evidence", "answers", "log", "operator")
-# What the artifact keeps of a result that is not the winning PASS.
+                "image", "duration_s", "message", "needs_disposition", "fixture_error", "not_run",
+                "provenance", "evidence", "answers", "log", "operator")
+# What the artifact keeps of a result that is not the winning PASS, and of
+# a leftover record charged to the test (listed with the result LEFTOVER).
 _OTHER_KEYS = ("ts", "seq", "boot", "campaign", "result", "message", "needs_disposition",
-               "fixture_error")
+               "fixture_error", "not_run", "not_recorded", "found_before", "found_after", "found_during",
+               "leftovers", "safety", "carried")
 
 
 def _record(rec, keys=_RESULT_KEYS):
@@ -107,12 +110,18 @@ def build(state, tests, manifest, records, catalog_hash):
         if origin:
             rec = by_key.get((t.id, origin.get("ts"), origin.get("campaign")))
         others = []
-        for r in results:
-            if r.get("test") == t.id and r.get("fingerprint") == st["fingerprint"] \
-                    and r.get("result") != _campaign.PASS:
+        for r in records:
+            if r.get("test") != t.id or r.get("fingerprint") != st["fingerprint"]:
+                continue
+            if r.get("t") == "result" and r.get("result") != _campaign.PASS:
                 o = placed(r, _OTHER_KEYS)
-                o["disposition"] = answer(r)
-                others.append(o)
+            elif r.get("t") == "leftover":
+                o = placed(r, _OTHER_KEYS)
+                o["result"] = _campaign.LEFTOVER
+            else:
+                continue
+            o["disposition"] = answer(r)
+            others.append(o)
         entry = t.definition()
         entry.update({
             "title": t.title,
@@ -338,10 +347,22 @@ def verify(art, release_manifest, tests, catalog_hash, expect_machine=None):
                 ok = False
                 why.append("a result that is not a PASS is malformed")
                 continue
-            if o.get("result") in _campaign.CLOSING and o.get("needs_disposition") is True \
-                    and not o.get("disposition"):
+            if o.get("result") in _campaign.CLOSING + (_campaign.LEFTOVER,) \
+                    and o.get("needs_disposition") is True and not o.get("disposition"):
                 ok = False
                 why.append("a %s (log record %s) has no disposition" % (o.get("result"), o.get("seq")))
+            # A FAIL or an ERROR, or a leftover on the laser's safety state,
+            # wants a PASS newer than it, answered or not (campaign.compute:
+            # one closes the campaign it is in and stops an inheritance): a
+            # record older than one is refused. A leftover is a safety one by
+            # the items it names, whatever its own flag says.
+            items = [x.get("item") for x in o.get("leftovers") or [] if isinstance(x, dict)]
+            unsafe = o.get("safety") is True or any(i in _campaign.SAFETY_ITEMS for i in items)
+            holds = o.get("result") in _campaign.CLOSING or (o.get("result") == _campaign.LEFTOVER and unsafe)
+            if holds and rec and (_seq(rec) is None or _seq(o) is None or _seq(rec) < _seq(o)):
+                ok = False
+                why.append("the PASS (log record %s) is older than a %s on its fingerprint (log record %s)"
+                           % (rec.get("seq"), o.get("result"), o.get("seq")))
         if a.get("covers") != [list(c) for c in t.covers] or a.get("always") != t.always \
                 or a.get("kind") != t.kind or a.get("requires") != list(t.requires):
             ok = False

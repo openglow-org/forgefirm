@@ -128,6 +128,41 @@ class CampaignTests(unittest.TestCase):
                 dict(rec_result("c2", self.ui, self.man, "PASS", "2026-08-20T11:01:00Z"), seq=4)]
         self.assertEqual(self.compute(recs)["tests"][self.ui.id]["reason"], "disposition")
 
+    def test_a_leftover_charged_to_a_pass_holds_it_until_a_disposition(self):
+        # The ui test passed; the next run's pre pass found what it left. Its
+        # PASS no longer counts, in the open campaign or by inheritance,
+        # until the operator answers the leftover.
+        fp = self.ui.fingerprint(self.man)
+        recs = [rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"),
+                rec_result("c1", self.ui, self.man, "PASS", "2026-08-20T10:01:00Z"),
+                {"t": "leftover", "ts": "2026-08-20T10:02:00Z", "campaign": "c1", "test": self.ui.id,
+                 "fingerprint": fp, "needs_disposition": True, "message": "left behind"}]
+        st = self.compute(recs)
+        self.assertEqual((st["tests"][self.ui.id]["satisfied"], st["tests"][self.ui.id]["reason"]),
+                         (False, "disposition"))
+        recs.append(rec_campaign("c2", self.man, self.chash, "2026-08-20T11:00:00Z"))
+        self.assertEqual(self.compute(recs)["tests"][self.ui.id]["reason"], "disposition")
+        recs.append({"t": "disposition", "ts": "2026-08-20T11:01:00Z", "test": self.ui.id, "fingerprint": fp,
+                     "reason": "the operator ran a job between the tests"})
+        self.assertEqual(self.compute(recs)["tests"][self.ui.id]["status"], "inherited")
+
+    def test_a_leftover_on_the_lasers_safety_state_needs_a_pass_newer_than_it(self):
+        # Answered, it still does not give back the PASS it was charged to,
+        # as an answered FAIL does not: the row names it, and the test runs
+        # again.
+        fp = self.ui.fingerprint(self.man)
+        recs = [rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"),
+                rec_result("c1", self.ui, self.man, "PASS", "2026-08-20T10:01:00Z"),
+                {"t": "leftover", "ts": "2026-08-20T10:02:00Z", "campaign": "c1", "test": self.ui.id,
+                 "fingerprint": fp, "needs_disposition": True, "safety": True, "message": "laser_latch unlocked"},
+                {"t": "disposition", "ts": "2026-08-20T10:03:00Z", "test": self.ui.id, "fingerprint": fp,
+                 "reason": "a drill unlocked it by hand"}]
+        st = self.compute(recs)["tests"][self.ui.id]
+        self.assertEqual((st["satisfied"], st["reason"]), (False, "failed-since"))
+        self.assertEqual((st["leftover"]["safety"], st["leftover"]["answered"]), (True, True))
+        recs.append(rec_result("c1", self.ui, self.man, "PASS", "2026-08-20T10:04:00Z"))
+        self.assertTrue(self.compute(recs)["tests"][self.ui.id]["satisfied"])
+
     def test_an_invalidate_all_answers_no_fail(self):
         # A FAIL nobody answers, then an invalidate-all and a full campaign
         # in which the test passes: the FAIL still holds its fingerprint,

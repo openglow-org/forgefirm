@@ -79,6 +79,7 @@ class QueueTests(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="forgetest-queue-")
         os.environ["FORGETEST_DATA"] = cls.tmp
         os.environ["FORGETEST_MARKER"] = os.path.join(cls.tmp, "marker")
+        helpers.host_run()
         cls.man = helpers.make_manifest()
         cls.reg = helpers.registry(
             # auto: b requires a, so a queue must run a first even though
@@ -103,6 +104,7 @@ class QueueTests(unittest.TestCase):
         cls.srv.shutdown()
         cls.srv.server_close()
         shutil.rmtree(cls.tmp, ignore_errors=True)
+        helpers.end_host_run()
 
     def setUp(self):
         # A clean history per test: a PASS left by an earlier one would be

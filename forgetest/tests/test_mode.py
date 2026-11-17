@@ -68,7 +68,6 @@ class SwitchModeTests(unittest.TestCase):
     def setUp(self):
         self.fc = helpers.FakeForgectrl().start()
         self.port = GrblPort()
-        baseline.Baseline._unreachable_until = 0.0
         self.lines = []
 
     def tearDown(self):
@@ -130,7 +129,7 @@ class RunnerModeTests(unittest.TestCase):
         os.environ["FORGETEST_MARKER"] = os.path.join(self.tmp, "marker")
         self.fc = helpers.FakeForgectrl().start()
         self.port = GrblPort()
-        baseline.Baseline._unreachable_until = 0.0
+        helpers.host_run(self)                  # a fake forgectrl, no kernel module
         self.seen = {}
         fc, seen = self.fc, self.seen
 

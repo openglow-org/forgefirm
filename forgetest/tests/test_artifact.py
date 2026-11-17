@@ -203,6 +203,52 @@ class ArtifactTests(unittest.TestCase):
                                              self.chash)
         self.assertTrue(any("has no disposition" in p for p in problems), problems)
 
+    def test_an_unanswered_leftover_charged_to_a_pass_refuses_it(self):
+        # What the next pre pass found after the panel test passed in c1 is
+        # charged to it; answered, the artifact carries it with its answer.
+        fp = self.ui.fingerprint(self.man2)
+        self.recs.insert(3, {"t": "leftover", "ts": "2026-08-20T10:02:30Z", "campaign": "c1", "test": self.ui.id,
+                             "fingerprint": fp, "found_before": "test cooling.aa-offset-calibrate",
+                             "leftovers": [{"item": "cnc/motor_lock", "found": "15", "expected": "0",
+                                            "action": "restored"}],
+                             "needs_disposition": True, "message": "left behind"})
+        self.recs.insert(4, {"t": "disposition", "ts": "2026-08-20T10:02:40Z", "test": self.ui.id,
+                             "fingerprint": fp, "reason": "the operator jogged the head between the tests"})
+        art, st = self.build()
+        self.assertTrue(art["authorized"], st["tests"])
+        others = [t for t in art["tests"] if t["id"] == self.ui.id][0]["others"]
+        self.assertEqual([(o["result"], o["disposition"]["reason"]) for o in others],
+                         [("LEFTOVER", "the operator jogged the head between the tests")])
+        self.assertTrue(artifact.verify(art, self.release_manifest(), self.tests, self.chash)[0])
+
+        def unanswered(body):
+            for t in body["tests"]:
+                for o in t["others"]:
+                    o["disposition"] = None
+        ok, rows, problems = artifact.verify(self.forge(art, unanswered), self.release_manifest(), self.tests,
+                                             self.chash)
+        self.assertTrue(any("LEFTOVER" in p and "has no disposition" in p for p in problems), problems)
+
+        # Answered, but newer than the PASS: a leftover on the laser's safety
+        # state (by its flag, or by the items it names with the flag gone),
+        # or a FAIL or ERROR (one that asked for no disposition too), still
+        # wants a newer PASS, which the gate derives from the places in the log.
+        cases = (("LEFTOVER", {"safety": True}),
+                 ("LEFTOVER", {"leftovers": [{"item": "laser_latch", "found": "unlocked", "expected": "locked",
+                                              "action": "restored"}]}),
+                 ("FAIL", {}),
+                 ("ERROR", {"needs_disposition": None, "not_run": True}))
+        for result, extra in cases:
+            def newer(body, result=result, extra=extra):
+                for t in body["tests"]:
+                    if t["id"] == self.ui.id:
+                        o = t["others"][0]
+                        o.update(dict(extra, result=result, seq=t["record"]["seq"] + 1))
+            with self.subTest(result=result, extra=sorted(extra)):
+                ok, rows, problems = artifact.verify(self.forge(art, newer), self.release_manifest(), self.tests,
+                                                     self.chash)
+                self.assertFalse([r for r in rows if r["id"] == self.ui.id][0]["ok"])
+
     def test_a_pass_not_earned_on_its_pins_as_built_is_refused(self):
         # A forged artifact that claims authorization: one PASS recorded on a
         # hot-deployed binary, one with no verdict at all (an older tool's),

@@ -16,7 +16,8 @@ from ..catalog import test
 from .. import hw
 from .forgectrl import lan_ip
 from .image import kernel_config
-from .cloud import OFFLINE_STEP, Offline, dark_print_body, enter_offline, latch_locked, offline_cleanup, offline_job
+from .cloud import (OFFLINE_STEP, Offline, dark_print_body, end_print, enter_offline, latch_locked,
+                    offline_cleanup, offline_job)
 from .setup import SAFETY_PHRASE, read_file, record_path, request, write_file
 
 CG = "/sys/fs/cgroup"
@@ -823,8 +824,17 @@ def _put_back(ctx, fc, work, prior, etag, raw, dir_mode):
     ctx.log("restore ext_enabled=%r -> %s", prior, st)
     if prior != "1":
         os.chmod(os.path.dirname(EXT_ROOT), dir_mode)
-    with ctx.takeover():
-        write_file(record_path(), raw)
+    t = ctx.takeover()
+    try:
+        with t:
+            write_file(record_path(), raw)
+    except BaseException as e:
+        # a takeover refused before it took anything over wrote nothing back:
+        # nothing after this judges the record, so it is named for the
+        # hand-back
+        if read_file(record_path()) != raw:
+            t._leftover("setup record", "not the one found", "the one found", "not restored: %s" % e)
+        raise
     ctx.log("the previous record is back under a restart")
 
 
@@ -929,6 +939,9 @@ def armed_freeze(ctx):
         try:
             dark_print_body(ctx, ev, off, job, offset, fc)
             ctx.sleep(6)                                # past the close, for the thaw
+        except BaseException:
+            end_print(ctx, off)
+            raise
         finally:
             stop.set()
             t.join(timeout=5)

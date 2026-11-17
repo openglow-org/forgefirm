@@ -10,7 +10,7 @@ operator's eye-protection / fire-watch / exhaust acknowledgment; the
 test then prompts for the scrap and the button, streams a small job
 through the controller, and the machine fires only after the operator
 presses the physical arm button - nothing here defeats that gate, and
-forgetest never touches the laser latch. One emission per test; on abort
+forgetest never unlocks the laser latch. One emission per test; on abort
 or error the job is soft-reset (`^X`: controlled stop, latch relocked).
 The witnesses are forgectrl's `/status` (`laser.emission_samples` = the
 kernel's LASER_ON sample count, `hv_current_raw`, `lid_ir`),

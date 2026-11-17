@@ -1022,7 +1022,10 @@ class Offline:
                 new.append(ev)
         return new
 
+    current = None                  # the print last handed over (end_print cancels it)
+
     def print_ready(self, action_id, path, settings=None):
+        self.current = action_id
         self.send({"id": action_id, "action_type": "print", "status": "ready",
                    "motion_url": "file://" + path, "settings": settings or {}})
 
@@ -1102,6 +1105,65 @@ def latch_locked():
     return ilk is not None and bool(ilk & (1 << 3))
 
 
+# A print a test leaves behind: the bound on its cancel's park and relock,
+# and on the controller's stop after it.
+PARK_END_S = 120
+STOP_END_S = 30
+
+
+def job_alive(fc):
+    """A job is still on the machine: the latch unlocked, the kernel
+    playing, or the cooling engine's window armed."""
+    if not latch_locked() or hw.sysfs_read("cnc/state") == "running":
+        return True
+    try:
+        st, cs = fc.get("/cool/status")
+    except hw.HwError:
+        return True
+    return not (st == 200 and isinstance(cs, dict)) or bool(cs.get("armed"))
+
+
+def _until(cond, timeout):
+    """Poll cond until it holds or the timeout: not abort-aware, since it
+    runs after an Abort, which it must not cut short."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if cond():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def end_print(ctx, off=None):
+    """A print the test leaves on a failure, an error or an Abort is ended
+    before the failure is reported. The offline service's print is canceled
+    as the app cancels one: a stop and a park, never a button press, which
+    during a pause resumes the print. The app's print, or one the cancel did
+    not end, ends with the controller's stop, and the controller is left
+    stopped: the hand-back starts it again without the service's hunt. Then
+    the relock and the end of motion are waited for, bounded."""
+    fc = ctx.forgectrl
+    if not job_alive(fc):
+        return
+    action = getattr(off, "current", None)
+    if action is not None:
+        try:
+            off.cancel(action)
+            ctx.log("the print left running is canceled (action %s)", action)
+        except OSError as e:
+            ctx.log("the cancel of action %s could not be sent: %s", action, e)
+        if _until(lambda: not job_alive(fc), PARK_END_S):
+            ctx.log("the canceled print parked and the latch is locked")
+            return
+    try:
+        st = fc.post("/controller/stop")[0]
+    except hw.HwError as e:
+        st = str(e)
+    ended = _until(lambda: not job_alive(fc), STOP_END_S)
+    ctx.log("the print left running is ended by the controller's stop (%s): %s",
+            st, "ended" if ended else "STILL RUNNING")
+
+
 APP_PRINT_CUE = ("In the Glowforge app: scrap on the bed, lid closed, a SMALL engrave or score job "
                  "(about 30 s) set up. Click Done here, then press Print in the app and press the "
                  "physical button when it lights white.")
@@ -1179,6 +1241,9 @@ def lid_interlock_abort(ctx):
     off = Offline().__enter__()
     try:
         lid_interlock_abort_body(ctx, ev, off, job, offset)
+    except BaseException:
+        end_print(ctx, off)
+        raise
     finally:
         off.__exit__(None, None, None)
         offline_cleanup(ctx)
@@ -1316,6 +1381,14 @@ def dark_print_body(ctx, ev, off, job, offset, fc):
 def pause_resume(ctx):
     ev = ctx.evidence
     offset = enter_cloud(ctx)
+    try:
+        pause_resume_body(ctx, ev, offset)
+    except BaseException:
+        end_print(ctx)
+        raise
+
+
+def pause_resume_body(ctx, ev, offset):
     fc_offset = log_size(FORGECTRL_LOG)
     ctx.instruct(APP_PRINT_CUE)
     got = wait_print_running(ctx, offset, 300)
@@ -1433,6 +1506,9 @@ def oversize_stream(ctx):
     off = Offline().__enter__()
     try:
         oversize_stream_body(ctx, ev, off, job, offset, before)
+    except BaseException:
+        end_print(ctx, off)
+        raise
     finally:
         off.__exit__(None, None, None)
         offline_cleanup(ctx)

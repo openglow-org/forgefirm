@@ -505,6 +505,31 @@ def pgrep_f(needle):
     return out
 
 
+def pids_holding(path):
+    """PIDs with `path` open: one of their descriptors links to it. Reads
+    /proc (FORGETEST_PROC_ROOT for tests)."""
+    proc = os.environ.get("FORGETEST_PROC_ROOT") or "/proc"
+    out = []
+    try:
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
+    except OSError:
+        return out
+    for pid in pids:
+        fd_dir = os.path.join(proc, pid, "fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(os.path.join(fd_dir, fd)) == path:
+                    out.append(int(pid))
+                    break
+            except OSError:
+                continue
+    return out
+
+
 def listens_on(pid, path):
     """Process pid holds a listening UNIX socket bound at path: one of its
     own descriptors is that socket, so a socket file another process left

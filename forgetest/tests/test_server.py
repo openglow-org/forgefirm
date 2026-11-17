@@ -52,6 +52,7 @@ class ServerTests(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="forgetest-")
         os.environ["FORGETEST_DATA"] = cls.tmp
         os.environ["FORGETEST_MARKER"] = os.path.join(cls.tmp, "marker")
+        helpers.host_run()
         cls.man = helpers.make_manifest()
         cls.reg = helpers.registry(
             helpers.make_test("fake.pass", [("forgectrl", "src/ui.c")], always=True, fn=t_pass),
@@ -101,6 +102,7 @@ class ServerTests(unittest.TestCase):
         cls.srv.shutdown()
         cls.srv.server_close()
         shutil.rmtree(cls.tmp, ignore_errors=True)
+        helpers.end_host_run()
 
     # -- helpers ----------------------------------------------------------
     def call(self, method, path, body=None, token=True, headers=None):
@@ -168,6 +170,9 @@ class ServerTests(unittest.TestCase):
         st, d = self.call("POST", "/start", {"test": "fake.pass"}, token=False)
         self.assertEqual(st, 403)
         self.assertEqual(d["error"], "authentication required")
+        st, d = self.call("POST", "/start", {"test": "fake.pass"}, token=False,
+                          headers={"X-ForgeFIRM-Token": "0" * len(self.token)})     # a token, not the token
+        self.assertEqual(st, 403)
         st, d = self.call("GET", "/catalog")
         self.assertEqual(st, 200)
         self.assertEqual(len(d["tests"]), 7)

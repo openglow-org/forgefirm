@@ -20,7 +20,7 @@ import time
 import unittest
 
 import helpers
-from forgetest import catalog
+from forgetest import catalog, hw
 from forgetest.log import Log
 from forgetest.runner import Context, Failed, Run, Runner
 
@@ -137,11 +137,71 @@ class ActTests(unittest.TestCase):
             self.ctx.ready("x")
 
 
+class VerdictPrimitiveTests(unittest.TestCase):
+    """What every catalog verdict goes through, on the runner's own Context."""
+
+    def setUp(self):
+        self.run = Run("test", "t.x", "t.x")
+        self.ctx = Context(self.run, None, helpers.make_test("t.x", [], kind="operator"))
+
+    def answer(self, value):
+        def go():
+            while self.run.prompt is None:
+                time.sleep(0.01)
+            self.run.answer(self.run.prompt["id"], value)
+        threading.Thread(target=go, daemon=True).start()
+
+    def test_a_reading_that_failed_fails_the_check(self):
+        # A reader returns None when it could not read: never a pass.
+        with self.assertRaises(Failed):
+            self.ctx.check(None, "the print did not start after the press")
+
+    def test_the_operators_no_and_cannot_fail_the_test(self):
+        self.answer("No")
+        with self.assertRaises(Failed):
+            self.ctx.confirm("Is there a mark on the scrap?")
+        self.answer("Cannot")
+        with self.assertRaises(Failed):
+            self.ctx.instruct("Open the lid.")
+
+
+class ReaderTests(unittest.TestCase):
+    """What the readers behind a test's judgment (hw.py) make of a value
+    they cannot use: never a reading."""
+
+    def test_an_unparseable_attribute_reads_as_no_value(self):
+        # never 0, which the core latch test would take for a dark FIRE line
+        tmp = tempfile.mkdtemp(prefix="forgetest-rd-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        os.makedirs(os.path.join(tmp, "cnc"))
+        with open(os.path.join(tmp, "cnc", "laser_enable"), "w") as f:
+            f.write("garbage\n")
+        os.environ["GF_SYSFS_ROOT"] = tmp + os.sep
+        self.addCleanup(os.environ.pop, "GF_SYSFS_ROOT", None)
+        self.assertIsNone(hw.sysfs_int("cnc/laser_enable"))
+
+    def test_an_error_status_is_never_the_machines_status(self):
+        fc = helpers.FakeForgectrl().start()
+        self.addCleanup(fc.stop)
+        fc.on_get = lambda path, q: (503, {"state": "idle", "laser_locked": True}) if path == "/status" else None
+        with self.assertRaises(hw.HwError):
+            hw.Forgectrl().status()
+
+    def test_a_status_report_buffered_before_the_question_is_dropped(self):
+        dev = helpers.FakeGrbl().start()
+        self.addCleanup(dev.stop)
+        with hw.Grbl() as g:
+            g.buf = b"<Run|MPos:1.000,0.000,0.000|FS:0,0>\r\n"
+            dev.unanswered = 1                  # the answer comes only to the '?' sent again
+            self.assertEqual(g.status_report()["state"], "Idle")
+
+
 class PrecheckTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="forgetest-pre-")
         os.environ["FORGETEST_DATA"] = self.tmp
         os.environ["FORGETEST_MARKER"] = os.path.join(self.tmp, "marker")
+        helpers.host_run(self)
         self.man = helpers.make_manifest()
         self.blocked = {"why": "HV reports good: open the lid"}
         self.reg = helpers.registry(
@@ -181,6 +241,17 @@ class PrecheckTests(unittest.TestCase):
         self.assertEqual([x["test"] for x in b["skipped"]], ["p.gated"])
         self.assertIn("cannot start: HV reports good", b["skipped"][0]["reason"])
         self.assertEqual([x["test"] for x in b["done"]], ["p.free"])
+
+    def test_a_body_that_returns_after_an_abort_is_aborted(self):
+        def ends_aborted(ctx):
+            ctx.run.abort()                 # the Abort lands as the body returns
+        self.reg["p.abort"] = helpers.make_test("p.abort", [("forgectrl", "src/cool.c")], fn=ends_aborted)
+        self.runner.registry = self.reg
+        ok, msg, run = self.runner._start_test("p.abort")
+        self.assertTrue(ok, msg)
+        while run.finished is None:
+            time.sleep(0.02)
+        self.assertEqual(run.finished["result"], "ABORTED")
 
     def test_an_erroring_precheck_refuses_rather_than_crashes(self):
         def boom():

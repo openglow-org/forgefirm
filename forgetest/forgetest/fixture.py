@@ -24,6 +24,7 @@ The fixture does not read the machine: every action the runner asks of
 it is verified through the machine's own readings afterward, exactly as
 an operator's hand is (Context.act). Contract: fixture/README.md.
 """
+import http.client
 import json
 import os
 import socket
@@ -270,13 +271,18 @@ class Fixture:
                                               "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return resp.status, json.loads(resp.read().decode("utf-8", "replace") or "{}")
+                status, raw = resp.status, resp.read()
         except urllib.error.HTTPError as e:
             try:
                 body = json.loads(e.read().decode("utf-8", "replace") or "{}")
-            except ValueError:
+            except (ValueError, OSError, http.client.HTTPException):
                 body = {}
-            return e.code, body
+            return e.code, body if isinstance(body, dict) else {}
+        except http.client.HTTPException as e:
+            # an answer cut short or malformed: the request went out, and is
+            # not sent again (a second press is a second press)
+            raise FixtureError("fixture %s: %s %s: the answer could not be read (%s)"
+                               % (self.where(), method, path, type(e).__name__), sent=True)
         except (urllib.error.URLError, socket.timeout, OSError) as e:
             # urllib raises a failed connect or send as a URLError; a
             # timeout or a reset after the request went out comes bare, and
@@ -292,6 +298,16 @@ class Fixture:
                     again.sent = again.sent or sent
                     raise
             raise FixtureError("fixture %s: %s %s: %s" % (self.where(), method, path, e), sent=sent)
+        # Every answer the runner reads is a JSON object; anything else is
+        # the box's failure, never an exception of another kind.
+        try:
+            body = json.loads(raw.decode("utf-8", "replace") or "{}")
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise FixtureError("fixture %s: %s %s: the answer is not a JSON object" % (self.where(), method, path),
+                               sent=True)
+        return status, body
 
     def status(self):
         st, body = self._request("GET", "/")

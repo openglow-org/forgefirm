@@ -50,7 +50,6 @@ class TakeoverClientTests(unittest.TestCase):
         baseline.OFFLINE_MARKER = os.path.join(self.tmp, "gfcloud-offline")
         baseline.OFFLINE_SOCKET = "/run/gfcloud-offline.sock"
         runner.Takeover.OFFLINE_BACK_S = 0
-        baseline.Baseline._unreachable_until = 0.0
         self.unix = []                          # (pid, inode, path, listening)
         self.fc = FakeForgectrl().start()
         self.fc.state["mode"] = {"mode": "cloud", "controller": "running", "pid": self.OLD_PID,
@@ -140,6 +139,14 @@ class TakeoverClientTests(unittest.TestCase):
         self.assertEqual(self.markers_left(), [])
         self.assertTrue(any("back as the offline service (pid %d)" % self.NEW_PID in l for l in run.lines),
                         run.lines)
+
+    def test_an_offline_service_that_does_not_come_back_is_recorded(self):
+        self._offline_client(self.OLD_PID)
+        self.comes_up = "standby"               # forgectrl's start brings no client up
+        cap, run = self.takeover()
+        self.assertEqual([(r["where"], r["expected"]) for r in cap["restart_clients"]],
+                         [("takeover end", "the offline service")])
+        self.assertEqual(self.markers_left(), [])
 
     def test_an_online_client_comes_back_without_the_hunt(self):
         cap, run = self.takeover()

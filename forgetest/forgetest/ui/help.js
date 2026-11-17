@@ -22,6 +22,7 @@ var HELP = {
     p: [
       'A release is authorized when a campaign is open on this image and every catalog test is satisfied: by a PASS in the campaign, or (never for the core) by an earlier PASS whose domain fingerprint is unchanged. A FAIL ends the campaign.',
       'A FAIL, or an ERROR the test raised, also holds its test until you record a disposition: why it does not stand against the release. A rerun that passes does not clear it, and neither does Invalidate all. Its row says required: disposition, with the link that records one; the artifact carries the FAIL and your reason.',
+      'What the check before a run finds left behind is charged to the test that passed just before it, and holds that test the same way; the row shows what was found. If you changed the machine between the runs, say so in the disposition. A leftover on the laser latch, the FIRE line or LASER_ON, or an armed window left waiting for its press, is charged to the last test that ran, whatever its result, and needs a new PASS as well; found after a run, it fails that run.',
       'The manifest identity is the image, the catalog hash is the test set; either changing starts the count over.'
     ]
   },

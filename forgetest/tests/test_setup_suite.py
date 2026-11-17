@@ -166,7 +166,6 @@ class GatedSettleTests(unittest.TestCase):
 
     def setUp(self):
         self.fake = helpers.FakeForgectrl().start()
-        baseline.Baseline._unreachable_until = 0.0
 
     def tearDown(self):
         self.fake.stop()

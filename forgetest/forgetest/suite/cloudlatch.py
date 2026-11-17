@@ -67,6 +67,9 @@ def button_latch_print(ctx):
     off = cloud.Offline().__enter__()
     try:
         button_latch_body(ctx, ev, off, job, offset)
+    except BaseException:
+        cloud.end_print(ctx, off)
+        raise
     finally:
         off.__exit__(None, None, None)
         cloud.offline_cleanup(ctx)

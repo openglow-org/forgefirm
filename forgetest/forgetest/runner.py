@@ -33,9 +33,18 @@ machine shows the action done. A `confirm` stays what it was: a yes/no
 the evidence cannot answer.
 
 Safety, in code rather than convention: a live test starts only with the
-operator's acknowledgment in the request; the runner never touches the
-laser latch; a takeover always ends with forgectrl started again, and a
-marker file makes a crash mid-takeover recoverable at the next start.
+operator's acknowledgment in the request; the runner never unlocks the
+laser latch, and locks it wherever it hands the machine back; a takeover
+always ends with forgectrl started again, and a marker file, which holds
+what the takeover saved, makes a crash mid-takeover recoverable at the
+next start.
+
+A run is judged on the machine as the pass before it found it. A leftover
+on the laser's safety state found before a run stops that run, and every
+leftover found before a run is charged to the test that ran before it
+(a `leftover` record, which holds that test's fingerprint until the
+operator answers it). A hand-back that cannot be judged, or a result that
+cannot be recorded, is never a PASS.
 
 Runner-level events (a queue opening or stopping, a takeover recovered,
 the leftovers a baseline pass found) go to the journal: the daemon's
@@ -43,6 +52,7 @@ stderr (daemon.log under the data directory), syslog when there is one,
 and the log of the run in progress. The page shows the run, never the
 journal.
 """
+import json
 import logging
 import logging.handlers
 import os
@@ -59,7 +69,7 @@ from . import fixture as _fixture
 from . import catalog as _catalog
 from . import hw
 from . import provenance as _provenance
-from .log import now_ts, data_dir
+from .log import boot_id, now_ts, data_dir
 
 MAX_LINES = 4000
 
@@ -85,6 +95,13 @@ class Aborted(Exception):
 
 class Failed(Exception):
     pass
+
+
+class NotRun(Exception):
+    """The run did not start: the machine was not one a test can be judged
+    on (a leftover on the laser's safety state, or a state the pre pass
+    could not capture). Recorded as an ERROR that closes the campaign and
+    asks for a rerun only: the test judged nothing."""
 
 
 journal = logging.getLogger("forgetest")
@@ -152,6 +169,13 @@ class Run:
         self.baseline_captured = None   # preserved state the post pass hands back
         self.aborted = threading.Event()
         self.finished = None      # {"result","message","duration_s"}
+        self.released = False     # the fixture's release after the run has run
+        self.start_seq = None     # the place of the run's "start" record in the log
+        self.fingerprint = None   # a test run's fingerprint and campaign, as its start record has them
+        self.campaign_id = None
+        self.safety_charged = []  # the tests the safety rule charged in the pass under way
+        self.safety_pending = []  # safety records the log refused, carried on the run's own result
+        self.body_safety = []     # what a takeover's reads before its stop found during the run
         self.proc = None
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
@@ -631,7 +655,9 @@ class Context:
         return hw.Grbl()
 
     def takeover(self):
-        return Takeover(self.run.log, self.test.id, run=self.run)
+        # what the takeover's reads before its stop find is the run's own
+        return Takeover(self.run.log, self.test.id, run=self.run,
+                        on_safety=lambda found: self.runner._safety_found(self.run, "body", found))
 
     def counters_rezeroed(self):
         """Tell the baseline the kernel position counters were re-zeroed
@@ -666,15 +692,18 @@ class Takeover:
     Context.takeover()) and by takeover bench tools."""
 
     # Controller-owned kernel attributes a takeover drill may change:
-    # captured on enter, written back on exit before forgectrl starts, so
-    # the supervisor's liveness probe runs on the machine it expects (a
-    # leftover motor_lock=15 masks the probe's steps: no motion by
-    # construction, a false driver-wedge verdict, the rail-off ladder).
+    # captured on enter, kept in the marker, and written back on exit, or
+    # by recover() after a forgetest that died mid-takeover, before
+    # forgectrl starts, so the machine forgectrl starts on is the one the
+    # takeover found. forgectrl's liveness probe writes the ones its move
+    # needs itself (motor_lock, x_mode, x_decay, the X current, step_freq,
+    # streaming), and the controller writes its whole configuration at its
+    # start; the rest (ramp_rate, the Y axis) stay as written here.
     PRESERVE = ("cnc/motor_lock", "cnc/step_freq", "cnc/ramp_rate", "cnc/streaming",
                 "cnc/x_mode", "cnc/y_mode", "cnc/x_decay", "cnc/y_decay",
                 "pic/x_step_current", "pic/y_step_current")
 
-    def __init__(self, log, who, run=None):
+    def __init__(self, log, who, run=None, on_safety=None):
         self.log = log            # callable(str)
         self.who = who
         self.marker = marker_path()
@@ -684,21 +713,115 @@ class Takeover:
         self.offline = False      # the cloud client found is the offline service
         self.frame = None         # the counters' frame, read before the controller is stopped
         self.found = None         # (counters, microstep mode) once the controller is gone
+        self.on_safety = on_safety  # the runner's safety rule, for what the reads before the stop find
 
     def wait_settled(self):
         return _baseline.Baseline(self.log).wait_settled()
 
+    def read_before_stop(self, stops=True):
+        """The latch and the cooling engine's window, read before the
+        takeover's controller stop, which (forgectrl's exit) locks the latch
+        and ends the window when forgectrl stops a controller: a clear bit 3
+        is locked, and either finding goes to the runner's safety rule
+        (on_safety), a window labeled by what comes next (stops: whether the
+        refusal makes that stop). Returns (findings, unread): unread says
+        what the cooling engine answered when it did not answer with its
+        report, which says nothing of a window (a host run, with no
+        forgectrl, skips it as the pass does)."""
+        found = []
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        if ilk is not None and not (ilk & _baseline.LATCH_BIT):
+            found.append(_baseline.Leftover("laser_latch", "unlocked before the takeover (interlock 0x%x)" % ilk,
+                                            "locked", self.lock()))
+        try:
+            st, c = hw.Forgectrl().get("/cool/status")
+        except hw.HwError as e:
+            st, c = "no answer (%s)" % e, None
+        unread = None
+        if (st != 200 or not isinstance(c, dict)) and not _baseline.host_run():
+            unread = "/cool/status -> %s" % st
+            self.log("takeover: the cooling engine did not answer before the takeover (%s): "
+                     "its window is not judged" % unread)
+        elif isinstance(c, dict) and c.get("armed"):
+            found.append(_baseline.Leftover("cool.armed", "%s/armed=True/hold=%s before the takeover"
+                                            % (c.get("phase"), c.get("hold")), "unarmed",
+                                            "ending it: the takeover's controller stop" if stops
+                                            else "left to the hand-back: no controller to stop"))
+        if found and self.on_safety is not None:
+            try:
+                self.on_safety(found)
+            except Exception as e:  # noqa: BLE001 - the takeover is refused either way
+                self.log("takeover: the safety finding could not be recorded: %s: %s" % (type(e).__name__, e))
+        return found, unread
+
+    STOP_IDLE_S = 5.0         # a controlled stop ramps down at ramp_rate, well inside this
+
     def restore_attrs(self):
-        """Write the captured kernel attributes back and relock the latch."""
+        """Relock the latch, acknowledge an underrun, and write the captured
+        kernel attributes back: the machine forgectrl's start finds. The lock
+        comes first. The underrun is acknowledged here so that forgectrl
+        starts on an idle kernel, and the takeover's exit records it as the
+        run's leftover: a drill that ends in underrun has left the kernel
+        faulted. A program still playing (a drill that raised inside its
+        run) gets a controlled stop first, and the attributes go back only
+        once the kernel is idle: written under a program, they would unmask
+        an axis mid-move. Returns None for an idle kernel, else the state
+        found and what became of it: ("underrun", "restored (acknowledged)"),
+        ("running", "restored (stopped)") or ("running", "failed: ...")."""
+        self.lock()
+        state = hw.sysfs_read("cnc/state")
+        found = None
+        if state == "underrun":
+            try:
+                hw.sysfs_write("cnc/stop", "1")         # the underrun's acknowledgment
+                self.log("takeover: the kernel was left in underrun: acknowledged before forgectrl starts")
+            except OSError as e:
+                self.log("takeover: WARNING could not acknowledge the underrun: %s" % e)
+            found = ("underrun", "restored (acknowledged)")
+        elif state == "running":
+            try:
+                hw.sysfs_write("cnc/stop", "1")         # a controlled stop: no step lost
+            except OSError as e:
+                self.log("takeover: WARNING could not stop the program: %s" % e)
+            deadline = time.time() + self.STOP_IDLE_S
+            while hw.sysfs_read("cnc/state") == "running" and time.time() < deadline:
+                time.sleep(0.1)
+            if hw.sysfs_read("cnc/state") == "running":
+                self.log("takeover: a program still plays after the stop: the saved attributes are left "
+                         "for forgectrl's probe, which halts it")
+                return ("running", "failed: still running after the stop; attributes left")
+            self.log("takeover: a program was still playing: stopped before the attributes go back")
+            found = ("running", "restored (stopped)")
         for attr, val in self.saved.items():
             try:
                 hw.sysfs_write(attr, val)
             except OSError as e:
                 self.log("takeover: WARNING could not restore %s=%s: %s" % (attr, val, e))
+        return found
+
+    def lock(self):
+        """The latch locked; returns what became of it, as a leftover's action."""
         try:
             hw.sysfs_write("cnc/laser_latch", "1")
+            return "restored"
         except OSError as e:
             self.log("takeover: WARNING could not relock the latch: %s" % e)
+            return "failed: %s" % e
+
+    @staticmethod
+    def holders():
+        """Every holder of the pulse device: the daemon, the GRBL controller,
+        the cloud client (a script, so found by its command line), and any
+        other process with the device open (a takeover drill)."""
+        found = hw.pidof("forgectrl") + hw.pidof("grblHAL_glowfor") + hw.pgrep_f("gfcloud.py")
+        return sorted(set(found + hw.pids_holding(PULSE_DEVICE)))
+
+    def write_marker(self):
+        """The marker: who holds the machine, and what recover() writes back
+        if this process dies before its exit."""
+        with open(self.marker, "w") as f:
+            json.dump({"ts": now_ts(), "who": self.who, "saved": self.saved}, f, sort_keys=True)
+            f.write("\n")
 
     def __enter__(self):
         log = self.log
@@ -710,9 +833,12 @@ class Takeover:
                 self.saved[attr] = v
         if self.saved:
             log("takeover: preserving %s" % ", ".join("%s=%s" % kv for kv in self.saved.items()))
+        running = None            # what that read says of a controller; None: no answer
         try:
             st, mode = hw.Forgectrl().get("/mode")
             self.cloud = st == 200 and isinstance(mode, dict) and mode.get("mode") == "cloud"
+            if st == 200 and isinstance(mode, dict):
+                running = mode.get("controller") == "running"
             self.offline = self.cloud and hw.listens_on(mode.get("pid"), _baseline.OFFLINE_SOCKET)
         except hw.HwError:
             pass
@@ -722,24 +848,41 @@ class Takeover:
         # The frame is read while the controller runs: its exit takes the
         # anchor with it (forgectrl unlinks it), though not the counters.
         self.frame = _baseline.counter_frame()
-        log("takeover: stopping the controller through forgectrl")
-        try:
-            st, body = hw.Forgectrl().post("/controller/stop")
-            log("takeover: POST /controller/stop -> %s" % st)
-        except hw.HwError as e:
-            log("takeover: forgectrl unreachable (%s)" % e)
-        with open(self.marker, "w") as f:
-            f.write("%s %s\n" % (now_ts(), self.who))
+        # The stop locks the latch and ends a window when forgectrl stops a
+        # controller: what they read now is read first. A finding (the
+        # runner's safety rule has recorded it), or a window read the
+        # cooling engine did not answer, refuses the takeover after the
+        # stop, and the refusal says what the stop answered; nothing else is
+        # taken over, and the pass after it starts the controller the stop
+        # left in standby. A refusal makes the stop only when the /mode read
+        # above found a controller running or went unanswered: with none
+        # running there is no session to end, and forgectrl keeps a stop's
+        # standby through its setup gate, with nothing after a refusal to
+        # start it again once the gate opens.
+        refused_stop = running is not False
+        found, unread = self.read_before_stop(stops=refused_stop)
+        if (found or unread) and not refused_stop:
+            stop = "no controller stop (/mode: no controller running)"
+        else:
+            log("takeover: stopping the controller through forgectrl")
+            try:
+                st, body = hw.Forgectrl().post("/controller/stop")
+                stop = "POST /controller/stop -> %s" % st
+            except hw.HwError as e:
+                stop = "POST /controller/stop -> no answer (%s)" % e
+        log("takeover: %s" % stop)
+        if found or unread:
+            raise Failed("takeover: %s; %s, and nothing else was taken over"
+                         % ("the laser's safety state was off before the takeover: %s"
+                            % "; ".join(str(x) for x in found) if found
+                            else "the cooling engine's window was not judged (%s)" % unread, stop))
+        self.write_marker()
         rc, out = hw.initd("forgectrl", "stop")
         log("takeover: forgectrl stop -> rc %s" % rc)
         deadline = time.time() + 15
-        # Every holder of the pulse device: the daemon, the GRBL controller,
-        # and the cloud client (a script, so found by its command line).
-        def holders():
-            return hw.pidof("forgectrl") + hw.pidof("grblHAL_glowfor") + hw.pgrep_f("gfcloud.py")
-        while time.time() < deadline and holders():
+        while time.time() < deadline and self.holders():
             time.sleep(0.5)
-        left = holders()
+        left = self.holders()
         if left:
             self.__exit__(None, None, None)
             raise Failed("takeover: processes still alive after stop: %s" % left)
@@ -760,6 +903,14 @@ class Takeover:
     # because a jog sized from these counters is only as good as the frame
     # they are in. Cloud mode is not judged: its counters are the cloud
     # client's, as in the baseline.
+
+    def _leftover(self, item, found, expected, action):
+        """A leftover for the baseline's post pass, which fails the run."""
+        cap = self.run.baseline_captured if self.run is not None else None
+        if cap is not None:
+            cap.setdefault("restart_leftovers", []).append(
+                {"item": item, "found": found, "expected": expected, "action": action})
+        self.log("takeover: %s: %s (expected %s); recorded as a leftover" % (item, found, expected))
 
     def _record(self, where, found, expected):
         cap = self.run.baseline_captured if self.run is not None else None
@@ -882,7 +1033,9 @@ class Takeover:
         except Exception as e:  # noqa: BLE001 - a reading never keeps forgectrl down
             self.log("takeover: WARNING the head's position could not be judged: %s: %s"
                      % (type(e).__name__, e))
-        self.restore_attrs()
+        found = self.restore_attrs()
+        if found:
+            self._leftover("kernel state at the takeover end", found[0], "idle", found[1])
         self.markers_on()
         rc, out = hw.initd("forgectrl", "start")
         self.log("takeover: forgectrl start -> rc %s" % rc)
@@ -893,6 +1046,13 @@ class Takeover:
         # leave the machine settled for whatever runs next: the probe
         # move done, the controller back (or the ladder's verdict logged)
         mode = self.wait_settled()
+        # The takeover hands back a running forgectrl: a start that failed,
+        # or a daemon that never answered after it, is the run's leftover,
+        # whatever forgectrl does later.
+        if rc != 0 or mode is None:
+            self._leftover("forgectrl at the takeover end",
+                           "start rc %s, %s" % (rc, "answering" if mode is not None else "not answering"),
+                           "started and answering", "failed")
         try:
             self.client_back(mode)
         except Exception as e:  # noqa: BLE001 - the judge never breaks the exit path
@@ -903,6 +1063,18 @@ class Takeover:
 
 def marker_path():
     return os.environ.get("FORGETEST_MARKER") or "/run/forgetest.active"
+
+
+PULSE_DEVICE = "/dev/glowforge"
+
+
+def forgectrl_answers(timeout=2.0):
+    """forgectrl answers /mode (a short ask: a down daemon refuses at once)."""
+    try:
+        st, body = hw.Forgectrl(timeout=timeout).get("/mode")
+    except hw.HwError:
+        return False
+    return st == 200 and isinstance(body, dict)
 
 
 class Runner:
@@ -921,6 +1093,10 @@ class Runner:
         self._fixture_lock = threading.Lock()
         self._fixture_said = None
         self.boot_ref = None
+        # safety records nothing in the log took (the leftover, the run's
+        # result and its bare record all refused): tried again before each
+        # start and export, which wait while any stands (_retry_refused)
+        self.refused_charges = []
         self.provenance = _provenance.Provenance(manifest)
         self.recover()
         threading.Thread(target=self._take_boot_reference, daemon=True,
@@ -976,9 +1152,13 @@ class Runner:
             return ()
         return tuple(c for c in fx.channels if fx.covers(c))
 
-    def fixture_release(self, run):
-        """After a run: any channel the fixture still holds energized is
-        released and recorded, like any other leftover."""
+    def fixture_release(self, run, left=None):
+        """After a run, once the post pass has locked the latch: any channel
+        the fixture still holds energized is released and recorded. A
+        release that fails, for any reason, is said, recorded, and a
+        leftover in `left`: a channel may still be held. Never raises, so
+        the hand-back always goes on."""
+        run.released = True
         fx = self.fixture
         if fx is None:
             return
@@ -988,25 +1168,76 @@ class Runner:
                 fx.release()
                 run.log("fixture: released %s left energized" % ", ".join(held))
             run.evidence.setdefault("fixture", {})["released"] = held
-        except _fixture.FixtureError as e:
-            run.log("fixture: release check failed: %s" % e)
-            run.evidence.setdefault("fixture", {})["release_error"] = str(e)
+        except Exception as e:  # noqa: BLE001 - the hand-back goes on whatever the box answered
+            why = "%s: %s" % (type(e).__name__, e)
+            run.log("fixture: release check failed: %s" % why)
+            run.evidence.setdefault("fixture", {})["release_error"] = why
+            if left is not None:
+                left.append(_baseline.Leftover("fixture", "release check failed (%s)" % why,
+                                               "nothing held", "failed: a channel may still be held"))
+
+    def fixture_release_locked(self, run):
+        """The release on a path where the post pass broke before its hook:
+        the latch is locked first here, since that pass may not have locked
+        it (a lock is never refused and fires nothing)."""
+        try:
+            hw.sysfs_write("cnc/laser_latch", "1")
+        except OSError as e:
+            run.log("baseline: the lock before the fixture's release failed: %s" % e)
+        self.fixture_release(run)
 
     # -- startup recovery ------------------------------------------------
     def recover(self):
+        """A takeover this process (or an earlier one) never ended: the
+        latch is locked and, on a machine nothing else drives, the machine
+        is handed back as the takeover's exit would have (an underrun
+        acknowledged, the saved attributes written back from the marker),
+        before forgectrl starts on it."""
         m = marker_path()
-        if os.path.exists(m):
-            try:
-                with open(m) as f:
-                    who = f.read().strip()
-            except OSError:
-                who = "?"
-            self._note("recovered a takeover left by '%s': starting forgectrl" % who)
-            hw.initd("forgectrl", "start")
-            try:
-                os.remove(m)
-            except OSError:
-                pass
+        if not os.path.exists(m):
+            return
+        try:
+            with open(m) as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            data = {"who": text.strip() or "?"}
+        saved = data.get("saved") if isinstance(data.get("saved"), dict) else {}
+        t = Takeover(self._note, data.get("who") or "?")
+        t.saved = {k: v for k, v in saved.items() if k in Takeover.PRESERVE and isinstance(v, str)}
+        # The attributes go back only on a machine nothing else drives: a
+        # drill that outlived the forgetest that ran it may still be playing
+        # (a motor_lock written under it would unmask an axis mid-run), and a
+        # forgectrl already up owns them. Then the latch is locked and the
+        # rest left.
+        busy = []
+        holders = Takeover.holders()
+        if holders:
+            busy.append("the pulse device held by pid %s" % ", ".join(str(p) for p in holders))
+        state = hw.sysfs_read("cnc/state")
+        if state == "running":
+            busy.append("the kernel running")
+        if forgectrl_answers():
+            busy.append("forgectrl up")
+        if busy:
+            t.lock()
+            self._note("recovered a takeover left by '%s' with %s: the latch is locked, the saved attributes "
+                       "(%s) are left as they are" % (t.who, " and ".join(busy),
+                                                      ", ".join("%s=%s" % kv for kv in t.saved.items()) or "none"))
+        else:
+            self._note("recovered a takeover left by '%s': handing the machine back (%s) and starting forgectrl"
+                       % (t.who, ", ".join("%s=%s" % kv for kv in t.saved.items()) or "no attributes saved"))
+            t.restore_attrs()
+        hw.initd("forgectrl", "start")
+        try:
+            os.remove(m)
+        except OSError:
+            pass
 
     # -- state -----------------------------------------------------------
     def tests(self):
@@ -1016,8 +1247,14 @@ class Runner:
         r = self.current
         return r.id if r and r.kind == "test" and not r.finished else None
 
+    def running_start(self):
+        """The place of the test run in progress's start record, or None."""
+        r = self.current
+        return r.start_seq if r and r.kind == "test" and not r.finished else None
+
     def state(self):
-        records = self.log.read()
+        # a run the log saw start and never saw end is the ERROR it is
+        records = _campaign.as_judged(self.log.read(), running=self.running_start())
         st = _campaign.compute(records, self.tests(), self.manifest, self.catalog_hash,
                                running=self.running_id())
         st["catalog_hash"] = self.catalog_hash
@@ -1068,10 +1305,12 @@ class Runner:
         return True, "campaign reset"
 
     def dispose(self, test_id, reason):
-        """The operator's answer to the FAIL or ERROR that blocks a test's
-        current fingerprint (campaign.py, reason "disposition"): recorded
-        with its reason, it lets a PASS on that fingerprint count again.
-        The artifact carries the disposition beside the result it answers."""
+        """The operator's answer to the FAIL, ERROR or leftover that blocks a
+        test's current fingerprint (campaign.py, reason "disposition"):
+        recorded with its reason, it lets a PASS on that fingerprint count
+        again, except one older than a leftover on the laser's safety state,
+        which still needs a PASS newer than it. The artifact carries the
+        disposition beside the record it answers."""
         reason = (reason or "").strip()
         if not reason:
             return False, "a reason is required"
@@ -1084,10 +1323,12 @@ class Runner:
             state, _ = self.state()
             ts = state["tests"][t.id]
             if ts["reason"] != "disposition":
-                return False, "nothing to dispose: no FAIL or ERROR on this fingerprint waits for one"
+                return False, "nothing to dispose: no FAIL, ERROR or leftover on this fingerprint waits for one"
             self.log.append({"t": "disposition", "test": t.id, "fingerprint": ts["fingerprint"],
                              "reason": reason})
-        return True, "disposition recorded; a PASS on this fingerprint counts again"
+            unsafe = (ts.get("leftover") or {}).get("safety")
+        return True, ("disposition recorded; after a leftover on the laser's safety state the test needs a new PASS"
+                      if unsafe else "disposition recorded; a PASS on this fingerprint counts again")
 
     def export(self):
         """(True, the signed artifact), or (False, why). A run in progress
@@ -1095,12 +1336,41 @@ class Runner:
         with self._lock:
             if self.busy():
                 return False, "a run is in progress"
+            held = self._retry_refused()
+            if held:
+                return False, held
+            # A run the log saw start and never saw end (the result and its
+            # bare record both refused, or forgetest gone mid-run) refuses
+            # every export until a campaign reset after it, across restarts.
+            raw = self.log.read()
+            pos = _campaign.positions(raw)
+            reset_at = max([pos[id(r)] for r in raw if r.get("t") == "reset"] or [0])
+            lost = [r for r in _campaign.lost_runs(raw) if pos[id(r)] > reset_at]
+            if lost:
+                return False, ("a run of %s started and left no result in the log: reset the campaign before "
+                               "an export" % ", ".join(sorted(set(r.get("test") for r in lost))))
             state, records = self.state()
         art = _artifact.build(state, self.tests(), self.manifest, records, self.catalog_hash)
         art = _artifact.sign(art, _artifact.bench_key())
         self.log.append({"t": "export", "artifact_sha256": art["sha256"], "authorized": art["authorized"],
                          "campaign": (state["campaign"] or {}).get("id")})
         return True, art
+
+    def _retry_refused(self):
+        """The safety records nothing in the log took, tried again; None when
+        none stands, else why a start or an export waits. They live in this
+        process only: a forgetest restart loses them, as a process death loses
+        a finding not yet written."""
+        for rec in list(self.refused_charges):
+            try:
+                self.log.append(rec)
+                self.refused_charges.remove(rec)
+            except Exception:  # noqa: BLE001 - it stands, and so does the refusal
+                pass
+        if not self.refused_charges:
+            return None
+        return ("a safety record the log refused is still held (charged to %s): free the log's disk, then try again"
+                % ", ".join(sorted(set(str(r.get("test")) for r in self.refused_charges))))
 
     # -- starting -----------------------------------------------------------
     def start_test(self, test_id, ack_live=False, ignore_requires=False):
@@ -1123,6 +1393,9 @@ class Runner:
         with self._lock:
             if self.busy():
                 return False, "a run is in progress", None
+            held = self._retry_refused()
+            if held:
+                return False, held, None
             state, _ = self.state()
             ts = state["tests"][t.id]
             missing = list(ts["missing_requires"])
@@ -1134,7 +1407,17 @@ class Runner:
             if reason:
                 return False, "cannot start: %s" % reason, None
             campaign = self._open_campaign_if_needed(state)
+            # The log learns of the run before its first pass, so a run
+            # that never ends (forgetest gone mid-run) is still in it
+            # (campaign.with_lost_runs); a run it cannot learn of does not start.
+            try:
+                start = self.log.append({"t": "start", "campaign": campaign["id"], "test": t.id,
+                                         "fingerprint": t.fingerprint(self.manifest)})
+            except Exception as e:  # noqa: BLE001 - whatever stopped the log stops the run
+                return False, "the run's start could not be recorded: %s: %s" % (type(e).__name__, e), None
             run = Run("test", t.id, t.title)
+            run.start_seq = start["seq"]
+            run.fingerprint, run.campaign_id = start["fingerprint"], campaign["id"]
             self.last = self.current
             self.current = run
         run.log("start %s (%s, %s) in campaign %s" % (t.id, t.kind, t.hardware, campaign["id"]))
@@ -1279,45 +1562,227 @@ class Runner:
         keeps the mode the test asked for: a queue that crosses from the
         cloud tests to a motion test switches once, there, and stays.
         Returns the captured preserved state for the post pass."""
-        bl = _baseline.Baseline(run.log, abort=run.aborted.is_set)
+        run.safety_charged = []
+        bl = _baseline.Baseline(run.log, abort=run.aborted.is_set,
+                                on_safety=lambda found: self._safety_found(run, "pre", found))
         left = bl.enforce("pre", captured=None)
-        if left:
-            who = self.last.id if self.last is not None else "an earlier run"
-            journal.info("leftovers before %s (left by %s): %s"
-                         % (run.id, who, "; ".join(str(x) for x in left)))
         run.evidence["baseline"] = {"pre": [x.as_dict() for x in left]}
+        # The safety findings are charged already, as they were read (the
+        # safety rule). What the pass could not judge (forgectrl silent, the
+        # kernel or a readback unreadable) stops the run below and is charged
+        # to nobody: it is no state the run before left.
+        others = [x for x in left if x.judged() and x.item not in _campaign.SAFETY_ITEMS]
+        self._retry_safety(run)
+        if run.aborted.is_set():
+            # An Abort cuts the pass's waits short, so what they settle is
+            # not judged: nothing more is charged, and the run ends.
+            run.evidence["baseline"]["charged"] = (run.safety_charged or [None])[0]
+            raise Aborted("aborted during the pass before the run")
+        if left:
+            charged = self._charge_previous(run, others) if others else None
+            charged = (run.safety_charged or [charged])[0]
+            who = ("%s charged with what it left%s" % (charged, " (on this run's own result: the log refused "
+                                                                "the record)" if run.safety_pending else "")
+                   if charged
+                   else "charged to nobody: the pass could not judge it" if not any(x.judged() for x in left)
+                   else "charged to nobody: no run of this boot to charge with the laser's safety state, "
+                        "and no PASS of the open campaign just before it")
+            journal.info("leftovers before %s (%s): %s" % (run.id, who, "; ".join(str(x) for x in left)))
+            run.evidence["baseline"]["charged"] = charged
+            # The laser's safety state off before the run: the pass has just
+            # locked it again, and a test that ran now would read the lock
+            # it put there, not the state the machine was found in.
+            safety = [x for x in left if x.item in _campaign.SAFETY_ITEMS]
+            if safety:
+                raise NotRun("the machine was found with its laser safety state changed before the run (%s): "
+                             "%s; the latch is locked again and the run did not start"
+                             % (who, "; ".join(str(x) for x in safety)))
+            blind = [x for x in left if x.item in ("forgectrl", "kernel sysfs")]
+            if blind:
+                raise NotRun("the machine's state could not be captured before the run: %s"
+                             % "; ".join(str(x) for x in blind))
         if mode:
             found = bl.mode
             ok, detail = bl.switch_mode(mode)
             run.log("mode: test needs %s - %s" % (mode, detail))
             run.evidence["mode"] = {"needs": mode, "found": found, "switched": found != mode,
                                     "ok": ok, "detail": detail}
+            # the latch read before the switch, after the pass: the safety
+            # rule has charged it, and the run does not start
+            unlocked = [x for x in bl.switch_found if x.item in _campaign.SAFETY_ITEMS]
+            if unlocked:
+                self._retry_safety(run)
+                run.evidence["baseline"]["switch"] = [x.as_dict() for x in unlocked]
+                raise NotRun("the machine was found with its laser safety state changed before the mode switch: "
+                             "%s; the latch is locked again and the run did not start"
+                             % "; ".join(str(x) for x in unlocked))
             if not ok:
                 raise Failed("the test needs %s mode and the machine could not be brought "
                              "there: %s" % (mode, detail))
         run.baseline_captured = bl.capture()
+        if bl.missed and not _baseline.host_run():
+            raise NotRun("the machine's state could not be captured before the run: forgectrl did not "
+                         "answer %s" % ", ".join(bl.missed))
         return run.baseline_captured
 
+    def _safety_found(self, run, phase, found):
+        """The safety rule. A leftover on the laser's safety state (a
+        campaign.SAFETY_ITEMS member, judged) goes into the log the moment
+        the pass reads it, before the pass waits on anything after that read,
+        as a `leftover` record marked safety that holds a fingerprint until a
+        PASS newer than it (and a disposition). Found in a test's own pass
+        after its run, or by the reads before a takeover in its body
+        (phase "body"), it is that run's: on its fingerprint, and the run
+        fails (_judge_and_record). Found before a run, it is charged to the
+        newest run of this boot that finished, a result in the log whatever
+        its campaign and whatever its result, looking back past runs that
+        never ended and bench tools; a bench tool's own passes and its
+        takeover's reads, which hold no fingerprint, charge that run the same
+        way. The charge follows time, not cause: a client that arms during a
+        later test's body is charged to that later test. A record the log
+        refuses is tried again at the end of the pass before a run, then
+        carried on the run's own result (campaign.with_carried_charges); one
+        nothing took stays on the runner (refused_charges), which tries it
+        again before each start and export and refuses both while it stands."""
+        items = "; ".join(str(x) for x in found)
+        when = {"post": "after", "body": "during"}.get(phase, "before")
+        if phase == "body":
+            run.body_safety.extend(found)       # a test's own: the run fails (_judge_and_record)
+        if phase in ("post", "body") and run.kind == "test":
+            target = {"campaign": run.campaign_id, "test": run.id, "fingerprint": run.fingerprint}
+        else:
+            target = self._safety_target(run)
+            if target is None:
+                journal.info("the laser's safety state off %s %s, with no run of this boot to charge: %s"
+                             % (when, run.id, items))
+                return
+        message = "the laser's safety state found off %s %s %s: %s" % (when, run.kind, run.id, items)
+        rec = {"t": "leftover", "campaign": target.get("campaign"), "test": target.get("test"),
+               "fingerprint": target.get("fingerprint"), "leftovers": [x.as_dict() for x in found],
+               "needs_disposition": True, "safety": True, "message": message,
+               "found_" + when: "%s %s" % (run.kind, run.id)}
+        try:
+            self.log.append(rec)
+        except Exception as e:  # noqa: BLE001 - the charge stands on the run's own result instead
+            run.safety_pending.append(rec)
+            run.log("baseline: the log refused the safety record (%s: %s); the run's own result carries it"
+                    % (type(e).__name__, e))
+        run.safety_charged.append(target.get("test"))
+        journal.info("%s (charged to %s)" % (message, target.get("test")))
+
+    def _retry_safety(self, run):
+        """The safety records the log refused, tried once more."""
+        for rec in list(run.safety_pending):
+            try:
+                self.log.append(rec)
+                run.safety_pending.remove(rec)
+            except Exception:  # noqa: BLE001 - carried on the result instead
+                pass
+
+    def _safety_target(self, run):
+        """The newest result in the log before this run's own start that was
+        recorded in this boot, or None."""
+        records = self.log.read()
+        pos = _campaign.positions(records)
+        mine = run.start_seq if run.start_seq is not None else float("inf")
+        return next((r for r in reversed(records) if r.get("t") == "result" and pos[id(r)] < mine
+                     and r.get("boot") == boot_id()), None)
+
+    def _charge_previous(self, run, left):
+        """A leftover a pre pass finds that is not on the laser's safety state
+        (those follow the safety rule, _safety_found) is charged to the test
+        that ran last: a `leftover` record for its fingerprint, which holds it
+        like a FAIL until the operator records a disposition with a reason
+        (the operator may have touched the machine between the runs). The test
+        is read from the log, not from memory, which a restart of forgetest
+        empties: the newest run start or result before this run's own start,
+        when it is a PASS of the open campaign recorded in this boot. Nothing
+        is charged when that is a start: a bench tool's (its own post pass
+        judged what it left) or a test run's that never ended (a result the
+        log could not take, a forgetest gone mid-run). Nor across a boot.
+        Returns the test charged, or None."""
+        records = self.log.read()
+        pos = _campaign.positions(records)
+        mine = run.start_seq if run.start_seq is not None else float("inf")
+        prev = next((r for r in reversed(records)
+                     if r.get("t") in ("result", "start") and pos[id(r)] < mine), None)
+        if prev is None or prev.get("t") != "result" or prev.get("result") != _campaign.PASS \
+                or prev.get("boot") != boot_id():
+            return None
+        campaign = _campaign.open_campaign(_campaign.as_judged(records, running=run.start_seq),
+                                           self.manifest.content_sha, self.catalog_hash)[0]
+        if campaign is None or prev.get("campaign") != campaign.get("id"):
+            return None
+        found = "; ".join(str(x) for x in left)
+        self.log.append({"t": "leftover", "campaign": prev.get("campaign"), "test": prev.get("test"),
+                         "fingerprint": prev.get("fingerprint"), "found_before": "%s %s" % (run.kind, run.id),
+                         "leftovers": [x.as_dict() for x in left], "needs_disposition": True,
+                         "message": "left behind and found before %s %s: %s" % (run.kind, run.id, found)})
+        return prev.get("test")
+
     def _baseline_post(self, run, captured):
-        bl = _baseline.Baseline(run.log)
-        left = bl.enforce("post", captured=run.baseline_captured or captured)
+        # The fixture lets go of what it holds only after the laser side has
+        # locked the latch: a loop it held open closes the chain. A safety
+        # finding is the run's own, recorded as it is read.
+        run.safety_charged = []
+        bl = _baseline.Baseline(run.log, on_safety=lambda found: self._safety_found(run, "post", found))
+        left = bl.enforce("post", captured=run.baseline_captured or captured,
+                          after_laser=lambda found: self.fixture_release(run, found))
         run.evidence.setdefault("baseline", {})["post"] = [x.as_dict() for x in left]
         if left:
             journal.info("leftovers after %s: %s" % (run.id, "; ".join(str(x) for x in left)))
         return left
 
     def _exec_test(self, t, run, campaign):
+        """Run one test and record its result. The run is finished on every
+        path: a result the log could not take is said on the run as an
+        ERROR, never left running, which would refuse every start until the
+        daemon restarted."""
+        try:
+            self._judge_and_record(t, run, campaign)
+        except Exception as e:  # noqa: BLE001 - the run ends whatever broke
+            message = "the result was not recorded: %s: %s" % (type(e).__name__, e)
+            run.log(traceback.format_exc().rstrip())
+            run.log("result %s: %s" % (_campaign.ERROR, message))
+            journal.info("%s: %s" % (run.id, message))
+            if not run.released:
+                self.fixture_release_locked(run)
+            # The log still learns of the run: a bare ERROR that closes the
+            # campaign and holds the fingerprint, so an earlier PASS of the
+            # test does not stand for a run whose result was lost. A log
+            # that takes not even that keeps the run's start with no result
+            # after it, which is the same ERROR (campaign.with_lost_runs)
+            # and refuses every export until a reset.
+            try:
+                bare = {"t": "result", "campaign": campaign["id"], "test": t.id,
+                        "result": _campaign.ERROR, "fingerprint": run.fingerprint, "message": message,
+                        "start": run.start_seq, "needs_disposition": True, "not_recorded": True}
+                if run.safety_pending:
+                    bare["charges"] = list(run.safety_pending)
+                self.log.append(bare)
+            except Exception as again:  # noqa: BLE001
+                journal.info("%s: not even its bare record went in (%s): its start stands as an ERROR "
+                             "and every export is refused until the campaign is reset" % (run.id, again))
+                self.refused_charges.extend(run.safety_pending)
+            run.finished = {"result": _campaign.ERROR, "message": message,
+                            "duration_s": int(time.time() - run.started)}
+
+    def _judge_and_record(self, t, run, campaign):
         ctx = Context(run, self, t)
         fp = t.fingerprint(self.manifest)
         before = self.provenance.check()
         result, message = _campaign.PASS, ""
         fixture_error = False
+        not_run = False
         captured = None
         try:
             captured = self._baseline_pre(run, mode=t.mode)
             t.fn(ctx)
             if run.aborted.is_set():
                 result, message = _campaign.ABORTED, "aborted"
+        except NotRun as e:
+            result, message = _campaign.ERROR, str(e)
+            not_run = True
         except Aborted as e:
             result, message = _campaign.ABORTED, str(e) or "aborted"
         except Failed as e:
@@ -1330,7 +1795,7 @@ class Runner:
         except Exception as e:  # noqa: BLE001 - an erroring test is a failed test
             result, message = _campaign.ERROR, "%s: %s" % (type(e).__name__, e)
             run.log(traceback.format_exc().rstrip())
-        self.fixture_release(run)
+        left = []
         try:
             left = self._baseline_post(run, captured)
             # A test hands the machine back as it found it. Anything left
@@ -1347,26 +1812,51 @@ class Runner:
                 result = _campaign.FAIL
                 message = ("the machine was not handed back as found: %s"
                            % "; ".join(str(x) for x in left))
-        except Exception as e:  # noqa: BLE001 - never lose the result over the cleanup
+        except Exception as e:  # noqa: BLE001 - the result is recorded whatever the hand-back did
             run.log("baseline: post pass errored: %s: %s" % (type(e).__name__, e))
+            run.log(traceback.format_exc().rstrip())
+            # A hand-back that did not finish judged nothing after the point
+            # it broke: the run is not a PASS.
+            if result == _campaign.PASS:
+                result, message = _campaign.ERROR, ("the hand-back could not be judged: %s: %s"
+                                                    % (type(e).__name__, e))
+            if not run.released:
+                self.fixture_release_locked(run)
+        # The safety rule: the laser's safety state found off after the run
+        # fails it, whatever the run was (an Abort included: the pass reads
+        # the latch before any wait an Abort could cut short).
+        if run.safety_charged or run.body_safety or any(x.judged() and x.item in _campaign.SAFETY_ITEMS
+                                                        for x in left):
+            if result != _campaign.FAIL:
+                message = "the laser's safety state was found off after the run%s" % (
+                    " (the run was %s: %s)" % (result, message) if message else "")
+                result = _campaign.FAIL
+            fixture_error = not_run = False
         duration = int(time.time() - run.started)
         run.log("result %s%s" % (result, (": " + message) if message else ""))
         # whether the run was earned on the pins as built, judged before it
         # and after it: a result that was not is never inherited
         rec = {"t": "result", "campaign": campaign["id"], "test": t.id, "result": result,
-               "fingerprint": fp, "manifest_sha": self.manifest.content_sha,
+               "start": run.start_seq, "fingerprint": fp, "manifest_sha": self.manifest.content_sha,
                "image": self.manifest.version, "duration_s": duration, "message": message,
                "provenance": _provenance.merge(before, self.provenance.check()),
                "evidence": run.evidence, "answers": run.answers, "log": list(run.lines)}
         if fixture_error and result == _campaign.ERROR:
             rec["fixture_error"] = True
+        elif not_run and result == _campaign.ERROR:
+            rec["not_run"] = True
         elif result in _campaign.CLOSING:
             # A FAIL, or an ERROR the test raised, blocks this fingerprint
             # until the operator records a disposition (campaign.py): a
             # rerun that passes is not an answer to it. An ERROR the bench
-            # fixture raised judged nothing, and asks for a rerun only.
+            # fixture raised, or one before the test ran, judged nothing,
+            # and asks for a rerun only.
             rec["needs_disposition"] = True
-        self.log.append(rec)
+        if run.safety_pending:
+            # safety records the log refused: they stand on this result
+            # (campaign.with_carried_charges)
+            rec["charges"] = list(run.safety_pending)
+        self.log.append(rec)            # a log that cannot take it ends the run in _exec_test
         run.finished = {"result": result, "message": message, "duration_s": duration}
 
     # -- bench tools ---------------------------------------------------------
@@ -1388,7 +1878,18 @@ class Runner:
         with self._lock:
             if self.busy():
                 return False, "a run is in progress"
+            held = self._retry_refused()
+            if held:
+                return False, held
+            # A bench tool's start is in the log too: a leftover found after
+            # it is not charged to the test before it, whatever restarts
+            # come between (_charge_previous).
+            try:
+                start = self.log.append({"t": "start", "bench": tool["id"]})
+            except Exception as e:  # noqa: BLE001 - whatever stopped the log stops the run
+                return False, "the run's start could not be recorded: %s: %s" % (type(e).__name__, e)
             run = Run("bench", tool["id"], tool["title"])
+            run.start_seq = start["seq"]
             self.last = self.current
             self.current = run
         run.log("bench %s: %s" % (tool["id"], " ".join(argv)))
@@ -1414,7 +1915,10 @@ class Runner:
                 tok = hw.Forgectrl().token
                 if tok:
                     env["GF_TOKEN"] = tok
-            takeover = (Takeover(run.log, "bench:" + tool["id"])
+            # a finding of the takeover's reads before its stop is charged as
+            # in the tool's pass before it, and the tool does not start
+            takeover = (Takeover(run.log, "bench:" + tool["id"],
+                                 on_safety=lambda found: self._safety_found(run, "body", found))
                         if tool.get("safety") in ("takeover", "scope") else None)
             if takeover is not None:
                 takeover.__enter__()
@@ -1437,6 +1941,10 @@ class Runner:
             self._baseline_post(run, captured)
         except Exception as e:  # noqa: BLE001
             run.log("baseline: post pass errored: %s: %s" % (type(e).__name__, e))
+        # a bench tool has no result to carry a refused safety record: the
+        # runner keeps it (_retry_refused)
+        self._retry_safety(run)
+        self.refused_charges.extend(run.safety_pending)
         duration = int(time.time() - run.started)
         result = "ABORTED" if run.aborted.is_set() else ("OK" if rc == 0 else "EXIT %s" % rc)
         run.log("bench %s finished: %s" % (tool["id"], result))
