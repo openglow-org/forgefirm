@@ -99,6 +99,22 @@ reported messages:
      own M4 prompts; a feed move with no S word after the same stall is a
      dry run and moves with no alarm, and a cutting move planned behind a
      running dry move stops the job with none of its own steps shipped
+ 24. nothing a sender sends keeps a held M3 job's window open: with $63=7
+     written and a spindle-stop override (0x9E) inside the hold, which
+     turns the spindle back on there, a feed hold longer than
+     laser_disarm_s closes the window and locks the latch, and the ~
+     after it asks for the button with no FIRE tick shipped; a hold the
+     cooling verdict's pause tier takes, with the same two, closes the
+     window the same way, and when the verdict clears the job stays held,
+     with no FIRE tick shipped, until a press
+ 25. no job parks in Tool Change: with $341=0 written, an M6 T1 in an
+     armed M3 job is ignored, the job left longer than laser_disarm_s
+     closes its window, and the ~ and the cutting move after it ship no
+     FIRE tick
+ 26. a resume inside the grace is not delayed past it: with $673=3
+     written, M8 on and the flood toggled off in the hold (so the resume
+     restores it), a ~ inside the grace resumes the held job lit, with no
+     disarm and no press
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -108,8 +124,11 @@ the file-backed test source (GF_SWITCH_FILE: the EV_SW word as an integer).
 A case stops at once when its controller logs the armed clamp (the host
 kept the producer off the CPU past its lead, so the stream faulted the run
 on purpose and the case did not run). It runs once more from new
-controllers, and a second starve fails the harness; no other failure runs
-a case again.
+controllers, and a second starve fails the harness. The cases that send a
+byte inside the grace of a hold (rules 24 and 26) treat a hold not reached
+within 6 s, or a window the grace closed before their byte, the same way:
+a host too slow for the case, never a pass. No other failure runs a case
+again.
 
 Usage: laser_lifecycle_test.py [path-to-binary]
        (default ./build-native/grblHAL_glowforge)
@@ -537,6 +556,23 @@ class Session:
         except OSError:
             return 0
         return sum((-1 if b & 0x02 else 1) for b in data if not b & 0x80 and b & 0x01)
+
+    def dump_size(self):
+        try:
+            return os.path.getsize(self.dump)
+        except OSError:
+            return 0
+
+    def fire_ticks(self, since=0):
+        """The FIRE ticks the shipped stream carried from byte `since` on: a
+        tick byte (bit 7 clear) with the FIRE bit (0x10) set."""
+        try:
+            with open(self.dump, "rb") as f:
+                f.seek(since)
+                data = f.read()
+        except OSError:
+            return 0
+        return sum(1 for b in data if not b & 0x80 and b & 0x10)
 
     def armed_count(self):
         return "".join(self.log).count(ARMED)
@@ -1536,6 +1572,181 @@ def test_resume_under_a_pause_verdict_stays_held():
         s.close()
 
 
+# The spindle-stop override, a sender's realtime byte: in a hold whose laser
+# the hold has turned off, it turns the spindle back on at level 0.
+SPINDLE_STOP_OVERRIDE = b"\x9e"
+
+
+def held_in_time(s, tag, timeout=6.0):
+    """Hold:0 within `timeout`. A hold reached later than that is a slow
+    host, not the rule: the case runs once more (HostStarved, the starve
+    rule), and a second miss fails the harness. The miss names the states
+    seen on the way."""
+    seen = []
+    end = time.time() + timeout
+    while time.time() < end:
+        st = s.state()
+        if not seen or seen[-1] != st:
+            seen.append(st)
+        if st.startswith("Hold:0"):
+            return
+        time.sleep(0.1)
+    raise HostStarved("[%s] no Hold:0 within %.0f s (states seen: %s)"
+                      % (tag, timeout, " ".join(seen) or "none"))
+
+
+def window_still_open(s, tag, what):
+    """The case's next byte belongs inside the grace: a window the grace
+    has already closed means the host was too slow for the case, which
+    then runs once more (HostStarved) rather than pass without testing
+    `what`."""
+    if s.disarmed_count() != 0:
+        raise HostStarved("[%s] the grace closed the window before %s: the host was too slow "
+                          "for the case" % (tag, what))
+
+
+def test_a_held_job_with_63_typed_closes_its_window():
+    """Rule 24, the sender's hold: $63=7 from a sender, whose bit 2 would
+    leave the laser on at its floor through a hold, and a spindle-stop
+    override inside the hold, which turns the spindle back on there. A
+    feed hold longer than the grace closes the window all the same, and
+    the ~ after it ships nothing lit without a press."""
+    s = Session("hold-63-feed", disarm_s=2, switches=SW_CLOSED, dump=True)
+    try:
+        send_line(s.sock, "$63=7", s.log)
+        arm_by_press(s, "hold-63-feed", line="M3 S100")
+        send_line(s.sock, "G1 X5 F60", s.log)           # 5 s of motion
+        time.sleep(1.0)
+        s.sock.sendall(b"!")
+        held_in_time(s, "hold-63-feed")
+        time.sleep(0.3)
+        window_still_open(s, "hold-63-feed", "the spindle-stop override")
+        s.sock.sendall(SPINDLE_STOP_OVERRIDE)           # within the grace
+        time.sleep(4.0)                                 # twice the grace
+        mark = s.dump_size()
+        s.sock.sendall(b"~")
+        read_avail(s.sock, s.log, 1.5)
+        lit = s.fire_ticks(mark)
+        if lit:
+            fail("[hold-63-feed] the ~ after the hold shipped %d FIRE ticks with no press" % lit)
+        if s.disarmed_count() != 1 or s.count(RESUME_PROMPT) != 1:
+            fail("[hold-63-feed] the hold did not close the window (%d disarms) or the ~ did not "
+                 "ask for the button" % s.disarmed_count())
+        s.sock.sendall(b"\x18")
+        print("PASS [hold-63-feed]: with $63=7 written and a spindle-stop override in the hold, "
+              "the hold closed the window, and the ~ asked for the button with 0 FIRE ticks shipped")
+    finally:
+        s.close()
+
+
+def test_a_verdict_hold_with_63_typed_closes_its_window():
+    """Rule 24, the cooling verdict's hold: with $63=7 written and a
+    spindle-stop override inside the hold, a pause-tier hold longer than
+    the grace closes the window, and when the verdict clears the job stays
+    held with nothing shipped lit until a press."""
+    s = Session("hold-63-verdict", disarm_s=2, switches=SW_CLOSED, dump=True)
+    try:
+        send_line(s.sock, "$63=7", s.log)
+        arm_by_press(s, "hold-63-verdict", line="M3 S100")
+        send_line(s.sock, "G1 X10 F60", s.log)          # 10 s of motion
+        time.sleep(1.0)
+        s.set_verdict("OVERTEMP", fire_ok=False, hold=True, resume_ok=False)
+        held_in_time(s, "hold-63-verdict")
+        time.sleep(0.3)
+        window_still_open(s, "hold-63-verdict", "the spindle-stop override")
+        s.sock.sendall(SPINDLE_STOP_OVERRIDE)           # within the grace
+        time.sleep(4.0)                                 # twice the grace
+        mark = s.dump_size()
+        s.set_verdict()                                 # the verdict clears
+        read_avail(s.sock, s.log, 3.0)
+        lit = s.fire_ticks(mark)
+        if lit:
+            fail("[hold-63-verdict] the cleared verdict resumed the job with no press: %d FIRE "
+                 "ticks shipped" % lit)
+        if s.disarmed_count() != 1 or not s.state().startswith("Hold"):
+            fail("[hold-63-verdict] the verdict's hold did not close the window (%d disarms), or "
+                 "the job left the hold (state %s)" % (s.disarmed_count(), s.state()))
+        s.sock.sendall(b"\x18")
+        print("PASS [hold-63-verdict]: with $63=7 written and a spindle-stop override in the hold, "
+              "the verdict's hold closed the window, and the clear left the job held with 0 FIRE "
+              "ticks shipped")
+    finally:
+        s.close()
+
+
+def test_an_m6_parks_no_job():
+    """Rule 25: an M6 in an armed M3 job, $341=0 written (the core's own
+    tool-change mode, which would park the job in Tool Change with the
+    laser state on). The M6 is ignored, the grace closes the window, and
+    the ~ and the job's next cutting move ship nothing lit."""
+    s = Session("m6-ignored", disarm_s=2, switches=SW_CLOSED, dump=True)
+    try:
+        send_line(s.sock, "$341=0", s.log)
+        arm_by_press(s, "m6-ignored", line="M3 S100")
+        send_line(s.sock, "G1 X3 F600", s.log)
+        wait_idle(s.sock, s.log)
+        s.send_raw("M6 T1")
+        read_avail(s.sock, s.log, 0.5)
+        parked = s.state()
+        wait_for(s.log, DISARMED, 6, s.sock)
+        mark = s.dump_size()
+        s.sock.sendall(b"~")
+        read_avail(s.sock, s.log, 1.5)
+        s.send_raw("G1 X6 F600")
+        read_avail(s.sock, s.log, 1.0)
+        wait_idle(s.sock, s.log)
+        lit = s.fire_ticks(mark)
+        if lit:
+            fail("[m6-ignored] the ~ and the next cutting move after the M6 shipped %d FIRE ticks "
+                 "with no press (state after the M6: %s)" % (lit, parked))
+        if parked.startswith("Tool") or s.disarmed_count() != 1:
+            fail("[m6-ignored] the M6 parked the job (state %s) or the window did not close "
+                 "(%d disarms)" % (parked, s.disarmed_count()))
+        send_line(s.sock, "M5", s.log)
+        print("PASS [m6-ignored]: the M6 parked nothing, the grace closed the window, and the ~ "
+              "and the next cutting move shipped 0 FIRE ticks")
+    finally:
+        s.close()
+
+
+# The flood coolant toggle, a sender's realtime byte.
+FLOOD_TOGGLE = b"\xa0"
+
+
+def test_a_resume_inside_the_grace_is_not_delayed_past_it():
+    """Rule 26: $673=3 from a sender, a 3 s coolant on-delay the resume
+    would wait out in the hold, after the laser's restore and before the
+    cycle, and the flood toggled off in the hold so the resume restores
+    it. A ~ inside the grace resumes the job lit."""
+    s = Session("resume-673", disarm_s=4, switches=SW_CLOSED, dump=True)
+    try:
+        send_line(s.sock, "$673=3", s.log)
+        send_line(s.sock, "M8", s.log)
+        arm_by_press(s, "resume-673", line="M3 S100")
+        send_line(s.sock, "G1 X10 F60", s.log)          # 10 s of motion
+        if s.wait_state("Run", 3) is None:
+            fail("[resume-673] the armed move did not start (state %s)" % s.state())
+        time.sleep(1.0)
+        s.sock.sendall(b"!")
+        held_in_time(s, "resume-673")
+        s.sock.sendall(FLOOD_TOGGLE)
+        time.sleep(0.5)
+        window_still_open(s, "resume-673", "the ~")
+        mark = s.dump_size()
+        s.sock.sendall(b"~")                            # inside the 4 s grace
+        read_avail(s.sock, s.log, 5.0)
+        lit = s.fire_ticks(mark)
+        if not lit or s.disarmed_count() != 0 or s.count("laser fire suppressed"):
+            fail("[resume-673] the ~ inside the grace did not resume the job lit (%d FIRE ticks, "
+                 "%d disarms, fire suppressed %d times)"
+                 % (lit, s.disarmed_count(), s.count("laser fire suppressed")))
+        s.sock.sendall(b"\x18")
+        print("PASS [resume-673]: with $673=3 written and the flood toggled in the hold, the ~ "
+              "inside the grace resumed the job lit (%d FIRE ticks)" % lit)
+    finally:
+        s.close()
+
+
 def test_manual_home_closes_the_window():
     """Rule 22: a manual home runs at Idle, so the poll's homing-state
     close never sees it; the home itself closes the window."""
@@ -1642,6 +1853,10 @@ def main():
                  test_window_does_not_outlive_its_job,
                  test_rearm_waits_for_the_engine,
                  test_resume_under_a_pause_verdict_stays_held,
+                 test_a_held_job_with_63_typed_closes_its_window,
+                 test_a_verdict_hold_with_63_typed_closes_its_window,
+                 test_an_m6_parks_no_job,
+                 test_a_resume_inside_the_grace_is_not_delayed_past_it,
                  test_sender_change_during_rearm_cancels,
                  test_status_files,
                  test_laser_keys_reload,

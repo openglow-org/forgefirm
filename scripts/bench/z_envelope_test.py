@@ -53,6 +53,24 @@ them:
      move inside the bed runs; a stream fault or a controller start
      drops them again with the reference
 
+Two settings a sender writes could move the machine with no reference.
+The core's homing cycle drives an axis toward a switch this machine does
+not have, and the core runs the stored startup lines at every start:
+
+ 11. with $22=3 written, $H under homing_mode none and $HX under every
+     mode (none, manual, gfcloud, switches) are refused, and no step
+     ships: $22's homing bits are pinned off
+ 12. a startup line takes modal-state words only, in every word of every
+     block: with the motors released (Alarm), $N0=G0X10, $N0=M103P1,
+     $N0=G21G0X10, $N0=G21X10, $N0=G21(c)X10 (an axis word behind a
+     comment), $N0=G21|G0X10 and $N1=G0X10 are refused, and $ME ships no
+     step; $N0=G21G90 and $N1=G21G91 are stored. Stored lines
+     that hold more (G21|G0X10, a motion block behind a modal one, and
+     G21X10, an axis word behind a modal one, written into the settings
+     file where the two stored lines sit) are cleared at the next start:
+     the start ships no step, the referenced lens stays on its edge, and
+     $N lists both slots empty
+
 The binary keeps its settings in EEPROM.DAT in the working directory, so
 each run starts from defaults in a temporary directory and leaves
 nothing behind.
@@ -98,16 +116,14 @@ class Session:
     `referenced` the lens marker forgectrl leaves is in the state
     directory, so the driver takes the lens reference at its start."""
 
-    def __init__(self, conf=None, referenced=False):
-        self.workdir = tempfile.mkdtemp(prefix="z-envelope-")
+    def __init__(self, conf=None, referenced=False, workdir=None):
+        self.workdir = workdir or tempfile.mkdtemp(prefix="z-envelope-")
         env = dict(os.environ, GF_STATE_DIR=self.workdir, FFLOG_STDERR="1")
         for key in ("GFSINK", "GF_SWITCH_FILE", "GF_VERDICT_FILE"):
             env.pop(key, None)
-        conf_path = os.path.join(self.workdir, "forgefirm.conf")
-        with open(conf_path, "w") as f:
-            for k, v in (conf or {}).items():
-                f.write("%s = %s\n" % (k, v))
-        env["GFHOME_CONF"] = conf_path
+        self.conf_path = os.path.join(self.workdir, "forgefirm.conf")
+        self.write_conf(conf)
+        env["GFHOME_CONF"] = self.conf_path
         self.dump = os.path.join(self.workdir, "stream.bin")
         env["GFSINK_DUMP"] = self.dump
         if referenced:
@@ -119,6 +135,12 @@ class Session:
                                      stderr=subprocess.PIPE)
         self.sock = self.connect()
         self.read(1.0)                  # banner and any boot messages
+
+    def write_conf(self, conf):
+        """The shared config; the driver reads homing_mode at every $H."""
+        with open(self.conf_path, "w") as f:
+            for k, v in (conf or {}).items():
+                f.write("%s = %s\n" % (k, v))
 
     def connect(self):
         for _ in range(50):
@@ -149,6 +171,27 @@ class Session:
     def send(self, line, timeout=1.0):
         self.sock.sendall(b"?" if line == "?" else (line + "\n").encode())
         return self.read(timeout)
+
+    def ask(self, line, timeout=2.0):
+        """send(), returning once the answer is whole: an ok, an error, or,
+        for '?', the status report."""
+        self.sock.sendall(b"?" if line == "?" else (line + "\n").encode())
+        out, end = "", time.time() + timeout
+        while time.time() < end:
+            out += self.read(0.05)
+            if (">" in out if line == "?" else re.search(r"^(ok|error:\d+)\r?$", out, re.M)):
+                break
+        return out
+
+    def quick_state(self):
+        m = re.search(r"<(\w+)", self.ask("?"))
+        return m.group(1) if m else "?"
+
+    def quick_z(self):
+        m = re.search(r"[MW]Pos:(-?[\d.]+),(-?[\d.]+),(-?[\d.]+)", self.ask("?"))
+        if not m:
+            fail("no position in the status report")
+        return float(m.group(3))
 
     def setting(self, key):
         reply = self.send(key)
@@ -211,7 +254,7 @@ class Session:
         if self.state() != "Idle":
             fail("controller did not return to Idle after an alarm")
 
-    def close(self):
+    def close(self, keep=False):
         try:
             self.sock.close()
         except OSError:
@@ -221,7 +264,8 @@ class Session:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
-        shutil.rmtree(self.workdir, ignore_errors=True)
+        if not keep:
+            shutil.rmtree(self.workdir, ignore_errors=True)
 
 
 def check(ok, ok_msg, fail_msg):
@@ -347,6 +391,121 @@ def homed_cases():
         s.close()
 
 
+def homing_cases():
+    """Rule 11: $22 written by a sender does not reach the core's homing
+    cycle, under any homing mode."""
+    s = Session(conf={"lens_hall_edge_z_mm": "3.35"}, referenced=True)
+    try:
+        z0 = s.quick_z()
+        reply = s.ask("$22=3")          # enabled and single-axis commands, as a sender writes it
+        check(re.search(r"^ok\r?$", reply, re.M), "$22=3 is accepted", "$22=3: %r" % reply)
+        reply = s.ask("$H")
+        check("error:5" in reply, "$H under homing_mode none is refused with $22=3 written",
+              "$H under homing_mode none with $22=3: %r" % reply)
+        for mode in ("none", "manual", "gfcloud", "switches"):
+            s.write_conf({"lens_hall_edge_z_mm": "3.35", "homing_mode": mode,
+                          "gfcloud_home_cmd": "true"})
+            reply = s.ask("$HX")
+            check("error:5" in reply, "$HX under homing_mode %s is refused" % mode,
+                  "$HX under homing_mode %s: %r" % (mode, reply))
+        s.ask("")                       # the error the core holds until an empty line
+        time.sleep(0.5)
+        n, z = s.steps(), s.quick_z()
+        check(n == 0 and abs(z - z0) < 0.001, "no step shipped, Z still %.3f" % z,
+              "%d step ticks shipped, Z %.3f from %.3f" % (n, z, z0))
+    finally:
+        s.close()
+
+
+def nvs_crc(data):
+    """The core's settings-store checksum (a Modbus CRC-16)."""
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+
+def stored_line_at(data, text):
+    """Where the settings file holds the startup line `text`, and the line's
+    length: the core stores a fixed-length line with its CRC-16 after it,
+    low byte first."""
+    needle = text.encode() + b"\0"
+    i = data.find(needle)
+    while i >= 0:
+        for size in (70, 60):
+            end = i + size
+            if end + 2 <= len(data) and nvs_crc(data[i:end]) == data[end] | data[end + 1] << 8:
+                return i, size
+        i = data.find(needle, i + 1)
+    fail("the settings file does not hold the startup line %r" % text)
+
+
+def startup_line(s, n):
+    m = re.search(r"^\$N%d=([^\r\n]*)" % n, s.ask("$N"), re.M)
+    if not m:
+        fail("$N lists no $N%d" % n)
+    return m.group(1)
+
+
+def startup_line_cases():
+    """Rule 12: a startup line is modal state only, stored or already in
+    the settings file."""
+    s = Session()
+    stored = False
+    try:
+        s.ask("$MD")
+        st = s.quick_state()
+        check(st == "Alarm", "the motors are released (Alarm)", "$MD left the state %s" % st)
+        for line in ("$N0=G0X10", "$N0=M103P1", "$N0=G21G0X10", "$N0=G21X10", "$N0=G21(c)X10",
+                     "$N0=G21|G0X10", "$N1=G0X10"):
+            reply = s.ask(line)
+            check("error" in reply, "%s is refused" % line, "%s: %r" % (line, reply))
+        s.ask("$ME")
+        time.sleep(0.5)
+        st, n = s.quick_state(), s.steps()
+        check(st == "Idle" and n == 0, "$ME ships no step",
+              "after $ME: state %s, %d step ticks shipped" % (st, n))
+        reply = s.ask("$N0=G21G90")
+        check(re.search(r"^ok\r?$", reply, re.M) and startup_line(s, 0) == "G21G90",
+              "$N0=G21G90 is stored", "$N0=G21G90 was not stored: %r" % reply)
+        reply = s.ask("$N1=G21G91")
+        check(re.search(r"^ok\r?$", reply, re.M) and startup_line(s, 1) == "G21G91",
+              "$N1=G21G91 is stored", "$N1=G21G91 was not stored: %r" % reply)
+        time.sleep(0.5)                 # the settings file is written at Idle
+        stored = True
+    finally:
+        s.close(keep=stored)            # the settings file goes on to the next start
+
+    # Lines $N0 and $N1 refuse, written straight into the settings store.
+    path = os.path.join(s.workdir, "EEPROM.DAT")
+    data = bytearray(open(path, "rb").read())
+    for held, planted in (("G21G90", b"G21|G0X10"),     # a modal block, then a motion block
+                          ("G21G91", b"G21X10")):       # a modal word, then an axis word
+        at, size = stored_line_at(bytes(data), held)
+        line = planted.ljust(size, b"\0")
+        crc = nvs_crc(line)
+        data[at:at + size + 2] = line + bytes((crc & 0xFF, crc >> 8))
+    with open(path, "wb") as f:
+        f.write(data)
+
+    s = Session(conf={"lens_hall_edge_z_mm": "3.35"}, referenced=True, workdir=s.workdir)
+    try:
+        m = re.search(r"^\$102=(\S+)", s.ask("$102"), re.M)
+        spm = float(m.group(1)) if m else fail("no value reported for $102")
+        edge = round(3.35 * spm) / spm
+        n, z = s.steps(), s.quick_z()
+        check(n == 0 and abs(z - edge) < 0.002, "the start ran no stored motion: no step, Z on the edge",
+              "the start shipped %d step ticks, Z %.3f (the edge %.3f)" % (n, z, edge))
+        for slot in (0, 1):
+            held = startup_line(s, slot)
+            check(held == "", "the stored line $N%d was cleared" % slot,
+                  "$N%d still holds %r" % (slot, held))
+    finally:
+        s.close()
+
+
 def main():
     if not os.path.isfile(BIN):
         fail("no controller binary at %s" % BIN)
@@ -378,6 +537,8 @@ def main():
         s.close()
     referenced_cases()
     homed_cases()
+    homing_cases()
+    startup_line_cases()
     print("PASS z_envelope_test")
 
 

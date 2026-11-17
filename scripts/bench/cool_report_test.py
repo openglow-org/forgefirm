@@ -20,7 +20,10 @@ the null-sink controller against it, and reads every report as it arrives.
              reports in the controller's place while a gfcloud $H holds the
              machine, and the controller is quiet then), and the reports
              still carry it afterwards; a controller with no secret hands the
-             runner none
+             runner none. The runner is handed its deadline too
+             (GFHOME_DEADLINE, on the monotonic clock the two share): the
+             default 300 s budget less the 30 s its last steps keep, counted
+             from the $H
 
 Usage: cool_report_test.py <path-to-grblHAL_glowforge>
 """
@@ -148,6 +151,7 @@ def run(name, secret, check, runner=False, handed=None):
             env_file = os.path.join(ctl.workdir, "RUNNER_ENV")
             s = ctl.sender()
             time.sleep(0.5)
+            sent = time.clock_gettime(time.CLOCK_MONOTONIC)
             s.sendall(b"$H\n")
             end = time.time() + 10
             while time.time() < end and not os.path.exists(env_file):
@@ -164,6 +168,10 @@ def run(name, secret, check, runner=False, handed=None):
                 fail("[%s] the secret reached the homing runner another way" % name)
             if "GF_STATE_DIR" not in runner_env:
                 fail("[%s] the runner's environment was not read: %r" % (name, runner_env[:80]))
+            dl = [ln.split("=", 1)[1] for ln in runner_env.splitlines() if ln.startswith("GFHOME_DEADLINE=")]
+            if len(dl) != 1 or not 269.0 <= float(dl[0]) - sent <= 271.0:
+                fail("[%s] the runner's deadline is %r, not 270 s after the $H at %.3f"
+                     % (name, dl, sent))
             s.close()
             lis.seen.clear()            # what matters is what is reported after it
         reports = lis.wait(3)

@@ -98,7 +98,7 @@ SUBSTITUTES = (
     # the extension host (src/run.c ENV_OVERRIDES)
     "FORGEEXT_HOST_TOKEN_FILE",
     # the cloud client and the hardware library
-    "GFHOME_PARK_HALF_STEPS", "GFHOME_TIMEOUT_S", "REMOTE_DEBUG",
+    "GFHOME_DEADLINE", "GFHOME_PARK_HALF_STEPS", "GFHOME_TIMEOUT_S", "REMOTE_DEBUG",
     # the acceptance tool itself (hw.py and the suite): the judge's readers
     # pointed elsewhere
     "FORGECTRL_TOKEN_FILE", "FORGECTRL_URL", "GF_IIO_ROOT", "GF_LEDS_ROOT", "GRBL_HOST", "GRBL_PORT",
