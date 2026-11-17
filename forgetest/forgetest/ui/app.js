@@ -167,7 +167,8 @@ function updateGroups(){if(!rowEls||!state)return;var busy=isBusy();
   var st;
   if(pendingId===t.id&&isBusy()&&!state.running){st="<span class='st running'>starting&hellip;</span>"}
   else{st="<span class='st "+esc(s.status)+"'>"+esc(s.status||'none')+"</span>";
-   if(s.required&&s.status!=='running')st+="<br><span class='req'>required: "+esc(s.reason)+"</span>"}
+   if(s.required&&s.status!=='running')st+="<br><span class='req'>required: "+esc(s.reason)+"</span>";
+   if(s.reason==='disposition'&&!busy)st+="<br><a href='#' onclick='doDispose(\""+esc(t.id)+"\");return false'>record a disposition</a>"}
   if(queued[t.id])st+="<br><span class='tag queued'>queued</span>";
   setHtml(e.st,st);
   var last=s.last?(esc(s.last.result)+' '+esc(fmtTs(s.last.ts))):'-';
@@ -274,8 +275,13 @@ function doAbort(){var b=$('abortbtn');if(b.disabled)return;abortSent=true;setDi
  api('POST','/abort',{},function(s,d){if(s!==200)abortSent=false;setMsg('actmsg',d.message||d.error,s!==200);kick()})}
 function doExport(){var b=$('exportbtn');if(b.disabled)return;setDis(b,true);setMsg('actmsg','exporting...');
  api('POST','/export',{},function(s,d){setDis(b,false);
-  if(s===200){setMsg('actmsg','exported: authorized='+d.authorized+', sha256 '+d.sha256.slice(0,16)+' - download below');$('dljson').style.display='';$('dlmd').style.display=''}
+  if(s===200){setMsg('actmsg','exported: authorized='+d.authorized+', sha256 '+d.sha256.slice(0,16)+', signed with the bench key '+d.bench_key+' - download below');$('dljson').style.display='';$('dlmd').style.display=''}
   else setMsg('actmsg',d.message||d.error,true)})}
+/* A FAIL, or an ERROR the test raised, holds its fingerprint until the
+   operator says why it does not stand against the release. */
+function doDispose(id){var r=window.prompt('Disposition for '+id+': why does this FAIL not stand against the release? (required; the artifact carries it)');
+ if(!r)return;
+ api('POST','/disposition',{test:id,reason:r},function(s,d){setMsg('actmsg',d.message||d.error,s!==200);kick()})}
 function toggleInv(){var f=$('invform');f.style.display=f.style.display==='none'?'':'none'}
 function doInvalidate(){var r=$('invreason').value;if(!r){setMsg('actmsg','a reason is required',true);return}
  api('POST','/invalidate',{reason:r},function(s,d){setMsg('actmsg',d.message||d.error,s!==200);

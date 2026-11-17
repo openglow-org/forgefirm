@@ -54,7 +54,8 @@ FORGEFIRM_MANIFEST_DIRTY_TREES := "${THISDIR}/../../../forgetest/forgetest \
 # ctypes, the extension sandbox probe's, and statistics.
 # scripts/release.sh refuses a release whose dev image carries a
 # standard-library module this list does not name and the release image
-# lacks.
+# lacks. ssh-keygen makes the bench key at the first export and signs
+# each export with it.
 RDEPENDS:${PN} = " \
     python3-core \
     python3-compression \
@@ -71,6 +72,7 @@ RDEPENDS:${PN} = " \
     python3-shell \
     python3-statistics \
     forgectrl \
+    openssh-keygen \
 "
 
 INITSCRIPT_NAME = "forgetest"

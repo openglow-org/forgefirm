@@ -33,7 +33,10 @@ Routes
   POST /abort
   POST /invalidate {reason}
   POST /reset {reason}
-  POST /export              build + save the artifact, returns it
+  POST /disposition {test, reason}   answer the FAIL or ERROR that blocks
+                            a test's fingerprint
+  POST /export              build, sign with the bench key and save the
+                            artifact; refused while a run is in progress
 """
 import hashlib
 import hmac
@@ -318,15 +321,21 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/reset":
                 ok, msg = r.reset(str(body.get("reason", "")))
                 self._send(200 if ok else 409, {"ok": ok, "message": msg})
+            elif path == "/disposition":
+                ok, msg = r.dispose(str(body.get("test", "")), str(body.get("reason", "")))
+                self._send(200 if ok else 409, {"ok": ok, "message": msg})
             elif path == "/export":
-                art = r.export()
+                ok, art = r.export()
+                if not ok:
+                    self._send(409, {"ok": False, "message": art})
+                    return
                 os.makedirs(self.app.export_dir, exist_ok=True)
                 with open(os.path.join(self.app.export_dir, "acceptance.json"), "w", encoding="utf-8") as f:
                     f.write(_artifact.to_json(art))
                 with open(os.path.join(self.app.export_dir, "acceptance.md"), "w", encoding="utf-8") as f:
                     f.write(_artifact.to_markdown(art))
                 self._send(200, {"ok": True, "authorized": art["authorized"], "sha256": art["sha256"],
-                                 "counts": art["counts"]})
+                                 "counts": art["counts"], "bench_key": art["signature"]["fingerprint"]})
             else:
                 self._deny(404, "not found")
         except Exception as e:  # noqa: BLE001

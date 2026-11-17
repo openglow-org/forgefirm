@@ -25,7 +25,9 @@
 # ignore, except *.md, *-pin.inc and the release version file; a pin file
 # or the version file that assigns more than its rule allows stops the
 # script, as it stops the build. The kas configuration's text (kas/, the
-# lock file left out) is hashed the same way into the platform.
+# lock file left out) is hashed the same way into the platform. The cloud
+# app's pin and the hardware library's pin name one commit of their shared
+# repository, or the script stops (same_pin).
 import argparse
 import hashlib
 import json
@@ -235,6 +237,25 @@ def kas_content(path):
     return layer_content(path, KAS_SKIP_SUFFIXES, ())
 
 
+# The cloud app (forgefirm-app) and the hardware library (python3-gfhardware)
+# are one repository, pinned twice: the app's pin in meta-forgefirm and the
+# library's in meta-openglow. The app runs against the library, so the two
+# pins name one commit. A deliberate split is said in the app's pin file, in
+# a comment line of this form, with the reason.
+SAME_PIN = ("forgefirm-app", "python3-gfhardware")
+SPLIT_RX = re.compile(r"^#\s*split from python3-gfhardware:\s*\S", re.M)
+
+
+def same_pin(revs, app_pin_text):
+    """Stop when the app's and the library's pins differ and the app's pin
+    file does not say why (SPLIT_RX)."""
+    a, b = (revs.get(n) for n in SAME_PIN)
+    if a != b and not SPLIT_RX.search(app_pin_text or ""):
+        raise SystemExit("%s is pinned at %s and %s at %s: the app runs against the library, so the two "
+                         "pins name one commit (a deliberate split says so in forgefirm-app-pin.inc: "
+                         "'# split from python3-gfhardware: <why>')" % (SAME_PIN[0], a, SAME_PIN[1], b))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--meta-openglow", default=os.path.join(os.path.dirname(REPO), "meta-openglow"))
@@ -245,11 +266,18 @@ def main(argv=None):
     args = ap.parse_args(argv)
     os.makedirs(args.cache, exist_ok=True)
 
-    components = {}
+    pinned = {}
     for name, rel, layer in RECIPES:
         base = REPO if layer == "forgefirm" else args.meta_openglow
-        path = os.path.join(base, rel)
-        url, rev = parse_recipe(path)
+        pinned[name] = parse_recipe(os.path.join(base, rel))
+    app_pin = os.path.join(REPO, os.path.dirname(dict((n, r) for n, r, _l in RECIPES)["forgefirm-app"]),
+                           "forgefirm-app-pin.inc")
+    with open(app_pin, encoding="utf-8") as f:
+        same_pin({n: rev for n, (_u, rev) in pinned.items()}, f.read())
+
+    components = {}
+    for name, rel, layer in RECIPES:
+        url, rev = pinned[name]
         files = []
         if set(rev) == {"0"}:
             # A pin nothing has been pushed to yet, which is how a work

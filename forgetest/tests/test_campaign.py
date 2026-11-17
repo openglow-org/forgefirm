@@ -83,20 +83,87 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(st["tests"][self.cool.id]["reason"], "never-passed")
 
     def test_a_fail_after_a_pass_blocks_inheritance(self):
-        # The ui test passes in c1, then fails on the same image (an
-        # intermittent gate): the FAIL closes c1. In c2 the older PASS must
-        # not be inherited over the newer FAIL: the test is required again.
-        recs = [rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"),
-                rec_result("c1", self.ui, self.man, "PASS", "2026-08-20T10:01:00Z"),
-                rec_result("c1", self.ui, self.man, "FAIL", "2026-08-20T10:02:00Z"),
-                rec_campaign("c2", self.man, self.chash, "2026-08-20T11:00:00Z")]
+        # The ui test passes in c1, then fails (or errors) on the same image
+        # (an intermittent gate): the result closes c1. In c2 the older PASS
+        # must not be inherited over it: the test is required again.
+        for result, status in (("FAIL", "fail"), ("ERROR", "error")):
+            recs = [rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"),
+                    rec_result("c1", self.ui, self.man, "PASS", "2026-08-20T10:01:00Z"),
+                    rec_result("c1", self.ui, self.man, result, "2026-08-20T10:02:00Z"),
+                    rec_campaign("c2", self.man, self.chash, "2026-08-20T11:00:00Z")]
+            st = self.compute(recs)
+            t = st["tests"][self.ui.id]
+            self.assertEqual(t["status"], status)
+            self.assertEqual(t["reason"], "failed-since")
+            self.assertTrue(t["required"])
+            self.assertFalse(t["satisfied"])
+            self.assertFalse(st["authorized"])
+
+    def test_a_fail_holds_its_fingerprint_until_a_disposition(self):
+        # The FAIL closes c1; in c2 the test is run again and passes on
+        # unchanged code. The PASS does not count until the operator
+        # answers the FAIL for this test and this fingerprint.
+        fail = dict(rec_result("c1", self.ui, self.man, "FAIL", "2026-08-20T10:01:00Z"), needs_disposition=True)
+        recs = [rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"), fail,
+                rec_campaign("c2", self.man, self.chash, "2026-08-20T11:00:00Z"),
+                rec_result("c2", self.ui, self.man, "PASS", "2026-08-20T11:01:00Z")]
         st = self.compute(recs)
-        t = st["tests"][self.ui.id]
-        self.assertEqual(t["status"], "fail")
-        self.assertEqual(t["reason"], "failed-since")
-        self.assertTrue(t["required"])
-        self.assertFalse(t["satisfied"])
+        self.assertEqual(st["tests"][self.ui.id]["reason"], "disposition")
+        self.assertFalse(st["tests"][self.ui.id]["satisfied"])
+        # an answer for another fingerprint answers nothing here
+        recs.append({"t": "disposition", "ts": "2026-08-20T11:02:00Z", "test": self.ui.id,
+                     "fingerprint": "0" * 64, "reason": "another build"})
+        self.assertEqual(self.compute(recs)["tests"][self.ui.id]["reason"], "disposition")
+        recs.append({"t": "disposition", "ts": "2026-08-20T11:03:00Z", "test": self.ui.id,
+                     "fingerprint": self.ui.fingerprint(self.man), "reason": "a loose clamp on the bench"})
+        st = self.compute(recs)
+        self.assertEqual(st["tests"][self.ui.id]["status"], "pass")
+        self.assertTrue(st["tests"][self.ui.id]["satisfied"])
+        # A disposition at the FAIL's own place answers it no more than the
+        # exporter, and so the gate, does.
+        disp = {"t": "disposition", "ts": "2026-08-20T10:01:00Z", "test": self.ui.id, "seq": 2,
+                "fingerprint": self.ui.fingerprint(self.man), "reason": "an earlier FAIL"}
+        recs = [dict(rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"), seq=1), disp,
+                dict(fail, seq=2), dict(rec_campaign("c2", self.man, self.chash, "2026-08-20T11:00:00Z"), seq=3),
+                dict(rec_result("c2", self.ui, self.man, "PASS", "2026-08-20T11:01:00Z"), seq=4)]
+        self.assertEqual(self.compute(recs)["tests"][self.ui.id]["reason"], "disposition")
+
+    def test_an_invalidate_all_answers_no_fail(self):
+        # A FAIL nobody answers, then an invalidate-all and a full campaign
+        # in which the test passes: the FAIL still holds its fingerprint,
+        # and the campaign authorizes nothing.
+        fail = dict(rec_result("c1", self.ui, self.man, "FAIL", "2026-08-20T10:01:00Z"), needs_disposition=True)
+        recs = [rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"), fail,
+                {"t": "invalidate", "ts": "2026-08-20T10:02:00Z", "reason": "rerun everything"},
+                rec_campaign("c2", self.man, self.chash, "2026-08-20T11:00:00Z")]
+        for i, t in enumerate(self.tests):
+            recs.append(rec_result("c2", t, self.man, "PASS", "2026-08-20T11:0%d:00Z" % (i + 1)))
+        st = self.compute(recs)
+        self.assertEqual(st["tests"][self.ui.id]["reason"], "disposition")
         self.assertFalse(st["authorized"])
+
+    def test_an_invalidate_cuts_by_its_place_in_the_log_not_by_its_clock(self):
+        # The board has no battery-backed clock: an invalidate recorded
+        # before the clock is set carries a time older than the PASSes
+        # before it in the log, and still makes every one of them stale.
+        recs = [rec_campaign("c1", self.man, self.chash, "2026-11-10T10:00:00Z")]
+        for i, t in enumerate(self.tests):
+            recs.append(rec_result("c1", t, self.man, "PASS", "2026-11-10T10:0%d:00Z" % (i + 1)))
+        recs.append({"t": "invalidate", "ts": "1970-01-01T00:04:10Z", "reason": "new tube"})
+        recs.append(rec_campaign("c2", self.man, self.chash, "1970-01-01T00:05:00Z"))
+        st = self.compute(recs)
+        for t in self.tests:
+            self.assertTrue(st["tests"][t.id]["required"], t.id)
+        self.assertEqual(st["epoch"]["seq"], len(self.tests) + 2)
+
+    def test_an_open_campaigns_pass_counts_only_on_the_current_fingerprint(self):
+        # a forgetest change on the bench mid-campaign moves the test's
+        # fingerprint, not the image's manifest: the campaign stays open
+        recs = [rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"),
+                rec_result("c1", self.ui, self.man, "PASS", "2026-08-20T10:01:00Z", fp="0" * 64)]
+        st = self.compute(recs)
+        self.assertIsNotNone(st["campaign"])
+        self.assertTrue(st["tests"][self.ui.id]["required"])
 
     def test_an_abort_after_a_pass_does_not_block_inheritance(self):
         recs = [rec_campaign("c1", self.man, self.chash, "2026-08-20T10:00:00Z"),
@@ -248,6 +315,55 @@ class CampaignTests(unittest.TestCase):
     def test_running_marker(self):
         st = campaign.compute([], self.tests, self.man, self.chash, running=self.ui.id)
         self.assertEqual(st["tests"][self.ui.id]["status"], "running")
+
+
+class LogPlaceTests(unittest.TestCase):
+    """The log gives every record its place in the file (seq), which is
+    what the campaign rules order records by."""
+
+    def test_each_record_carries_its_place_in_the_log(self):
+        from forgetest.log import Log
+        d = tempfile.mkdtemp(prefix="forgetest-log-")
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "results.jsonl")
+        # two records written before records carried a place, one line lost
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"t":"campaign","ts":"2026-01-01T00:00:00Z","id":"c1"}\nnot json\n'
+                    '{"t":"reset","ts":"2026-01-01T00:01:00Z"}\n')
+        log = Log(path)
+        rec = log.append({"t": "invalidate", "reason": "new tube"})
+        self.assertEqual(rec["seq"], 3)
+        self.assertEqual([r["seq"] for r in log.read()], [1, 2, 3])
+        self.assertEqual(Log(path).read()[-1]["seq"], 3)
+
+    def test_a_torn_last_line_does_not_swallow_the_next_record(self):
+        # A power cut left half a line; the FAIL written next stands alone.
+        from forgetest.log import Log
+        d = tempfile.mkdtemp(prefix="forgetest-log-")
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "results.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"t":"campaign","ts":"2026-01-01T00:00:00Z","id":"c1"}\n{"t":"result","te')
+        Log(path).append({"t": "result", "test": "x", "result": "FAIL", "needs_disposition": True})
+        log = Log(path)
+        self.assertEqual([r.get("result") for r in log.read()], [None, "FAIL"])
+        self.assertEqual(log.corrupt, 1)
+
+    def test_a_record_that_lost_only_its_newline_keeps_its_place(self):
+        # A power cut took the disposition's newline and nothing else; the
+        # FAIL written next takes the place after it, never its place.
+        from forgetest.log import Log
+        d = tempfile.mkdtemp(prefix="forgetest-log-")
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "results.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"t":"campaign","ts":"2026-01-01T00:00:00Z","id":"c1","seq":1}\n'
+                    '{"t":"result","test":"x","result":"FAIL","needs_disposition":true,"seq":2}\n'
+                    '{"t":"disposition","test":"x","reason":"a loose clamp","seq":3}')
+        rec = Log(path).append({"t": "result", "test": "x", "result": "FAIL", "needs_disposition": True})
+        self.assertEqual(rec["seq"], 4)
+        self.assertEqual([(r["t"], r["seq"]) for r in Log(path).read()],
+                         [("campaign", 1), ("result", 2), ("disposition", 3), ("result", 4)])
 
 
 GIT_ENV = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="t",

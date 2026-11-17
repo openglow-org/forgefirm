@@ -21,6 +21,7 @@ var HELP = {
     d: 'developers/acceptance/',
     p: [
       'A release is authorized when a campaign is open on this image and every catalog test is satisfied: by a PASS in the campaign, or (never for the core) by an earlier PASS whose domain fingerprint is unchanged. A FAIL ends the campaign.',
+      'A FAIL, or an ERROR the test raised, also holds its test until you record a disposition: why it does not stand against the release. A rerun that passes does not clear it, and neither does Invalidate all. Its row says required: disposition, with the link that records one; the artifact carries the FAIL and your reason.',
       'The manifest identity is the image, the catalog hash is the test set; either changing starts the count over.'
     ]
   },
@@ -36,7 +37,7 @@ var HELP = {
     t: 'Campaign actions',
     d: 'developers/acceptance/',
     p: [
-      'Export builds the release artifact the release gate reads (acceptance.json, with acceptance.md for people) from the campaign as it stands. The raw log is the append-only record; the journal is the daemon\'s own.',
+      'Export builds the release artifact the release gate reads (acceptance.json, with acceptance.md for people) from the campaign as it stands, signed with this bench\'s key; it waits for a run in progress. The raw log is the append-only record; the journal is the daemon\'s own.',
       'Invalidate all forces a full campaign; give the reason. Reset campaign closes the open campaign without invalidating anything: earlier passes stay inheritable under the campaign rules, and the next Start opens a new one.'
     ]
   },

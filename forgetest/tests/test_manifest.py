@@ -222,13 +222,18 @@ class CoverageReportTests(unittest.TestCase):
                ("forgectrl", "src/main.c", "forgectrl:tests/gone_test.c", ci),
                ("forgectrl", "src/main.c", "tests/cool_test.c", ci),
                ("forgectrl", "src/main.c", "forgetest:forgetest/x.py", ci),     # the acceptance tool itself
-               ("forgectrl", "src/main.c", "forgefirm:scripts/bench/gone_test.py", ci),
+               ("grblhal-glowforge", "src/driver.c", "forgefirm:scripts/bench/gone_test.py",
+                "forgefirm:.github/workflows/ci.yml"),
                ("forgectrl", "src/main.c", "forgectrl:tests/cool_test.c", "forgectrl:.github/workflows/gone.yml"),
-               ("forgectrl", "src/main.c", "forgectrl:tests/cool_test.c", "build.yml")]
+               ("forgectrl", "src/main.c", "forgectrl:tests/cool_test.c", "build.yml"),
+               # a test of another repository, which the lint cannot tell touches forgectrl at all
+               ("forgectrl", "src/main.c", "forgefirm:scripts/bench/stream_test.py",
+                "forgefirm:.github/workflows/ci.yml")]
         self.assertEqual([r[3] for r in m.host_row_problems(man, bad, root=root, sources=None)],
                          ["selects nothing", "selects nothing", "no such host test",
                           "names no repository:path for its host test", "no repository 'forgetest' for its host test",
-                          "no such host test", "no such workflow", "names no repository:path for its workflow"])
+                          "no such host test", "no such workflow", "names no repository:path for its workflow",
+                          "the host test is not in forgectrl's own repository"])
         # installed on an image the package is in no checkout: a "forgefirm:" file is not looked for
         self.assertEqual(m.host_row_problems(man, bad[5:6], root=None, sources=None), [])
 
@@ -545,6 +550,29 @@ class CoverageReportTests(unittest.TestCase):
         out = io.StringIO()
         with mock.patch.object(m, "HOST_TESTED", [row]), contextlib.redirect_stdout(out):
             self.assertEqual(coverage.main(["--manifest", path, "--sources", work, "--enforce"]), 1)
+
+    def test_the_enforced_lint_fails_on_an_entry_that_selects_nothing(self):
+        # Every path covered and every row sound: only a covers entry that
+        # selects nothing is wrong, and the enforced lint fails on it.
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from unittest import mock
+        from forgetest import catalog, coverage
+        work = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, work)
+        comps = {"forgectrl": {"srcrev": "aaa", "files": [["src/ui.c", "1" * 40]]}}
+        path = os.path.join(work, "manifest.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(helpers.make_manifest(components=comps).data))
+        whole = helpers.make_test("a.one", [("forgectrl", "src/**")])
+        hollow = helpers.make_test("a.two", [("forgectrl", "src/**"), ("forgectrl", "ui.c")])
+        for tests, rc in (([whole], 0), ([whole, hollow], 1)):
+            reg = helpers.registry(*tests)
+            with mock.patch.object(m, "HOST_TESTED", []), mock.patch.object(catalog, "load_suite", lambda: reg), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(coverage.main(["--manifest", path, "--sources", work, "--enforce"]), rc)
 
     def test_where_a_workflow_checks_a_repository_out(self):
         steps = m.workflow_steps("jobs:\n  t:\n    steps:\n"

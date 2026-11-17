@@ -112,6 +112,44 @@ class TreeManifestTests(unittest.TestCase):
         os.remove(os.path.join(self.rdir, "comp-pin.inc"))
         self.assertEqual(self.mod.parse_recipe(os.path.join(self.rdir, "comp.bb"))[1], "a" * 40)
 
+    def test_a_pinned_commits_submodule_is_listed_file_by_file(self):
+        # The driver's core is a submodule: CI's manifest lists its files
+        # under its path, as the image's does, or no fingerprint sees them.
+        lib = os.path.join(self.tmp, "lib")
+        put(os.path.join(lib, "core.c"), "core")
+        run_git(lib, "init", "-q")
+        commit_all(lib)
+        comp = os.path.join(self.tmp, "comp")
+        put(os.path.join(comp, "src", "main.c"), "main")
+        run_git(comp, "init", "-q")
+        run_git(comp, "submodule", "add", "-q", lib, "src/grbl")
+        commit_all(comp)
+        rev = subprocess.run(["git", "-C", comp, "rev-parse", "HEAD"], capture_output=True, text=True,
+                             check=True).stdout.strip()
+        cache = os.path.join(self.tmp, "cache")
+        files = []
+        self.mod.ls_tree(self.mod.fetch(comp, rev, cache), rev, comp, cache, "", files)
+        self.assertIn("src/grbl/core.c", [p for p, _b in files])
+        self.assertIn("src/main.c", [p for p, _b in files])
+
+    def test_the_app_and_the_library_are_pinned_together(self):
+        revs = {"forgefirm-app": "a" * 40, "python3-gfhardware": "b" * 40}
+        with self.assertRaises(SystemExit):
+            self.mod.same_pin(revs, PIN_A)
+        # a split the app's pin file says it means
+        self.mod.same_pin(revs, PIN_A + "# split from python3-gfhardware: the app needs the new reader first\n")
+        self.mod.same_pin({"forgefirm-app": "a" * 40, "python3-gfhardware": "a" * 40}, PIN_A)
+        # The script stops on it before it fetches anything, with this
+        # tree's app pin file, which says no split.
+        from unittest import mock
+        pins = lambda path: ("https://example.invalid/x.git",
+                             "1" * 40 if "forgefirm-app" in path else "2" * 40)
+        with mock.patch.object(self.mod, "parse_recipe", pins), \
+                mock.patch.object(self.mod, "fetch", side_effect=AssertionError("fetched")):
+            with self.assertRaises(SystemExit) as caught:
+                self.mod.main(["--cache", os.path.join(self.tmp, "cache"), "--out", os.devnull])
+        self.assertIn("forgefirm-app", str(caught.exception.code))
+
     def test_layer_hash_ignores_pin_bumps_and_docs(self):
         base = self.mod.layer_content(self.layer)
         self.assertIsNotNone(base)

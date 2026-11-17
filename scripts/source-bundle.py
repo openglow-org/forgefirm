@@ -228,18 +228,31 @@ def index_archives(srcdir, names):
     return index
 
 
+def same_version(archive, version):
+    """Whether an archive's version is the image's: equal, or the image's
+    followed by a "+" part (a version's local suffix), or, for a version
+    that ends in "+git", followed by the revision of its git source
+    (`6.12.20+git` and `6.12.20+git0+844aa34`). A version that merely starts
+    with the image's is another one: `1.2` is not `1.20`."""
+    if archive == version:
+        return True
+    rest = archive[len(version):] if archive.startswith(version) else None
+    if rest is None:
+        return False
+    return rest.startswith("+") or (version.endswith("+git") and re.match(r"^\d+\+[0-9a-f]+$", rest) is not None)
+
+
 def select_archives(index, recipe, version):
-    """The archive directories of one recipe. The deploy directory keeps
-    the archives of earlier builds, so the version of the image decides:
-    the exact version first, then a version that starts with it (the kernel
-    carries the revision of its git source in PV), and every archive of the
-    recipe last. The name of an archive carries the epoch of the recipe
-    (`1_0.1.4`) and a license manifest does not, so the epoch comes off
-    before the comparison."""
+    """The archive directories of one recipe whose version is the image's
+    (same_version): the exact version first, then one with a suffix. The
+    name of an archive carries the epoch of the recipe (`1_0.1.4`) and a
+    license manifest does not, so the epoch comes off before the
+    comparison. An archive of another version never answers for a recipe:
+    release.sh empties the deploy directory's sources/ before the build, and
+    a recipe with no archive of its own stops the bundle."""
     found = [(re.sub(r"^\d+_", "", v), p) for v, p in index.get(recipe, [])]
     for pick in ([p for v, p in found if v == version],
-                 [p for v, p in found if v.startswith(version)],
-                 [p for _, p in found]):
+                 [p for v, p in found if same_version(v, version)]):
         if pick:
             return sorted(pick)
     return []
@@ -267,9 +280,17 @@ def git_out(args, cwd):
         return ""
 
 
+def public_url(url):
+    """A remote URL with no credentials in it: the user and password part
+    of an authority (`https://user:token@host/...`) is taken out."""
+    if not url:
+        return url
+    return re.sub(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@", r"\1", url)
+
+
 def layer_records(repo):
-    """Every layer checkout of the build, with its remote and its
-    revision."""
+    """Every layer checkout of the build, with its remote (no credentials)
+    and its revision."""
     roots = [("forgefirm", repo), ("meta-openglow", BSP)]
     layers_dir = os.path.join(repo, "layers")
     if os.path.isdir(layers_dir):
@@ -283,7 +304,7 @@ def layer_records(repo):
             continue
         out.append({
             "checkout": name,
-            "url": git_out(["remote", "get-url", "origin"], path),
+            "url": public_url(git_out(["remote", "get-url", "origin"], path)),
             "revision": git_out(["rev-parse", "HEAD"], path),
             "branch": git_out(["rev-parse", "--abbrev-ref", "HEAD"], path),
             "modified": bool(git_out(["status", "--porcelain"], path)),
@@ -291,13 +312,28 @@ def layer_records(repo):
     return out
 
 
+def layer_files(path):
+    """The files of a layer that the build reads: the ones its checkout
+    tracks, and the untracked ones that the checkout's own .gitignore files
+    do not ignore (the rule the image manifest hashes a layer by). An
+    ignored file a developer keeps under a layer is not one of them. A
+    layer that is not in a git checkout stops the script."""
+    try:
+        out = subprocess.run(
+            ["git", "-c", "core.excludesFile=/dev/null", "ls-files", "-z", "--cached", "--others",
+             "--exclude-per-directory=.gitignore", "--", "."],
+            cwd=path, capture_output=True, check=True).stdout.decode("utf-8")
+    except (OSError, subprocess.CalledProcessError) as e:
+        die("cannot list the files of the layer at %s (not a git checkout?): %s" % (path, e))
+    return sorted({os.path.join(path, p) for p in out.split("\0") if p})
+
+
 def tar_tree(name, path):
-    """One layer as a reproducible tar.gz in memory."""
-    files = []
-    for root, dirs, fns in os.walk(path):
-        dirs[:] = sorted(d for d in dirs if d not in EXCLUDE_NAMES)
-        files += [os.path.join(root, f) for f in sorted(fns)
-                  if not f.endswith((".pyc", ".pyo"))]
+    """One layer as a reproducible tar.gz in memory: the files layer_files
+    names."""
+    files = [f for f in layer_files(path) if os.path.isfile(f)
+             and not any(part in EXCLUDE_NAMES for part in os.path.relpath(f, path).split(os.sep))
+             and not f.endswith((".pyc", ".pyo"))]
     buf = io.BytesIO()
     with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=6, mtime=0) as gz:
         with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tar:

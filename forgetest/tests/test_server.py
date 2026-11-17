@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 
 import helpers
+from forgetest import artifact
 from forgetest import bench as bench_mod
 from forgetest import server
 from forgetest.log import Log
@@ -262,6 +263,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(st, 200)
         st, d = self.call("POST", "/start", {"test": "fake.pass"})
         self.assertEqual(st, 409)
+        # an export waits for the run: it would claim the state before it
+        st, d = self.call("POST", "/export")
+        self.assertEqual(st, 409)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "export", "acceptance.json")))
         st, d = self.call("POST", "/abort")
         self.assertEqual(st, 200)
         state = self.wait_idle()
@@ -279,6 +284,16 @@ class ServerTests(unittest.TestCase):
         # inherited passes survive; the core is required again
         self.assertEqual(state["tests"]["fake.prompt"]["status"], "inherited")
         self.assertTrue(state["tests"]["fake.pass"]["required"])
+        # the error holds its test's fingerprint until the operator answers it
+        self.assertEqual(state["tests"]["fake.error"]["reason"], "disposition")
+        st, rec = self.call("GET", "/result?test=fake.error")
+        self.assertTrue(rec["needs_disposition"])
+        st, d = self.call("POST", "/disposition", {"test": "fake.error", "reason": ""})
+        self.assertEqual(st, 409)
+        st, d = self.call("POST", "/disposition", {"test": "fake.error", "reason": "a bug in the fake test"})
+        self.assertEqual(st, 200, d)
+        st, state = self.call("GET", "/state")
+        self.assertNotEqual(state["tests"]["fake.error"]["reason"], "disposition")
         # a new start opens a new campaign
         st, d = self.call("POST", "/start", {"test": "fake.pass"})
         state = self.wait_idle()
@@ -293,6 +308,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(st, 200)
         art = raw if isinstance(raw, dict) else json.loads(raw)
         self.assertEqual(art["manifest_sha"], self.man.content_sha)
+        # signed with the bench key the daemon made under its data directory
+        with open(os.path.join(self.tmp, "bench-key.pub"), encoding="utf-8") as f:
+            pub = " ".join(f.read().split()[:2])
+        signers = os.path.join(self.tmp, "allowed_signers")
+        with open(signers, "w", encoding="utf-8") as f:
+            f.write('forgetest-bench namespaces="forgetest-acceptance" %s\n' % pub)
+        self.assertEqual(artifact.signature_problems(art, signers), [])
+        self.assertEqual(d["bench_key"], art["signature"]["fingerprint"])
         st, raw = self.call("GET", "/export/acceptance.md")
         self.assertEqual(st, 200)
         self.assertIn(b"Release authorized: NO", raw)

@@ -71,12 +71,18 @@ EOF
 
 if [ -n "$KEY" ]; then
   [ -f "$KEY" ] || { echo "ERROR: key '$KEY' not found" >&2; exit 1; }
-  "$FWUP" -S -s "$KEY" -i "$WORK/unsigned.fw" -o "$OUT"
   # The post-sign self-check is mandatory: packing without it means a
-  # release could ship with a signature nothing ever verified.
+  # release could ship with a signature nothing ever verified. The archive
+  # is signed in the work directory and reaches its place only once the
+  # check has passed, so a failed check leaves nothing at the output path
+  # (a key whose sidecar is another key's would otherwise leave an archive
+  # signed with an unchecked key there).
   PUB="${KEY%.priv}.pub"
   [ -f "$PUB" ] || { echo "ERROR: public key '$PUB' not found - cannot self-check the signature; refusing to pack unverified" >&2; exit 1; }
-  "$FWUP" -V -i "$OUT" -p "$PUB" || { echo "ERROR: signature self-check failed" >&2; exit 1; }
+  rm -f "$OUT"
+  "$FWUP" -S -s "$KEY" -i "$WORK/unsigned.fw" -o "$WORK/signed.fw"
+  "$FWUP" -V -i "$WORK/signed.fw" -p "$PUB" || { echo "ERROR: signature self-check failed" >&2; exit 1; }
+  mv "$WORK/signed.fw" "$OUT"
   echo "signed: $OUT"
 else
   cp "$WORK/unsigned.fw" "$OUT"

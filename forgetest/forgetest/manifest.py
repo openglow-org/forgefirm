@@ -116,8 +116,12 @@ BEHAVIORAL = [
 # emulated is proven on a host. A row is (component, glob, host test, CI
 # workflow), the last two named as "<repository>:<path>": a component of
 # the manifest (its tests/ and .github/ files are listed there), or
-# "forgefirm" for this repository (the null-sink harnesses under
-# scripts/bench/, which grblhal-glowforge's workflow runs). The workflow
+# "forgefirm" for this repository. The host test lives in the component's
+# own repository, with the exceptions HOST_TEST_ELSEWHERE names (the
+# null-sink harnesses under scripts/bench/, which grblhal-glowforge's
+# workflow runs); the workflow may be another repository's that checks the
+# component out (forgefirm's forgetest-ci builds forgectrl's
+# holds_wire_test with forgeext at their pins). The workflow
 # must run the host test: on a push or a pull_request with no branches,
 # tags or paths filter under it, and no types under the pull_request
 # (one of the two events is enough), in a step
@@ -138,6 +142,9 @@ HOST_TESTED = [
     # An extension package's holds as the engine reads them (forgeext's
     # holdkeep_test and run_test prove the writer's side).
     ("forgectrl", "src/holds.*", "forgectrl:tests/holds_test.c", "forgectrl:.github/workflows/build.yml"),
+    # The hold-file wire on the pair the image ships: forgeext's holdkeep.c
+    # writing and forgectrl's holds.c reading, each at its pin.
+    ("forgectrl", "src/holds.*", "forgectrl:tests/holds_wire_test.c", "forgefirm:.github/workflows/forgetest-ci.yml"),
     # The M-code relay to the package that answers (the controller's side is
     # the null-sink mcode_test harness, under grblhal-glowforge's src/**).
     ("forgectrl", "src/mcode.*", "forgectrl:tests/mcode_test.c", "forgectrl:.github/workflows/build.yml"),
@@ -267,6 +274,22 @@ HOST_TESTED = [
     ("forgeext", "src/fflog.*", "forgeext:tests/run_test.py", "forgeext:.github/workflows/build.yml"),
     ("forgeext", "CMakeLists.txt", "forgeext:tests/run_test.py", "forgeext:.github/workflows/build.yml"),
 ]
+
+# The host tests a component's rows may name outside its own repository:
+# (component, repository, glob of the test's path).
+HOST_TEST_ELSEWHERE = [
+    ("grblhal-glowforge", "forgefirm", "scripts/bench/*"),
+]
+
+
+def host_test_belongs(comp, ref, elsewhere=HOST_TEST_ELSEWHERE):
+    """Whether a row of `comp` may name the host test `ref`: one of its own
+    repository's, or one HOST_TEST_ELSEWHERE allows. A test elsewhere proves
+    whatever it touches, and the lint cannot tell what that is."""
+    repo, _sep, path = ref.partition(":")
+    if repo == comp:
+        return True
+    return any(c == comp and r == repo and glob_to_regex(g).match(path) for c, r, g in elsewhere)
 
 # This repository's root, when the package runs from a checkout of it; a
 # "forgefirm:" file is looked for there. Installed on an image, the package
@@ -1209,6 +1232,9 @@ def host_row_problems(manifest, host=HOST_TESTED, root=REPO_ROOT, sources=SOURCE
         why = _ref_problem(manifest, ref, "host test", root) or _ref_problem(manifest, ci, "workflow", root)
         if why:
             out.append((comp, pat, ref, why))
+            continue
+        if not host_test_belongs(comp, ref):
+            out.append((comp, pat, ref, "the host test is not in %s's own repository" % comp))
             continue
         text, why = read_source(manifest, ci, root, sources)
         if why:

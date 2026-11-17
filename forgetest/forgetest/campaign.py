@@ -11,18 +11,30 @@ A campaign is bound to one image (manifest content hash) and one catalog
 it, an invalidate-all, an explicit reset, or a different image or
 catalog. Rules per test T with domain fingerprint F(T):
 
+  blocked                a FAIL, or an ERROR the test raised (not one the
+                         bench fixture raised), recorded with
+                         "needs_disposition" under F(T) blocks F(T) until
+                         the operator records a disposition for T and F(T)
+                         after it, with a reason (reason: disposition). A
+                         rerun that passes does not clear it, and neither
+                         does an invalidate-all.
   satisfied by campaign  a PASS in the open campaign with fingerprint F(T)
   satisfied by inheritance  (never for the always-required core) the newest
                          PASS anywhere in the history with fingerprint F(T),
-                         newer than the last invalidate-all, and recorded
-                         on its pins as built (provenance.py); a PASS that
-                         was not is never inherited
+                         after the last invalidate-all, and recorded on its
+                         pins as built (provenance.py); a PASS that was not
+                         is never inherited
   required               otherwise (reason: always / never-passed /
                          domain-changed / failed-since / not-as-built)
 
   authorized  <=>  a campaign is open, every catalog test is satisfied,
                    and every PASS that satisfies one was recorded on its
                    pins as built
+
+"After" and "before" are places in the log ("seq", log.py), never the
+records' clock times: the board has no battery-backed clock, so a record
+written before the clock is set carries an older time than the records
+before it.
 
 Pure functions over the record list; nothing here touches hardware or
 the filesystem, which keeps the rules unit-testable and lets the release
@@ -32,6 +44,39 @@ from .provenance import clean
 
 PASS, FAIL, ERROR, ABORTED = "PASS", "FAIL", "ERROR", "ABORTED"
 CLOSING = (FAIL, ERROR)
+
+
+def positions(records):
+    """{id(record): its place in the log}: the "seq" the log gave it, or
+    its index in the list (from 1) for a record that carries none."""
+    out = {}
+    for i, r in enumerate(records):
+        s = r.get("seq")
+        out[id(r)] = s if isinstance(s, int) and not isinstance(s, bool) else i + 1
+    return out
+
+
+def dispositions(records, pos):
+    """{(test, fingerprint): place of the newest disposition record}."""
+    out = {}
+    for r in records:
+        if r.get("t") == "disposition":
+            k = (r.get("test"), r.get("fingerprint"))
+            out[k] = max(out.get(k, 0), pos[id(r)])
+    return out
+
+
+def blocks(rec, pos, disposed):
+    """Whether a result record blocks its test's fingerprint: a FAIL or an
+    ERROR that asks for a disposition and that no disposition after it
+    answers. An invalidate-all answers nothing: its reason is the bench's,
+    not the FAIL's, so a FAIL holds its fingerprint whatever invalidate-alls
+    follow it (the fingerprint already limits it to unchanged code). A
+    disposition at the result's own place answers it no more than one
+    before it does, as the exporter and the gate read it."""
+    return (rec.get("t") == "result" and rec.get("result") in CLOSING
+            and rec.get("needs_disposition") is True
+            and disposed.get((rec.get("test"), rec.get("fingerprint")), 0) <= pos[id(rec)])
 
 
 def _summary(rec):
@@ -76,13 +121,22 @@ def compute(records, tests, manifest, catalog_hash, running=None):
     tests: iterable of catalog.Test. running: id of the test in progress
     (marked in the per-test status), or None.
     """
+    records = list(records)
+    pos = positions(records)
     results = [r for r in records if r.get("t") == "result"]
     campaign, last, closed_by, invalidate = open_campaign(records, manifest.content_sha, catalog_hash)
-    epoch = invalidate.get("ts") if invalidate else None
+    # The invalidate-all's place in the log: nothing at or before it counts.
+    cut = pos[id(invalidate)] if invalidate else None
+    disposed = dispositions(records, pos)
+
+    def after_cut(r):
+        return cut is None or pos[id(r)] > cut
+
     open_id = campaign.get("id") if campaign else None
-    # The invalidate record keeps its epoch for good: nothing older than it
-    # inherits. The page and the artifact report it only while it still asks
-    # for something, that is until a campaign has started after it.
+    # The invalidate record keeps its epoch for good: nothing before it in
+    # the log inherits. The page's notice (and the artifact's "invalidate")
+    # shows it only while it still asks for something, that is until a
+    # campaign has started after it; "epoch" carries it always.
     invalidate_shown = invalidate
     if invalidate:
         seen = False
@@ -114,7 +168,11 @@ def compute(records, tests, manifest, catalog_hash, running=None):
                 if r.get("campaign") == open_id and r.get("result") == PASS and r.get("fingerprint") == fp:
                     same = r
                     break
-        if same is not None:
+        if any(blocks(r, pos, disposed) for r in hist if r.get("fingerprint") == fp):
+            # A FAIL or ERROR on this fingerprint that nobody has answered:
+            # a rerun that passes does not clear it, a disposition does.
+            reason = "disposition"
+        elif same is not None:
             status, satisfied, origin, reason = "pass", True, same, "campaign"
         elif t.always:
             reason = "always"
@@ -129,7 +187,7 @@ def compute(records, tests, manifest, catalog_hash, running=None):
             for r in reversed(hist):
                 if r.get("fingerprint") != fp:
                     continue
-                if epoch and (r.get("ts") or "") <= epoch:
+                if not after_cut(r):
                     continue
                 res = r.get("result")
                 if res == PASS and clean(r):
@@ -141,11 +199,11 @@ def compute(records, tests, manifest, catalog_hash, running=None):
             if inh is not None:
                 status, satisfied, origin, reason = "inherited", True, inh, "inherited"
             elif blocked is not None and any(r.get("result") == PASS and r.get("fingerprint") == fp
-                                             and (r.get("ts") or "") < (blocked.get("ts") or "")
+                                             and pos[id(r)] < pos[id(blocked)]
                                              for r in hist):
                 reason = "failed-since"
-            elif any(r.get("result") == PASS and r.get("fingerprint") == fp
-                     and not (epoch and (r.get("ts") or "") <= epoch) for r in hist):
+            elif any(r.get("result") == PASS and r.get("fingerprint") == fp and after_cut(r)
+                     for r in hist):
                 # passed on this fingerprint, but only on a build other than
                 # its pins as built
                 reason = "not-as-built"
@@ -184,6 +242,10 @@ def compute(records, tests, manifest, catalog_hash, running=None):
         "last_campaign": last,
         "closed_by": closed_by,
         "invalidate": invalidate_shown,
+        # the last invalidate-all and its place in the log, for good: the
+        # artifact carries it so the gate can judge every result by it
+        "epoch": ({"seq": cut, "ts": invalidate.get("ts"), "reason": invalidate.get("reason")}
+                  if invalidate else None),
         "authorized": authorized,
         # tests satisfied only by a PASS recorded on a build other than its
         # pins as built: they count on the page, never for a release

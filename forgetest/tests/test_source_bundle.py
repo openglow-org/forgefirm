@@ -60,6 +60,8 @@ def make_checkout(root):
         "      meta-openglow-core:",
         ""]))
     write(os.path.join(repo, "meta-forgefirm", "conf", "layer.conf"), 'BBFILE_COLLECTIONS += "forgefirm"\n')
+    write(os.path.join(repo, ".gitignore"), "/layers/\n")
+    subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
     bsp = os.path.join(repo, "layers", "meta-openglow")
     for layer in ("meta-glowforge-bsp", "meta-openglow-core"):
         write(os.path.join(bsp, layer, "conf", "layer.conf"), BSP_MARK)
@@ -162,14 +164,21 @@ class Manifests(unittest.TestCase):
                  "forgectrl": [("1_0.1.4", "/fc")]}
         # An exact version first.
         self.assertEqual(self.mod.select_archives(index, "busybox", "1.36.1"), ["/b1"])
-        # Then a version that starts with it: the kernel carries the
-        # revision of its git source in PV, and the manifest does not.
+        # Then the version with the revision of its git source after it:
+        # the kernel's archive can carry it, and the manifest does not.
         self.assertEqual(self.mod.select_archives(index, "linux-fslc", "6.12.20+git"),
                          ["/new"])
+        # The kernel's archive as the build names it: the version alone.
+        self.assertEqual(self.mod.select_archives({"linux-fslc": [("6.12.20+git", "/k")]},
+                                                  "linux-fslc", "6.12.20+git"), ["/k"])
         # The name of an archive carries the epoch of the recipe, and a
         # license manifest does not.
         self.assertEqual(self.mod.select_archives(index, "forgectrl", "0.1.4"), ["/fc"])
         self.assertEqual(self.mod.select_archives(index, "curl", "8.7.1"), [])
+        # An archive of another version answers for nothing: one whose
+        # version only starts with the image's, or an earlier build's.
+        self.assertEqual(self.mod.select_archives({"zlib": [("1.20", "/z")]}, "zlib", "1.2"), [])
+        self.assertEqual(self.mod.select_archives(index, "busybox", "1.37.0"), [])
 
     def test_a_directory_belongs_to_the_longest_recipe_name(self):
         root = self.tmp()
@@ -343,6 +352,25 @@ class Pack(unittest.TestCase):
         manifest, _ = self.bundle()
         self.assertEqual([lay["checkout"] for lay in manifest["layers"]].count("meta-openglow"), 1,
                          manifest["layers"])
+
+    def test_the_bundle_publishes_no_credential_and_no_ignored_file(self):
+        # A remote that carries a token, and a file the layer's .gitignore
+        # ignores, which the build never reads.
+        bsp = os.path.join(self.root, "forgefirm", "layers", "meta-openglow")
+        subprocess.run(["git", "-C", bsp, "remote", "add", "origin",
+                        "https://someone:ghp_0123456789abcdef@example.org/meta-openglow.git"],
+                       check=True, capture_output=True)
+        write(os.path.join(bsp, "meta-glowforge-bsp", ".gitignore"), "*.secret\n")
+        write(os.path.join(bsp, "meta-glowforge-bsp", "conf", "notes.secret"), "kept out\n")
+        self.run_main(packages=[("busybox", "1.36.1", "GPL-2.0-only")], archives=["busybox-1.36.1-r0"])
+        manifest, layers = self.bundle()
+        urls = [lay["url"] for lay in manifest["layers"] if lay["checkout"] == "meta-openglow"]
+        self.assertEqual(urls, ["https://example.org/meta-openglow.git"])
+        blob = layers["forgefirm-source-v0.0.1/metadata/meta-glowforge-bsp.tar.gz"]
+        with tarfile.open(fileobj=io.BytesIO(blob)) as tar:
+            names = tar.getnames()
+        self.assertIn("meta-glowforge-bsp/conf/layer.conf", names)
+        self.assertNotIn("meta-glowforge-bsp/conf/notes.secret", names)
 
     def test_an_image_with_no_build_identity_stops_the_pack(self):
         # The deploy directory no longer holds the dev image the bundle would

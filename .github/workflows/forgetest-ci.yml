@@ -19,41 +19,27 @@
 #    restore paths; one fflog in the three pinned components
 #  - shared UI files: theme.css and the vendored Bootstrap the page
 #    carries are byte-identical to forgectrl's at its pinned revision
-#  - the extension key: the public key the image installs for the official
-#    tier is byte-identical to the one the extension catalog publishes
-#    (keys/forgefirm-ext.pub on its main branch, or on its next branch
-#    in a run on next)
-#  - the catalog's address: EXTPKG_INDEX_URL in the pinned forgectrl's
-#    src/extpkg.h is the catalog's latest-release download of the file its
-#    tools/publish.py passes to gh release create; read, never requested
-#    (every request of it is counted as a download)
 #  - coverage lint: every source path of every component pinned by the
 #    recipes must be selected by some catalog test's coverage globs or by a
 #    host-tested row naming the host test that proves it (the tree manifest
 #    is generated from the pins with git - no Yocto build); enforced: an
 #    uncovered path fails the job (https://docs.forgefirm.org/developers/testing/).
+#  - the hold-file wire on the pair the image ships: forgectrl's
+#    holds_wire_test built from forgectrl and forgeext at their pins
+#
+# It runs on every push to master and next, whatever the push changes: the
+# release's host-test gate (scripts/host-test-gate.py) requires this
+# workflow's run for the commit a release is built from. So it reads only
+# commits the build pins: meta-openglow at the commit the kas lock names,
+# forgectrl and forgeext at their pins. The comparisons with the extension
+# catalog, whose main moves only after a release is published, are
+# catalog-ci's, which the gate does not require.
 
 name: forgetest-ci
 
 on:
   push:
     branches: [master, next]
-    paths:
-      - 'forgetest/**'
-      - 'scripts/acceptance-gate.py'
-      - 'scripts/manifest-from-tree.py'
-      - 'scripts/source-bundle.py'
-      - 'scripts/release.sh'
-      - 'scripts/mkfw.sh'
-      - 'scripts/install-forgefirm.sh'
-      - 'scripts/check-ui-vendor.py'
-      - 'scripts/release-branch-check.py'
-      - 'scripts/bench/**'
-      - 'kas/**'
-      - 'meta-forgefirm/classes/**'
-      - 'meta-forgefirm/recipes-forgefirm/**'
-      - 'meta-forgefirm/wic/**'
-      - '.github/workflows/forgetest-ci.yml'
   pull_request:
   workflow_dispatch:
 
@@ -67,19 +53,49 @@ jobs:
         with:
           path: forgefirm
 
-      - name: Checkout meta-openglow (sibling)
+      - name: The commits the build pins (the kas lock's meta-openglow, the forgectrl and forgeext pins)
+        id: pins
+        working-directory: forgefirm
+        run: |
+          lock=$(awk '$1 == "meta-openglow:" { f = 1; next } f && $1 == "commit:" { print $2; exit } f && /^    [^ ]/ { f = 0 }' kas/forgefirm-glowforge.lock.yml)
+          echo "$lock" | grep -Eqx '[0-9a-f]{40}' || { echo "the kas lock names no meta-openglow commit"; exit 1; }
+          echo "meta-openglow=$lock" >> "$GITHUB_OUTPUT"
+          for c in forgectrl forgeext; do
+            rev=$(sed -n 's/^SRCREV = "\([0-9a-f]\{40\}\)"$/\1/p' "meta-forgefirm/recipes-forgefirm/$c/$c-pin.inc")
+            echo "$rev" | grep -Eqx '[0-9a-f]{40}' || { echo "$c-pin.inc names no SRCREV"; exit 1; }
+            echo "$c=$rev" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Checkout meta-openglow (sibling) at the commit the kas lock names
         uses: actions/checkout@v4
         with:
           repository: openglow-org/meta-openglow
-          ref: ${{ (github.ref_name == 'next' || github.base_ref == 'next') && 'next' || 'scarthgap' }}
+          ref: ${{ steps.pins.outputs.meta-openglow }}
           path: meta-openglow
 
-      - name: Checkout forgefirm-extensions-catalog (sibling)
+      - name: Checkout forgectrl at its pin
         uses: actions/checkout@v4
         with:
-          repository: openglow-org/forgefirm-extensions-catalog
-          ref: ${{ (github.ref_name == 'next' || github.base_ref == 'next') && 'next' || 'main' }}
-          path: forgefirm-extensions-catalog
+          repository: openglow-org/forgectrl
+          ref: ${{ steps.pins.outputs.forgectrl }}
+          path: forgectrl-pin
+
+      - name: Checkout forgeext at its pin
+        uses: actions/checkout@v4
+        with:
+          repository: openglow-org/forgeext
+          ref: ${{ steps.pins.outputs.forgeext }}
+          path: forgeext-pin
+
+      - name: Build holds_wire_test from the pinned pair (forgectrl's build, forgeext's src/ as FORGEEXT_SRC)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libjansson-dev
+          cmake -S forgectrl-pin -B holds-wire -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror -DFORGEEXT_SRC="$PWD/forgeext-pin/src"
+          cmake --build holds-wire --target holds_wire_test -j"$(nproc)"
+
+      - name: "holds_wire_test on the pair the image ships (forgeext's holdkeep.c writing, forgectrl's holds.c reading)"
+        run: ./holds-wire/holds_wire_test
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -89,68 +105,6 @@ jobs:
       - name: Tree manifest from the recipe pins (also fetches the pinned app sources the needle check reads)
         working-directory: forgefirm
         run: python scripts/manifest-from-tree.py --out tree-manifest.json
-
-      - name: The image's extension key is the catalog's published key
-        run: |
-          image=forgefirm/meta-forgefirm/recipes-forgefirm/forgefirm-keys/files/ext/forgefirm-ext.pub
-          published=forgefirm-extensions-catalog/keys/forgefirm-ext.pub
-          for f in "$image" "$published"; do
-            test -f "$f" || { echo "missing: $f"; exit 1; }
-          done
-          cmp -s "$image" "$published" || { echo "$image is not $published"; exit 1; }
-
-      - name: The catalog's address in the pinned forgectrl is the file the catalog publishes (read, never requested)
-        run: |
-          python3 - <<'EOF'
-          import ast, glob, os, re, subprocess, sys
-
-          PREFIX = "https://github.com/openglow-org/forgefirm-extensions-catalog/releases/latest/download/"
-
-          def fail(why):
-              print(why)
-              sys.exit(1)
-
-          # forgectrl's pin, and its src/extpkg.h from the tree manifest's cache
-          pin = open("forgefirm/meta-forgefirm/recipes-forgefirm/forgectrl/forgectrl-pin.inc").read()
-          m = re.search(r'^SRCREV = "([0-9a-f]{40})"$', pin, re.M)
-          if not m:
-              fail("forgectrl-pin.inc names no SRCREV")
-          rev = m.group(1)
-          header = None
-          for repo in sorted(glob.glob("forgefirm/.manifest-cache/*")):
-              p = subprocess.run(["git", "-C", repo, "show", rev + ":src/extpkg.h"], capture_output=True, text=True)
-              if p.returncode == 0:
-                  header = p.stdout
-                  break
-          if header is None:
-              fail("forgectrl %s is not in forgefirm/.manifest-cache" % rev)
-          m = re.search(r'#define\s+EXTPKG_INDEX_URL\s*(?:\\\n\s*)?"([^"]*)"', header)
-          if not m:
-              fail("forgectrl %s's src/extpkg.h defines no EXTPKG_INDEX_URL" % rev[:7])
-          url = m.group(1)
-
-          # the file the catalog's publish tool passes to gh release create
-          tree = ast.parse(open("forgefirm-extensions-catalog/tools/publish.py").read())
-          assigned = {n.targets[0].id: n.value for n in ast.walk(tree)
-                      if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
-
-          def file_name(v):
-              if isinstance(v, ast.Name):
-                  v = assigned.get(v.id)
-              if isinstance(v, ast.Call) and v.args:
-                  v = v.args[-1]
-              return os.path.basename(v.value) if isinstance(v, ast.Constant) and isinstance(v.value, str) else None
-
-          names = [file_name(n.args[3]) if len(n.args) > 3 else None for n in ast.walk(tree)
-                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "gh"
-                   and [a.value for a in n.args[:2] if isinstance(a, ast.Constant)] == ["release", "create"]]
-          if len(names) != 1 or not names[0]:
-              fail("tools/publish.py passes no one file to gh release create: %s" % names)
-
-          print("forgectrl %s: %s; the catalog publishes %s" % (rev[:7], url, names[0]))
-          if url != PREFIX + names[0]:
-              fail("the address is not %s" % (PREFIX + names[0]))
-          EOF
 
       - name: Unit tests
         working-directory: forgefirm/forgetest
@@ -188,11 +142,14 @@ jobs:
       - name: Gate self-check on the tree manifest
         working-directory: forgefirm
         run: |
-          # The gate must load the catalog and refuse a missing/unauthorized
-          # artifact cleanly (exit 1/2, never a traceback).
+          # The gate must load the catalog and refuse an unsigned, unauthorized
+          # artifact cleanly: exit status 1, and never a traceback (Python
+          # also exits 1 on an uncaught exception).
           set +e
           echo '{}' > empty.json
-          python scripts/acceptance-gate.py empty.json tree-manifest.json --quiet
+          python scripts/acceptance-gate.py empty.json tree-manifest.json --quiet 2> gate-stderr.txt
           rc=$?
           set -e
+          cat gate-stderr.txt
           test "$rc" -eq 1
+          if grep -q Traceback gate-stderr.txt; then exit 1; fi

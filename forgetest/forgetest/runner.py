@@ -1067,12 +1067,40 @@ class Runner:
         self.log.append({"t": "reset", "reason": (reason or "").strip()})
         return True, "campaign reset"
 
+    def dispose(self, test_id, reason):
+        """The operator's answer to the FAIL or ERROR that blocks a test's
+        current fingerprint (campaign.py, reason "disposition"): recorded
+        with its reason, it lets a PASS on that fingerprint count again.
+        The artifact carries the disposition beside the result it answers."""
+        reason = (reason or "").strip()
+        if not reason:
+            return False, "a reason is required"
+        t = _catalog.get(test_id, self.registry)
+        if t is None:
+            return False, "unknown test"
+        with self._lock:
+            if self.busy():
+                return False, "a run is in progress"
+            state, _ = self.state()
+            ts = state["tests"][t.id]
+            if ts["reason"] != "disposition":
+                return False, "nothing to dispose: no FAIL or ERROR on this fingerprint waits for one"
+            self.log.append({"t": "disposition", "test": t.id, "fingerprint": ts["fingerprint"],
+                             "reason": reason})
+        return True, "disposition recorded; a PASS on this fingerprint counts again"
+
     def export(self):
-        state, records = self.state()
+        """(True, the signed artifact), or (False, why). A run in progress
+        would change what the artifact claims, so an export waits for it."""
+        with self._lock:
+            if self.busy():
+                return False, "a run is in progress"
+            state, records = self.state()
         art = _artifact.build(state, self.tests(), self.manifest, records, self.catalog_hash)
+        art = _artifact.sign(art, _artifact.bench_key())
         self.log.append({"t": "export", "artifact_sha256": art["sha256"], "authorized": art["authorized"],
                          "campaign": (state["campaign"] or {}).get("id")})
-        return art
+        return True, art
 
     # -- starting -----------------------------------------------------------
     def start_test(self, test_id, ack_live=False, ignore_requires=False):
@@ -1283,6 +1311,7 @@ class Runner:
         fp = t.fingerprint(self.manifest)
         before = self.provenance.check()
         result, message = _campaign.PASS, ""
+        fixture_error = False
         captured = None
         try:
             captured = self._baseline_pre(run, mode=t.mode)
@@ -1297,6 +1326,7 @@ class Runner:
             # the bench actuator could not perform a step: the test was
             # not judged, and the machine is not the one at fault
             result, message = _campaign.ERROR, "the fixture could not perform a step: %s" % e
+            fixture_error = True
         except Exception as e:  # noqa: BLE001 - an erroring test is a failed test
             result, message = _campaign.ERROR, "%s: %s" % (type(e).__name__, e)
             run.log(traceback.format_exc().rstrip())
@@ -1328,6 +1358,14 @@ class Runner:
                "image": self.manifest.version, "duration_s": duration, "message": message,
                "provenance": _provenance.merge(before, self.provenance.check()),
                "evidence": run.evidence, "answers": run.answers, "log": list(run.lines)}
+        if fixture_error and result == _campaign.ERROR:
+            rec["fixture_error"] = True
+        elif result in _campaign.CLOSING:
+            # A FAIL, or an ERROR the test raised, blocks this fingerprint
+            # until the operator records a disposition (campaign.py): a
+            # rerun that passes is not an answer to it. An ERROR the bench
+            # fixture raised judged nothing, and asks for a rerun only.
+            rec["needs_disposition"] = True
         self.log.append(rec)
         run.finished = {"result": result, "message": message, "duration_s": duration}
 

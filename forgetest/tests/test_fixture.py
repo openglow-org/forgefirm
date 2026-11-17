@@ -490,6 +490,12 @@ class RoutingTests(unittest.TestCase):
         act = rec["evidence"]["actions"][0]
         self.assertEqual((act["by"], act["fixture_error"]), ("fixture", "the box is off"))
         self.assertFalse(any("asking the operator" in l for l in rec["log"]), rec["log"])
+        # The box judged nothing: the test is run again, and nobody owes
+        # the error a disposition.
+        self.assertTrue(rec["fixture_error"])
+        self.assertNotIn("needs_disposition", rec)
+        st, _ = self.runner.state()
+        self.assertNotEqual(st["tests"]["r.lid"]["reason"], "disposition")
 
     def test_what_the_box_still_holds_is_released_after_a_run(self):
         def holds(ctx):
