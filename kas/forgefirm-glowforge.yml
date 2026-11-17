@@ -75,8 +75,10 @@ repos:
   # --- meta-openglow - Glowforge BSP layers ---------------------------------
   # The pinned-remote block below: the GitHub repository at the commit in the
   # lock file (kas/forgefirm-glowforge.lock.yml). kas checks that the branch
-  # named here holds that commit, and `kas lock --update` moves the commit to
-  # the head of that branch. The kernel-module-glowforge sources are NOT a
+  # named here holds that commit. `kas lock --update` moves every locked
+  # layer to the head of its branch, the upstream layers too, which is a
+  # platform change; a meta-openglow bump alone is a hand edit of its
+  # commit in the lock file. The kernel-module-glowforge sources are NOT a
   # layer; the kernel-module-glowforge.bb recipe fetches them by pinned
   # SRCREV, so kas does not manage them here. The local-sibling alternative
   # for development (no url => kas performs no git ops, so in-place BSP edits
