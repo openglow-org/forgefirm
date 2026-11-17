@@ -53,9 +53,15 @@ job after it.
 
 A case stops at once when its controller logs the armed clamp (the host
 kept the producer off the CPU past its lead, so the stream faulted the run
-on purpose and the case did not run). It runs once more from new
+on purpose and the case did not run). A case that needs a homed machine,
+whose controller logged a reference dropped (late step events outside a
+window that owed an axis a full step dropped X and Y's or the lens's: the
+host starved the producer, and a reference the case stands on is gone), is
+judged at a
+check that fails: that failure is the starve. A case that passes passes,
+whatever its controller logged. A starved case runs once more from new
 controllers, and a second starve fails the harness; no other failure runs
-a case again.
+a case again. No session here asks for a stall.
 
 Usage: ctlport_test.py [path/to/grblHAL_glowforge]
 """
@@ -88,9 +94,9 @@ PORT = free_port()
 
 
 def fail(msg):
-    # A check that fails in a session the host starved fails on the fault:
-    # the starve is the case's verdict.
-    watch_check()
+    # A check that fails in a session the host starved fails on the starve:
+    # the armed clamp, or a dropped reference the case stood on.
+    watch_fail_check()
     print("FAIL: %s" % msg)
     sys.exit(1)
 
@@ -100,26 +106,38 @@ def fail(msg):
 # on purpose (ALARM:17, dark).
 CLAMP_LINE = "late events while the laser is armed"
 
+# The start of the controller's line when late step events outside an
+# armed window owed an axis a full step and dropped its reference, X and
+# Y's or the lens's (the move completes, but steps can have been lost while
+# every counter agrees). In a session that asks for no stall and needs a
+# homed machine it means the host starved the producer.
+DROP_LINE = "gfstream: late step events dropped the "
+
 
 class HostStarved(Exception):
-    """The host kept the producer off the CPU past its lead inside an armed
-    window: the stream faulted the run on purpose, and the case did not
-    run (run_case runs the case once more)."""
+    """The host kept the producer off the CPU past its lead: inside an
+    armed window the stream faulted the run on purpose, or outside one a
+    reference a case needs was dropped. The case did not run
+    (run_case runs it once more)."""
 
 
 class StderrWatch:
     """Reads a controller's stderr while it runs, so the pipe never fills
-    and blocks it. No session here asks for a producer stall, so the clamp
-    line means the host starved the producer. check(), which every wait,
+    and blocks it. The session asks for no producer stall, so the clamp
+    line means the host starved the producer: check(), which every wait,
     every failure and the session's close call, then raises HostStarved at
-    once, with the worst lag from the run's summary line, rather than
-    leave the case to fail at a later check that the fault broke."""
+    once, rather than leave the case to fail at a later check that the
+    fault broke. The drop line in a session that needs a homed machine
+    (homed) means the same, but breaks nothing a case has already checked:
+    only fail_check(), at a check that fails, raises on it."""
 
-    def __init__(self, proc, name):
+    def __init__(self, proc, name, homed=False):
         self.name = name
         self.armed_check = True
+        self.homed = homed
         self.lines = []
         self.clamped = False
+        self.dropped = False
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.read, args=(proc.stderr,), daemon=True)
         self.thread.start()
@@ -131,10 +149,21 @@ class StderrWatch:
                 self.lines.append(line)
                 if CLAMP_LINE in line:
                     self.clamped = True
+                if DROP_LINE in line:
+                    self.dropped = True
 
     def text(self):
         with self.lock:
             return "".join(self.lines)
+
+    def fail_check(self):
+        """A check failed: a dropped reference the case stands on is the
+        starve that failed it; else the armed clamp, as check()."""
+        if self.dropped and self.homed and self.armed_check and not self.clamped:
+            self.armed_check = False
+            raise HostStarved("[%s] host starved the producer: late step events dropped a reference "
+                              "the case stands on, and a check failed after it" % self.name)
+        self.check()
 
     def check(self):
         if not (self.clamped and self.armed_check):
@@ -160,6 +189,11 @@ WATCH = None    # the running controller's StderrWatch
 def watch_check():
     if WATCH is not None:
         WATCH.check()
+
+
+def watch_fail_check():
+    if WATCH is not None:
+        WATCH.fail_check()
 
 
 def run_case(case):
@@ -331,15 +365,28 @@ def publish_verdicts(path, stop):
 
 
 class Session:
-    def __init__(self, eol="\n", laser=False, name="ctlport"):
+    """One controller. homed: the case needs a homed machine, so a dropped
+    homing reference that a check failed after is a starve (StderrWatch).
+    env_extra adds to the controller's environment (the host stall knobs;
+    a session that asks for a stall is never homed). conf_extra adds lines
+    to the settings and state_files puts files in the state directory, both
+    before the controller starts (what it reads only there: the microstep
+    mode, the lens marker)."""
+
+    def __init__(self, eol="\n", laser=False, name="ctlport", homed=False, env_extra=None,
+                 conf_extra="", state_files=None):
         global WATCH
         self.workdir = tempfile.mkdtemp(prefix="ctlport-")
         conf = os.path.join(self.workdir, "forgefirm.conf")
         with open(conf, "w") as f:
-            f.write("cool_fan_grace_s = 0\nlaser_disarm_s = 30\nhoming_mode = manual\n")
+            f.write("cool_fan_grace_s = 0\nlaser_disarm_s = 30\nhoming_mode = manual\n" + conf_extra)
+        for fname, text in (state_files or {}).items():
+            with open(os.path.join(self.workdir, fname), "w") as f:
+                f.write(text)
         env = dict(os.environ, GFHOME_CONF=conf, GF_STATE_DIR=self.workdir, FFLOG_STDERR="1")
         env.pop("GFSINK", None)
         env.pop("GF_SWITCH_FILE", None)
+        env.update(env_extra or {})
         self.dump = os.path.join(self.workdir, "stream.bin")
         self.stop = threading.Event()
         self.pub = None
@@ -351,7 +398,7 @@ class Session:
             self.pub.start()
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=self.workdir, env=env,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        self.watch = WATCH = StderrWatch(self.proc, name)
+        self.watch = WATCH = StderrWatch(self.proc, name, homed)
         self.sender = Sender(PORT, eol)
         self.path = os.path.join(self.workdir, "grbl.ctl")
         for _ in range(50):

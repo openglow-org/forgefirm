@@ -21,7 +21,9 @@ operator's own $ME or a manual $H energizes it:
      sender jog, a sender G0, a program line, a port jog, and a homing runner;
      $X cannot unlock it and a soft reset does not either
   5. only $ME and a manual $H write the energize, each exactly once; after
-     $ME the position is still unknown, and after the $H it is homed
+     $ME the position is still unknown, and after the $H it is homed. A
+     move's own writes, the run currents at its start and the hold currents
+     once it has played out, are no energize, and a jog makes them
   6. the port's panel operations (release, energize, home) do the same with
      a sender connected, and the sender's response count stays exact; home
      is refused unless homing_mode = manual
@@ -39,6 +41,10 @@ operator's own $ME or a manual $H energizes it:
      gfcloud_home_*, which may be negative, with the envelope reaching back
      to it
 
+The cases stand on a home: a check that fails after a starve dropped the
+homing reference runs them once more from a new controller (ctlport_test's
+rule).
+
 Usage: manual_home_test.py [path/to/grblHAL_glowforge]
 """
 import os
@@ -50,12 +56,14 @@ import tempfile
 import threading
 import time
 
+import ctlport_test as ct
 from ctlport_test import BIN, PortClient, Sender, fail, free_port, publish_verdicts
 
 PORT = free_port()
 NOTICE = "Manual home: position set where the head was placed"
 RELEASED = "Motors released"
 RUNNER_MARK = "runner-ran"
+RUN, HOLD = ("135", "22"), ("33", "5")     # the X and Y run and hold currents
 
 
 class Session:
@@ -75,8 +83,7 @@ class Session:
         env.pop("GFSINK", None)
         env.pop("GF_SWITCH_FILE", None)
         self.env = env
-        self.proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=self.workdir, env=env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.launch()
         self.sender = Sender(PORT)
         path = os.path.join(self.workdir, "grbl.ctl")
         for _ in range(50):
@@ -91,6 +98,14 @@ class Session:
         if start != [("33", "5")]:
             fail("the controller's start wrote %r to the step currents, not the hold currents" % start)
         self.base = len(start)
+
+    def launch(self):
+        """A controller, its stderr read by ctlport_test's watch: the cases
+        stand on a home, so a dropped homing reference is a starve when a
+        check fails after it; the armed clamp is one at every wait."""
+        self.proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=self.workdir, env=self.env,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.watch = ct.WATCH = ct.StderrWatch(self.proc, "manual-home", homed=True)
 
     def set_mode(self, mode, extra=""):
         """The driver re-reads the file at every $H."""
@@ -117,10 +132,12 @@ class Session:
             return 0
         return sum(1 for b in data if not b & 0x80 and b & 0x10)
 
-    def attr_writes(self):
+    def raw_attr_writes(self):
         """The X and Y step-current writes the hardware would have got, in
         order, as (x, y) pairs: ("0", "0") is a release, ("33", "5") the hold
-        currents, which is what an energize writes."""
+        currents, which is what an energize writes, and RUN the run currents
+        a move starts with, which the hold currents follow once the move
+        has played out."""
         vals = {"pic/x_step_current": [], "pic/y_step_current": []}
         try:
             with open(self.attr_log) as f:
@@ -132,6 +149,38 @@ class Session:
             pass
         return list(zip(vals["pic/x_step_current"], vals["pic/y_step_current"]))[self.base:]
 
+    def attr_writes(self):
+        """The writes a release or an energize makes: raw_attr_writes with
+        the moves' own taken out (every run pair, and the hold pair that
+        follows one)."""
+        out, after_run = [], False
+        for pair in self.raw_attr_writes():
+            if pair == RUN:
+                after_run = True
+                continue
+            if after_run and pair == HOLD:
+                after_run = False
+                continue
+            after_run = False
+            out.append(pair)
+        return out
+
+    def wait_hold(self, timeout=2.0):
+        """True once the last move's run currents have been followed by the
+        hold currents (or no move has run): the drop the controller owes once
+        a move has played out."""
+        end = time.time() + timeout
+        while True:
+            raw = self.raw_attr_writes()
+            if RUN not in raw:
+                return True
+            last = len(raw) - 1 - raw[::-1].index(RUN)
+            if raw[last + 1:last + 2] == [HOLD]:
+                return True
+            if time.time() >= end:
+                return False
+            time.sleep(0.05)
+
     def respawn(self, hard=True):
         """End the controller (SIGKILL when hard: it gets no chance to tidy
         up) and start another over the same state directory."""
@@ -142,8 +191,9 @@ class Session:
         else:
             self.proc.send_signal(signal.SIGINT)
         self.proc.wait(10)
-        self.proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=self.workdir, env=self.env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.watch.thread.join(2)
+        self.watch.check()              # the armed clamp's starve before the end
+        self.launch()
         self.sender = Sender(PORT)
         time.sleep(0.5)
         self.port = PortClient(os.path.join(self.workdir, "grbl.ctl"))
@@ -159,9 +209,13 @@ class Session:
             self.proc.wait(5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        self.watch.thread.join(2)
+        if ct.WATCH is self.watch:
+            ct.WATCH = None
         self.stop.set()
         self.pub.join(2)
         shutil.rmtree(self.workdir, ignore_errors=True)
+        self.watch.check()              # the armed clamp's starve after the case's last wait
 
 
 def declared(s):
@@ -319,6 +373,9 @@ def test_energize(s):
     if s.sender.send("$J=G91 X1 F600") != "ok":
         fail("[energize] a jog after $ME was refused")
     s.sender.wait_state("Idle")
+    if not s.wait_hold() or s.raw_attr_writes()[-2:] != [RUN, HOLD]:
+        fail("[energize] the jog's currents were not the run currents and then the hold "
+             "currents: %r" % s.raw_attr_writes())
 
     s.sender.send("$MD")
     if s.sender.send("$H") != "ok":
@@ -328,8 +385,8 @@ def test_energize(s):
         fail("[energize] the manual $H did not energize exactly once: %r" % s.attr_writes())
     if st["released"] or st["state"] != "Idle" or st["homed"] & 3 != 3:
         fail("[energize] not energized, idle and homed after the manual $H: %r" % st)
-    print("PASS [energize]: $ME energized once and left X and Y unreferenced; a manual $H "
-          "energized once and homed")
+    print("PASS [energize]: $ME energized once and left X and Y unreferenced; a jog ran at the run "
+          "currents and dropped to the hold currents; a manual $H energized once and homed")
 
 
 def test_port_panel_ops(s):
@@ -365,6 +422,7 @@ def test_restart_while_released(s):
     takes the release over before it writes its first current: it comes up
     locked, the hold currents are never written, and $ME still ends it."""
     s.sender.wait_state("Idle")
+    s.wait_hold()                               # the last move's drop before the release
     if s.sender.send("$MD") != "ok":
         fail("[restart] $MD was refused")
     before = s.attr_writes()
@@ -513,9 +571,10 @@ def test_offsets_belong_to_their_provider(s):
           "(-4.5, 3.25); the envelope reached back to the camera home on X and stopped at the origin on Y")
 
 
-def main():
-    if not os.path.exists(BIN):
-        fail("no controller binary at %s" % BIN)
+def cases():
+    """Every case, on one controller (and the one its restart case starts):
+    a check that fails after a host starve dropped the homing reference
+    runs them once more from a new one (ctlport_test's rule)."""
     s = Session()
     try:
         test_manual_home(s)
@@ -530,6 +589,12 @@ def main():
         test_offsets_belong_to_their_provider(s)
     finally:
         s.close()
+
+
+def main():
+    if not os.path.exists(BIN):
+        fail("no controller binary at %s" % BIN)
+    ct.run_case(cases)
     print("ALL PASS")
 
 

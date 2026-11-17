@@ -14,7 +14,7 @@ import time
 from ..catalog import test
 from .. import hw
 
-_COOL_COVERS = [("forgectrl", "src/cool.*"), ("forgectrl", "src/coolfmt.*"), ("forgectrl", "src/diag.*"),
+_COOL_COVERS = [("forgectrl", "src/cool*"), ("forgectrl", "src/diag.*"),
                 ("forgectrl", "src/led.*"),
                 ("forgectrl", "src/gates.*"), ("forgectrl", "src/airflow.*"),
                 ("forgectrl", "src/accel.*"),
@@ -23,6 +23,7 @@ _COOL_COVERS = [("forgectrl", "src/cool.*"), ("forgectrl", "src/coolfmt.*"), ("f
                 ("grblhal-glowforge", "src/glowforge_cooling.*"),
                 ("kernel-module-glowforge", "src/thermal*"),
                 ("kernel-module-glowforge", "src/heater_lease.h"),
+                ("kernel-module-glowforge", "src/io.*"),
                 ("kernel-module-glowforge", "src/pic*")]
 
 

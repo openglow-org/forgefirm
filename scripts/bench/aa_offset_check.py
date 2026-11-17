@@ -31,6 +31,12 @@ def raw():
     return out
 
 
+def reading(v):
+    """A coolant reading in degrees, or None: /status gives null for a
+    count that is no temperature, and the engine -273.15."""
+    return v if isinstance(v, (int, float)) and v > -100 else None
+
+
 def status():
     with urllib.request.urlopen(BASE + '/status', timeout=2) as r:
         s = json.load(r)
@@ -38,8 +44,22 @@ def status():
         c = json.load(r)
     with urllib.request.urlopen(BASE + '/settings', timeout=2) as r:
         st = json.load(r)
-    return (s['coolant']['down_c'], s['coolant']['up_c'], c['down_c'], c['up_c'], c['phase'],
-            st.get('cool_aa_offset_counts'))
+    return (reading(s['coolant']['down_c']), reading(s['coolant']['up_c']), reading(c['down_c']),
+            reading(c['up_c']), c['phase'], st.get('cool_aa_offset_counts'))
+
+
+def mean(vals):
+    """The mean of the readings, or None when there is none."""
+    vs = [v for v in vals if v is not None]
+    return sum(vs) / len(vs) if vs else None
+
+
+def fmt(v, spec='%.2f'):
+    return 'no reading' if v is None else spec % v
+
+
+def step(a, b):
+    return 'no reading' if a is None or b is None else '%+.2f' % (a - b)
 
 
 def mean_over(secs):
@@ -51,7 +71,11 @@ def mean_over(secs):
         time.sleep(0.5)
     n = len(rs)
     return ([sum(x[i] for x in rs) / n for i in range(2)],
-            [sum(x[i] for x in ss) / n for i in range(4)])
+            [mean([x[i] for x in ss]) for i in range(4)])
+
+
+def line(r, s):
+    return '  raw %.1f/%.1f  /status %s/%s  engine %s/%s' % (r[0], r[1], *(fmt(v) for v in s))
 
 
 def main():
@@ -64,19 +88,18 @@ def main():
     print('cool_aa_offset_counts = %s' % setting)
     print('before M8: settling 8 s')
     r0, s0 = mean_over(8.0)
-    print('  raw %.1f/%.1f  /status %.2f/%.2f  engine %.2f/%.2f' % (r0[0], r0[1], *s0))
+    print(line(r0, s0))
     print('M8: %s' % g.cmd('M8'))
     time.sleep(6.0)                       # the fans to run duty, the offset in
     r1, s1 = mean_over(dwell)
-    print('  raw %.1f/%.1f  /status %.2f/%.2f  engine %.2f/%.2f  (phase %s)'
-          % (r1[0], r1[1], *s1, status()[4]))
+    print('%s  (phase %s)' % (line(r1, s1), status()[4]))
     print('M9: %s' % g.cmd('M9'))
     time.sleep(25.0)                      # the session closes, the fans idle
     r2, s2 = mean_over(8.0)
-    print('  raw %.1f/%.1f  /status %.2f/%.2f  engine %.2f/%.2f' % (r2[0], r2[1], *s2))
-    print('\nraw counts stepped %+.1f / %+.1f under the run profile; /status moved %+.2f / %+.2f C; '
-          'the engine moved %+.2f / %+.2f C'
-          % (r1[0] - r0[0], r1[1] - r0[1], s1[0] - s0[0], s1[1] - s0[1], s1[2] - s0[2], s1[3] - s0[3]))
+    print(line(r2, s2))
+    print('\nraw counts stepped %+.1f / %+.1f under the run profile; /status moved %s / %s C; '
+          'the engine moved %s / %s C'
+          % (r1[0] - r0[0], r1[1] - r0[1], *(step(s1[i], s0[i]) for i in range(4))))
     return 0
 
 

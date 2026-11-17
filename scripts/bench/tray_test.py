@@ -42,6 +42,10 @@ sender on the Grbl socket, and the port client of ctlport_test.py:
 The kernel-idle half of the barrier (the wait a package's M-code makes)
 needs the pulse device: a null sink is always idle.
 
+The cases with the lens referenced stand on that reference: a check that
+fails after a starve dropped the homing reference runs them once more from
+a new controller (ctlport_test's rule).
+
 Usage: tray_test.py [path/to/grblHAL_glowforge]
 """
 import os
@@ -93,6 +97,7 @@ class Session:
         env.pop("GFSINK", None)
         env.pop("GF_SWITCH_FILE", None)
         self.env = env
+        self.referenced = referenced
         self.start()
 
     def write_conf(self, conf):
@@ -102,8 +107,12 @@ class Session:
                 f.write("%s = %s\n" % (k, v))
 
     def start(self):
+        """A controller, its stderr read by ctlport_test's watch: a session
+        with the lens referenced stands on that reference, so a dropped
+        homing reference is a starve there when a check fails after it."""
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=self.workdir, env=self.env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.watch = ct.WATCH = ct.StderrWatch(self.proc, "tray", homed=self.referenced)
         self.sender = ct.Sender(PORT)
         path = os.path.join(self.workdir, "grbl.ctl")
         for _ in range(50):
@@ -126,6 +135,8 @@ class Session:
         else:
             self.proc.send_signal(signal.SIGINT)
         self.proc.wait(10)
+        self.watch.thread.join(2)
+        self.watch.check()              # the armed clamp's starve before the end
         self.start()
 
     def state(self):
@@ -168,9 +179,13 @@ class Session:
             self.proc.wait(5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        self.watch.thread.join(2)
+        if ct.WATCH is self.watch:
+            ct.WATCH = None
         self.stop.set()
         self.pub.join(2)
         shutil.rmtree(self.workdir, ignore_errors=True)
+        self.watch.check()              # the armed clamp's starve after the case's last wait
 
 
 def expect_z(s, k, what):
@@ -449,9 +464,8 @@ def test_camera_home():
           "after the home read %.3f tray in, %.3f tray out" % (parks[0], z["P0"], z["P1"]))
 
 
-def main():
-    if not os.path.exists(BIN):
-        fail("no controller binary at %s" % BIN)
+def shared_cases():
+    """Rules 1 to 6, on one controller (and the ones its restarts start)."""
     s = Session()
     try:
         if s.sender.send("$102") != "ok" or not s.sender.saw("$102=2.922"):
@@ -464,9 +478,15 @@ def main():
         test_persistence(s)
     finally:
         s.close()
-    test_offset()
+
+
+def main():
+    if not os.path.exists(BIN):
+        fail("no controller binary at %s" % BIN)
+    ct.run_case(shared_cases)
+    ct.run_case(test_offset)
     test_unreferenced()
-    test_camera_home()
+    ct.run_case(test_camera_home)
     print("ALL PASS")
 
 

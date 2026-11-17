@@ -75,6 +75,10 @@ The binary keeps its settings in EEPROM.DAT in the working directory, so
 each run starts from defaults in a temporary directory and leaves
 nothing behind.
 
+The referenced and homed cases (7 to 12) stand on the lens reference or
+the home: a check that fails after a starve dropped the homing reference
+runs them once more from new controllers (ctlport_test's rule).
+
 Usage: z_envelope_test.py [path-to-binary]
        (default ./build-native/grblHAL_glowforge)
 """
@@ -86,6 +90,9 @@ import subprocess
 import sys
 import tempfile
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ctlport_test as ct  # noqa: E402
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build-native/grblHAL_glowforge")
 
@@ -106,6 +113,8 @@ ALARM_SOFT_LIMIT = "ALARM:2"
 
 
 def fail(msg):
+    # A check that fails in a session the host starved fails on the starve.
+    ct.watch_fail_check()
     print("FAIL: %s" % msg)
     sys.exit(1)
 
@@ -114,7 +123,10 @@ class Session:
     """One null-sink controller process with its own settings store.
     `conf` (key: value) is the shared config the driver reads; with
     `referenced` the lens marker forgectrl leaves is in the state
-    directory, so the driver takes the lens reference at its start."""
+    directory, so the driver takes the lens reference at its start, and
+    the session stands on it: a dropped homing reference is a starve
+    when a check fails after it (ctlport_test's rule); the armed clamp is
+    one at every read."""
 
     def __init__(self, conf=None, referenced=False, workdir=None):
         self.workdir = workdir or tempfile.mkdtemp(prefix="z-envelope-")
@@ -133,6 +145,7 @@ class Session:
                                      cwd=self.workdir, env=env,
                                      stdout=subprocess.DEVNULL,
                                      stderr=subprocess.PIPE)
+        self.watch = ct.WATCH = ct.StderrWatch(self.proc, "z-envelope", homed=referenced)
         self.sock = self.connect()
         self.read(1.0)                  # banner and any boot messages
 
@@ -148,13 +161,13 @@ class Session:
                 return socket.create_connection(("127.0.0.1", PORT), timeout=1)
             except OSError:
                 time.sleep(0.1)
-        err = b""
         if self.proc.poll() is not None:
-            err = self.proc.stderr.read() or b""
+            self.watch.thread.join(1)
         fail("cannot connect to the controller (exit=%s)\n%s"
-             % (self.proc.poll(), err.decode(errors="replace")))
+             % (self.proc.poll(), self.watch.text()))
 
     def read(self, timeout=0.8):
+        ct.watch_check()
         out = b""
         end = time.time() + timeout
         while time.time() < end:
@@ -264,8 +277,12 @@ class Session:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        self.watch.thread.join(2)
+        if ct.WATCH is self.watch:
+            ct.WATCH = None
         if not keep:
             shutil.rmtree(self.workdir, ignore_errors=True)
+        self.watch.check()              # the armed clamp's starve after the case's last read
 
 
 def check(ok, ok_msg, fail_msg):
@@ -535,10 +552,10 @@ def main():
         free_in_xy(s, "after the settings writes")
     finally:
         s.close()
-    referenced_cases()
-    homed_cases()
-    homing_cases()
-    startup_line_cases()
+    ct.run_case(referenced_cases)
+    ct.run_case(homed_cases)
+    ct.run_case(homing_cases)
+    ct.run_case(startup_line_cases)
     print("PASS z_envelope_test")
 
 

@@ -175,7 +175,12 @@ GFSINK_WRITE_STALL_MS of the sink's write; a session that asks for one
 judges a clamp by its own checks) stops at once when the controller logs
 the armed clamp: the host kept the
 producer off the CPU past its lead, the stream faulted the run on purpose,
-and the rule did not run. The session runs once more from a new
+and the rule did not run. A session whose moves stand on the lens
+reference (session Z, the canned cycles), whose controller logged the
+lens reference dropped (late step events outside a window that owed the
+lens a full step), is judged at a check that fails, in the session or in
+its judging after it: that failure is the starve, and a session that
+passes passes. A starved session runs once more from a new
 controller, and a second starve fails the harness; no other failure runs
 a session again. CI gives the controller cap_sys_nice, as the board runs
 it, so the producer runs SCHED_FIFO.
@@ -448,9 +453,16 @@ JOB_NEXT = [
 
 def fail(msg):
     # A check that fails in a session the host starved fails on the fault:
-    # the starve is the session's verdict.
+    # the starve is the session's verdict. So is a check of a session's
+    # judging that fails after its controller dropped the reference the
+    # session stood on (DROPPED).
+    global DROPPED
     if WATCH is not None:
-        WATCH.check()
+        WATCH.fail_check()
+    if DROPPED is not None:
+        name, DROPPED = DROPPED, None
+        raise HostStarved("[%s] host starved the producer: late step events dropped the lens "
+                          "reference the session stands on, and its judging failed after it" % name)
     print("FAIL: %s" % msg)
     sys.exit(1)
 
@@ -460,27 +472,39 @@ def fail(msg):
 # on purpose (ALARM:17, dark). GFSINK_STALL_MS forces it.
 CLAMP_LINE = "late events while the laser is armed"
 
+# The controller's line when late step events outside an armed window owed
+# the lens a full step and dropped its reference: a session whose Z moves
+# stand on that reference cannot run past it. No session here homes X and
+# Y, so their drop leaves nothing a session stands on.
+DROP_LINE = "gfstream: late step events dropped the lens reference"
+
 
 class HostStarved(Exception):
-    """The host kept the producer off the CPU past its lead inside an armed
-    window, in a session that did not ask for a stall: the stream
-    faulted the run on purpose, and the rule did not run (run_session runs
+    """The host kept the producer off the CPU past its lead, in a session
+    that did not ask for a stall: inside an armed window the stream
+    faulted the run on purpose, or outside one the lens reference the
+    session stands on was dropped. The rule did not run (run_session runs
     the session once more)."""
 
 
 class StderrWatch:
     """Reads a controller's stderr while it runs, so the pipe never fills
     and blocks it. In a session that did not ask for a stall, the clamp
-    line means the host starved the producer. check(), which
-    every socket read calls, then raises HostStarved at once, with the
-    worst lag from the run's summary line, rather than leave the session
-    to fail at a later check that the fault broke."""
+    line means the host starved the producer: check(), which every socket
+    read calls, then raises HostStarved at once, rather than leave the
+    session to fail at a later check that the fault broke. The drop line
+    in a session that stands on the lens reference (needs_reference) means
+    the same, but breaks nothing already checked: fail_check(), at a check
+    that fails, raises on it, and the session's judging after it reads
+    dropped_reference()."""
 
-    def __init__(self, proc, name, stall_asked):
+    def __init__(self, proc, name, stall_asked, needs_reference=False):
         self.name = name
         self.armed_check = not stall_asked
+        self.needs_reference = needs_reference
         self.lines = []
         self.clamped = False
+        self.dropped = False
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.read, args=(proc.stderr,), daemon=True)
         self.thread.start()
@@ -492,6 +516,8 @@ class StderrWatch:
                 self.lines.append(line)
                 if CLAMP_LINE in line:
                     self.clamped = True
+                if DROP_LINE in line:
+                    self.dropped = True
 
     def text(self):
         with self.lock:
@@ -501,6 +527,20 @@ class StderrWatch:
         """True once the clamp line has come in a session that did not ask
         for a stall."""
         return self.clamped and self.armed_check
+
+    def dropped_reference(self):
+        """True when the controller dropped the reference the session
+        stands on, in a session that did not ask for a stall."""
+        return self.dropped and self.needs_reference and self.armed_check and not self.clamped
+
+    def fail_check(self):
+        """A check failed: a dropped reference the session stands on is the
+        starve that failed it; else the armed clamp, as check()."""
+        if self.dropped_reference():
+            self.armed_check = False
+            raise HostStarved("[%s] host starved the producer: late step events dropped the lens "
+                              "reference the session stands on, and a check failed after it" % self.name)
+        self.check()
 
     def check(self):
         if not self.starved():
@@ -521,6 +561,7 @@ class StderrWatch:
 
 
 WATCH = None    # the running controller's StderrWatch
+DROPPED = None  # the session being judged, when its controller dropped the reference it stood on
 
 
 def send_line(sock, line, log):
@@ -651,7 +692,7 @@ def publish_verdicts(path, stop):
 
 
 def run_session(name, steps, conf=None, workdir=None, keep=False,
-                arm_required=True, env_extra=None):
+                arm_required=True, env_extra=None, needs_reference=False, judge=None):
     """Launch the controller, run the job steps, return the dump bytes.
 
     Pass workdir + keep to chain launches over one settings file: the
@@ -665,21 +706,36 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
     controller; a second starve fails the harness. No other failure runs
     a session again, and a session that asks for a stall
     (GFSINK_STALL_MS, GFSINK_WRITE_STALL_MS) is never judged starved: its
-    own checks judge a clamp, with no rerun."""
-    args = (name, steps, conf, workdir, keep, arm_required, env_extra)
+    own checks judge a clamp, with no rerun. needs_reference: the
+    session's moves stand on the lens reference, so a dropped homing
+    reference is a starve too when a check fails after it, in the session
+    or in judge, which takes the dump and runs inside the rerun."""
+    global DROPPED
+    args = (name, steps, conf, workdir, keep, arm_required, env_extra, needs_reference)
+
+    def attempt():
+        global DROPPED
+        data = run_session_once(*args)
+        if judge is not None:
+            judge(data)
+        DROPPED = None                      # judged and passed: the session passes
+        return data
+
     try:
-        return run_session_once(*args)
+        return attempt()
     except HostStarved as e:
         print("RERUN: %s" % e)
     try:
-        return run_session_once(*args)
+        return attempt()
     except HostStarved as e:
+        DROPPED = None
         fail("%s; the rerun was starved too" % e)
 
 
-def run_session_once(name, steps, conf, workdir, keep, arm_required, env_extra):
+def run_session_once(name, steps, conf, workdir, keep, arm_required, env_extra, needs_reference):
     """One launch of run_session's session."""
-    global WATCH
+    global WATCH, DROPPED
+    DROPPED = None
     if workdir is None:
         workdir = tempfile.mkdtemp(prefix="laser-test-")
     dump = os.path.join(workdir, "stream.bin")
@@ -718,7 +774,7 @@ def run_session_once(name, steps, conf, workdir, keep, arm_required, env_extra):
     # One the caller's environment carries is the host's as far as the
     # session knows.
     stall_asked = any((env_extra or {}).get(k) for k in ("GFSINK_STALL_MS", "GFSINK_WRITE_STALL_MS"))
-    watch = WATCH = StderrWatch(proc, name, stall_asked)
+    watch = WATCH = StderrWatch(proc, name, stall_asked, needs_reference)
     try:
         sock = None
         for _ in range(50):
@@ -782,6 +838,8 @@ def run_session_once(name, steps, conf, workdir, keep, arm_required, env_extra):
         watch.thread.join(2)
         run_session.err = watch.text()
         WATCH = None
+        if watch.dropped_reference():
+            DROPPED = name                  # the judging after it reads it at a failure
         stop.set()
         pub.join(2)
         VERDICT_MODE["mode"] = "clean"
@@ -1526,31 +1584,33 @@ def rule_35_canned_dark():
     steps = ["G90", "G21", "G0 X50 Y50", WAIT_IDLE, "F1200", "M3 S1000"]
     for line in cycles:
         steps += [line] if line == "G80" else [line, WAIT_IDLE]
-    data = run_session(name, steps, conf=DENSITY_CONF_FLOORED)
-    ticks = tick_bytes(data)
-    runs = motion_runs(ticks)
-    check_fire_gaps(name, data)
-    check_termination(name, data)
-    if run_session.text.count("laser armed") != 1:
-        fail("[%s] armed %d times: the window closed under the session, so its dark moves "
-             "prove nothing" % (name, run_session.text.count("laser armed")))
-    lit = []
-    for i, run in enumerate(runs):
-        fire = fire_on_run(ticks, run)
-        if fire >= 0.5 * (run[1] - run[0] + 1):
-            lit.append(i)
-        elif fire:
-            fail("[%s] move %d of %d is no cut and shipped %d FIRE ticks over %d ticks of "
-                 "motion: a canned cycle ran at the modal power"
-                 % (name, i + 1, len(runs), fire, run[1] - run[0] + 1))
-    if len(lit) != cuts:
-        fail("[%s] %d lit moves, expected the %d cuts: %s" % (name, len(lit), cuts, runs))
-    for a, b in zip(lit, lit[1:]):
-        if not any(t & 0x20 for r in runs[a + 1:b] for t in ticks[r[0]:r[1] + 1]):
-            fail("[%s] no Z step between cut %d and cut %d: no canned cycle ran there"
-                 % (name, lit.index(a) + 1, lit.index(b) + 1))
-    print("PASS [%s]: six canned cycles and the rapids between them shipped no FIRE tick "
-          "(%d moves); the five cuts between the cycles are lit" % (name, len(runs) - cuts))
+    def judge(data):
+        ticks = tick_bytes(data)
+        runs = motion_runs(ticks)
+        check_fire_gaps(name, data)
+        check_termination(name, data)
+        if run_session.text.count("laser armed") != 1:
+            fail("[%s] armed %d times: the window closed under the session, so its dark moves "
+                 "prove nothing" % (name, run_session.text.count("laser armed")))
+        lit = []
+        for i, run in enumerate(runs):
+            fire = fire_on_run(ticks, run)
+            if fire >= 0.5 * (run[1] - run[0] + 1):
+                lit.append(i)
+            elif fire:
+                fail("[%s] move %d of %d is no cut and shipped %d FIRE ticks over %d ticks of "
+                     "motion: a canned cycle ran at the modal power"
+                     % (name, i + 1, len(runs), fire, run[1] - run[0] + 1))
+        if len(lit) != cuts:
+            fail("[%s] %d lit moves, expected the %d cuts: %s" % (name, len(lit), cuts, runs))
+        for a, b in zip(lit, lit[1:]):
+            if not any(t & 0x20 for r in runs[a + 1:b] for t in ticks[r[0]:r[1] + 1]):
+                fail("[%s] no Z step between cut %d and cut %d: no canned cycle ran there"
+                     % (name, lit.index(a) + 1, lit.index(b) + 1))
+        print("PASS [%s]: six canned cycles and the rapids between them shipped no FIRE tick "
+              "(%d moves); the five cuts between the cycles are lit" % (name, len(runs) - cuts))
+
+    run_session(name, steps, conf=DENSITY_CONF_FLOORED, needs_reference=True, judge=judge)
 
 
 def main():
@@ -1560,8 +1620,8 @@ def main():
     check_termination("m4", data)
 
     # --- session Z: the lens in the stream --------------------------------
-    zdata = run_session("z", JOB_Z, conf=LENS_CONF, arm_required=False)
-    check_z_move("z", zdata)
+    run_session("z", JOB_Z, conf=LENS_CONF, arm_required=False, needs_reference=True,
+                judge=lambda zdata: check_z_move("z", zdata))
     gap_a = check_fire_gaps("m4", data)
     print("PASS [m4]: %d bytes, %d power bytes, %d fire ticks, powers %s, "
           "X peak %d steps net 0, %d dark return steps, max fire gap %d"

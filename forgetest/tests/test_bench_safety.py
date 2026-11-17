@@ -20,6 +20,7 @@ import contextlib
 import errno
 import glob
 import io
+import json
 import os
 import shlex
 import shutil
@@ -290,6 +291,45 @@ class ToolCase(unittest.TestCase):
 
 
 ARGV = ["critical_tier_drill.py"]
+
+
+class AaOffsetCheckTests(ToolCase):
+    """aa_offset_check.py reads the coolant from /status, where a count that
+    is no temperature is null, and from the engine, where it is -273.15: a
+    channel with no reading is reported as such, never raised on."""
+
+    def test_a_coolant_channel_with_no_reading_is_reported_not_raised_on(self):
+        mod = load("aa_offset_check.py")
+        docs = {"/status": {"coolant": {"down_c": None, "up_c": 22.5}},
+                "/cool/status": {"down_c": -273.15, "up_c": 22.4, "phase": "idle"},
+                "/settings": {"cool_aa_offset_counts": "20"}}
+
+        def urlopen(url, timeout=None):
+            return io.BytesIO(json.dumps(docs[url[len(mod.BASE):]]).encode())
+
+        class Grbl:
+            def __init__(self, *args):
+                pass
+
+            def status(self):
+                return "<Idle|MPos:0.000,0.000,0.000>"
+
+            def cmd(self, line):
+                return "ok"
+
+        out = io.StringIO()
+        with mock.patch.object(mod, "time", Clock()), mock.patch.object(mod, "raw", lambda: [1023, 694]), \
+                mock.patch.object(mod, "Grbl", Grbl), mock.patch.object(mod.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(mod.sys, "argv", ["aa_offset_check.py", "2"]), contextlib.redirect_stdout(out):
+            rc = mod.main()
+        self.assertEqual(rc, 0, out.getvalue())
+        # The rule itself: null and the engine's -273.15 are no reading, and
+        # a mean over no reading is none.
+        self.assertIsNone(mod.reading(None))
+        self.assertIsNone(mod.reading(-273.15))
+        self.assertEqual(mod.reading(22.5), 22.5)
+        self.assertIsNone(mod.mean([None, None]))
+        self.assertEqual(mod.mean([None, 22.0]), 22.0)
 
 
 @unittest.skipUnless(hasattr(signal, "SIGHUP") and hasattr(signal, "raise_signal"), "needs POSIX signals")
