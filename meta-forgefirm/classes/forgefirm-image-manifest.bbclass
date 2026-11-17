@@ -1,3 +1,5 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 # forgefirm-image-manifest.bbclass - assemble /etc/forgefirm-manifest.json
@@ -28,9 +30,11 @@
 # platform change. Nothing host-specific (paths, user, time) is recorded:
 # the manifest travels in a public release artifact.
 #
-# Two kinds of file are left out of a layer's content: documentation
-# (*.md) and component pin files (*FORGEFIRM_MANIFEST_PIN_SUFFIX,
-# "<recipe>-pin.inc"). A pin file holds nothing but the SRCREV (and the PV
+# Three kinds of file are left out of a layer's content: documentation
+# (*.md), component pin files (*FORGEFIRM_MANIFEST_PIN_SUFFIX,
+# "<recipe>-pin.inc"), and the release version file
+# (FORGEFIRM_MANIFEST_VERSION_SUFFIX, forgefirm-release.inc, which holds the
+# version and nothing else). A pin file holds nothing but the SRCREV (and the PV
 # that rides with it) of a component that has its own manifest entry; the
 # entry already identifies that source file by file, so hashing the pin as
 # layer content would turn every component update into a platform change

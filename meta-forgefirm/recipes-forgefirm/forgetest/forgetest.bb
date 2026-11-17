@@ -1,3 +1,5 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 SUMMARY = "ForgeFIRM release acceptance tool (dev image)"
@@ -45,17 +47,25 @@ FORGEFIRM_MANIFEST_DIRTY_TREES := "${THISDIR}/../../../forgetest/forgetest \
 
 # The standard-library packages the tool imports (the page server, the
 # catalog, the bench scripts), not the python3 meta-package: the dev image
-# must carry no module the release image lacks, or a missing module in
-# the release rootfs would pass the campaign unseen.
+# must carry no module the release image lacks but the tool's own, or a
+# missing module in the release rootfs would pass the campaign unseen.
+# Three of them the dev image alone carries: mmap, which reads the SoC's
+# registers through /dev/mem (image.health and the bench pad readers),
+# ctypes, the extension sandbox probe's, and statistics.
+# scripts/release.sh refuses a release whose dev image carries a
+# standard-library module this list does not name and the release image
+# lacks.
 RDEPENDS:${PN} = " \
     python3-core \
     python3-compression \
     python3-crypt \
+    python3-ctypes \
     python3-fcntl \
     python3-io \
     python3-json \
     python3-logging \
     python3-math \
+    python3-mmap \
     python3-netclient \
     python3-netserver \
     python3-shell \

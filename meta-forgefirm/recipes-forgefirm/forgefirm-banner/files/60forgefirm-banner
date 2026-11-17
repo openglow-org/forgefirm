@@ -1,4 +1,9 @@
 #!/bin/sh
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+#
 # udhcpc hook: /usr/share/udhcpc/default.script runs every file in
 # /etc/udhcpc.d with the lease event as $1; 50default applies the lease
 # first. Refresh the address block of the console banner on every event.

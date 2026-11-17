@@ -1,3 +1,5 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 SUMMARY = "ForgeFIRM extension sandbox: the account pool, the cgroup tree, and the deny rules"
@@ -26,7 +28,8 @@ INITSCRIPT_NAME = "forgefirm-sandbox"
 INITSCRIPT_PARAMS = "start 30 S ."
 
 # The pool. Static ids below 1000, in a block no other account uses (the
-# image's dynamic system ids count down from 999): the forgefirm-users render
+# image's other system accounts take their ids when the image is built, and
+# an id in use is never given twice): the forgefirm-users render
 # replaces only the accounts from 1000 up, so an account reset leaves these
 # alone, and the read-only rootfs never needs a useradd at run time. One
 # group per account, so no two slots share a group. No home, no shell, and

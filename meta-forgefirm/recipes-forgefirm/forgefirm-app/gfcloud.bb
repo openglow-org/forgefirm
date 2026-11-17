@@ -1,3 +1,5 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 DESCRIPTION = "Full Glowforge web-service controller daemon for ForgeFIRM (cloud mode)"
@@ -7,10 +9,11 @@ require forgefirm-app.inc
 inherit update-rc.d
 
 INITSCRIPT_NAME = "gfcloud"
-# stop 80 < forgectrl's 90: at runlevel 0/6 the controller goes down
-# BEFORE the daemon that carries the cooling engine, fire gates, and
-# broker - never the other way around.
-INITSCRIPT_PARAMS = "start 92 2 3 4 5 . stop 80 0 1 6 ."
+# Stop links only. forgectrl's supervisor starts the selected controller
+# at boot, so no runlevel starts this script. stop 80 < forgectrl's 90: at
+# runlevel 0/6 the controller goes down BEFORE the daemon that carries the
+# cooling engine, fire gates, and broker - never the other way around.
+INITSCRIPT_PARAMS = "stop 80 0 1 6 ."
 
 do_install() {
     install -Dm 0755 ${S}/forgefirm-app/gfcloud.py ${D}${sbindir}/gfcloud.py

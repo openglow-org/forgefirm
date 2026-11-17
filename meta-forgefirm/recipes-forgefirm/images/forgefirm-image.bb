@@ -1,3 +1,5 @@
+# Copyright 2020 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 require recipes-glowforge/images/glowforge-image.bb
@@ -41,8 +43,9 @@ IMAGE_INSTALL:append = " python3-asyncio"
 # gfcloud: full Glowforge web-service controller daemon (the factory cloud
 # experience), started when controller_mode = cloud - mutually exclusive with
 # grblHAL. Pulls python3-ffmachine (shared web-service machine glue).
-# v4l-utils provides media-ctl / v4l2-ctl for the imx-media pipeline (also a
-# forgectrl runtime dependency, kept explicit here for bring-up use).
+# v4l-utils provides v4l2-ctl for the imx-media pipeline (media-ctl is a
+# package of its own); both are forgectrl runtime dependencies, and
+# v4l-utils is kept explicit here for bring-up use.
 # fwup: applies signed .fw archives (ForgeFIRM upgrades + factory restore)
 # to the inactive rootfs slot.
 # ffboot: boot-slot inventory and switching (also ships fw_env.config).
@@ -78,6 +81,12 @@ IMAGE_INSTALL:append = " forgefirm-users forgefirm-hostname forgefirm-banner for
 # while ext_enabled is 0, which is the default.
 IMAGE_INSTALL:append = " forgefirm-sandbox forgeext"
 
+# forgefirm-inbound: the inbound filter, a table of its own (never the
+# sandbox's). Over IPv6 a new TCP connection is taken only from a
+# link-local address or an on-link prefix, which its watcher keeps current;
+# loaded from rcS before the network starts.
+IMAGE_INSTALL:append = " forgefirm-inbound"
+
 # The rootfs mounts read-only on both images; /data (p3) is the writable
 # partition. read-only-rootfs is poky's feature for it: the root line of
 # /etc/fstab (the BSP's, already ro) and ROOTFS_READ_ONLY in
@@ -96,17 +105,20 @@ IMAGE_INSTALL:append = " forgefirm-sandbox forgeext"
 # rootfs for this state.
 IMAGE_FEATURES += "read-only-rootfs"
 
-# Root policy. root has no password and logs in at the serial console
-# only: that is the recovery path when the network, the panel or an
-# account is broken, and the console is behind the case. Over the
-# network, sshd refuses root (PermitRootLogin no) and any account without
-# a password (PermitEmptyPasswords no), both set by
-# recipes-connectivity/openssh, and sshd runs only when the panel turns
+# Root policy. root has no password. It logs in at the serial console,
+# the recovery path when the network, the panel or an account is broken
+# (the console is behind the case), and sshd refuses it (PermitRootLogin
+# no) and any account without a password (PermitEmptyPasswords no), both
+# set by recipes-connectivity/openssh; sshd runs only when the panel turns
 # it on. Operator logins are the accounts in the record (forgefirm-users).
+# The operator account is root-equivalent: su (shadow's, and busybox's
+# set-uid su) gives root with no password, to that account at the console
+# or over SSH and to any local process that can run it. Extension packages
+# cannot: they run with no_new_privs, which voids the set-uid bit.
 # empty-root-password keeps the rootfs postprocess from locking root
 # (zap_empty_root_password in rootfs-postcommands.bbclass); it is not
 # debug-tweaks, which belongs to the dev image alone and would open SSH.
-# scripts/release.sh checks the built rootfs for exactly this state.
+# scripts/release.sh checks the built rootfs for this state.
 IMAGE_FEATURES += "empty-root-password"
 
 # Mesa GLES2/EGL on etnaviv for forgectrl's GPU demosaic (loaded with
@@ -251,10 +263,13 @@ ROOTFS_POSTPROCESS_COMMAND += "pack_licenses "
 # too, which no campaign runs. rootfs-lint.sh, next to this recipe, holds
 # the rules. It runs after every other rootfs step (an append is applied
 # after every +=, the dev recipe's and debug-tweaks' included), and
-# FORGEFIRM_IMAGE_KIND tells it which image's policy applies.
+# FORGEFIRM_IMAGE_KIND tells it which image's policy applies. A plain
+# assignment: a value set in the build configuration does not reach the
+# release image, and the dev recipe's own assignment, after its require of
+# this file, is the one that sets dev.
 ROOTFS_LINT := "${THISDIR}/rootfs-lint.sh"
 do_rootfs[file-checksums] += "${ROOTFS_LINT}:True"
-FORGEFIRM_IMAGE_KIND ?= "release"
+FORGEFIRM_IMAGE_KIND = "release"
 
 rootfs_lint() {
     sh "${ROOTFS_LINT}" "${IMAGE_ROOTFS}" "${FORGEFIRM_IMAGE_KIND}" \

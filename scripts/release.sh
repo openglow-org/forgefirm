@@ -438,10 +438,9 @@ else
 fi
 
 # Root policy gate. The release image ships root WITHOUT a password (the
-# serial console is the recovery path): root's shadow field must be empty.
-# sshd's refusal of root and of empty passwords is the rootfs lint's
-# (meta-forgefirm/recipes-forgefirm/images/rootfs-lint.sh), which fails
-# the build. Read the built file, not the recipes: this catches a drift
+# serial console is the recovery path, and su opens root to the operator
+# account: forgefirm-image.bb, Root policy): root's shadow field must be
+# empty. Read the built file, not the recipes: this catches a drift
 # however it got in (recipe, local.conf, an inherited class).
 SSHD_CONFIG=$(debugfs -R "cat /etc/ssh/sshd_config" "$EXT4" 2>/dev/null)
 [ -n "$SSHD_CONFIG" ] \
@@ -456,6 +455,61 @@ ROOT_PW=$(printf '%s\n' "$ROOT_SHADOW" | awk -F: '{print $2}')
 [ -z "$ROOT_PW" ] \
   || die "release rootfs has a non-empty root password field: the policy is an empty field (empty-root-password in forgefirm-image.bb); a build drift"
 echo "root policy gate OK (root field empty)"
+
+# Release posture gate. The release rootfs carries nothing of the dev
+# image's posture, whatever the build configuration said, since the rootfs
+# lint holds the image to the policy of the kind its recipe names: no dev
+# marker (it opens forgectrl's writes to the panel token alone and starts
+# sshd at every boot), no acceptance tool, and every sshd configuration it
+# carries refuses root and an empty password (sshd_config_readonly is the
+# one the read-only rootfs runs).
+for F in /etc/forgefirm-dev /etc/init.d/forgetest; do
+  case "$(debugfs -R "stat $F" "$EXT4" 2>/dev/null)" in
+    *Inode:*) die "release rootfs carries $F, which belongs to the dev image" ;;
+  esac
+done
+for C in sshd_config sshd_config_readonly; do
+  TEXT=$(debugfs -R "cat /etc/ssh/$C" "$EXT4" 2>/dev/null)
+  [ -n "$TEXT" ] || continue
+  for K in PermitRootLogin PermitEmptyPasswords; do
+    # The first value before any Match block, as sshd takes it; awk reads
+    # to the end (the pipefail note above).
+    V=$(printf '%s\n' "$TEXT" | awk -v k="$K" '
+        { line = $0; sub(/^[ \t]+/, "", line) }
+        done || line == "" || line ~ /^#/ { next }
+        { n = split(line, f, /[ \t=]+/); key = tolower(f[1]) }
+        key == "match" { done = 1; next }
+        key == tolower(k) { v = (n > 1 ? f[2] : ""); done = 1 }
+        END { print v }')
+    [ "$V" = no ] || die "release $C: $K is '${V:-unset}', not no"
+  done
+done
+echo "release posture gate OK (no dev marker, no forgetest, sshd refuses root and empty passwords)"
+
+# The dev image carries no standard-library Python module that the release
+# image lacks but the ones forgetest declares (python3-<name> in its
+# RDEPENDS): a release program that imported such a module would pass every
+# campaign on the dev image and fail on the release image. A module is
+# named as its package names it: an extension module's leading underscore,
+# its _test suffix and its ABI tag are dropped (_ctypes_test is ctypes).
+py_modules () {
+  local LIB
+  LIB=$(debugfs -R "ls -p /usr/lib" "$1" 2>/dev/null \
+        | awk -F/ '$6 ~ /^python3\.[0-9]+$/ { n = $6 } END { print n }')
+  [ -n "$LIB" ] || return 0
+  for D in "/usr/lib/$LIB" "/usr/lib/$LIB/lib-dynload"; do
+    debugfs -R "ls -p $D" "$1" 2>/dev/null \
+      | awk -F/ 'NF > 6 && $6 != "." && $6 != ".." { print $6 }'
+  done | sed -e 's/\.py$//' -e 's/\.cpython-.*\.so$//' -e 's/\.so$//' -e 's/_test$//' -e 's/^_//' \
+    | LC_ALL=C sort -u
+}
+FORGETEST_BB="$REPO/meta-forgefirm/recipes-forgefirm/forgetest/forgetest.bb"
+DECLARED=$(grep -o -E 'python3-[a-z0-9_-]+' "$FORGETEST_BB" | sed 's/^python3-//' | LC_ALL=C sort -u)
+EXTRA=$(LC_ALL=C comm -13 <(py_modules "$EXT4") <(py_modules "$DEV_EXT4") \
+        | LC_ALL=C comm -23 - <(printf '%s\n' "$DECLARED"))
+[ -z "$EXTRA" ] \
+  || die "the dev image carries standard-library modules the release image lacks and forgetest does not declare: $(echo $EXTRA)"
+echo "dev image module gate OK (its extra modules are forgetest's)"
 
 # Read-only rootfs gate. The release rootfs mounts read-only: the root
 # line of the built fstab carries ro, and sshd keeps its host keys on

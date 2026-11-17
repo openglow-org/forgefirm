@@ -1,3 +1,5 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 SUMMARY = "ForgeFIRM logging tree: rsyslog rules at boot, rotation"

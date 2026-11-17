@@ -1,0 +1,46 @@
+# The inbound filter, proven on real traffic.
+#
+# scripts/inbound-rules-test.py loads meta-forgefirm's inbound.nft into a
+# network namespace of its own, joins a second namespace to it with a veth
+# pair (a peer that holds an on-link, a link-local and an off-link address),
+# and makes real connections: with the rules and one pass of
+# forgefirm-inbound, the on-link and link-local sources get in, the off-link
+# one is dropped, IPv4 and loopback are not touched, and the machine's own
+# connection out completes; the set holds the on-link prefix alone (no
+# routed prefix, no gateway-less default route) and the prefix of the
+# machine's own address with no on-link route; the watcher follows a prefix
+# that comes on the link and goes, and puts the set and the table back
+# after a reload or a removal by hand; loading the file again empties the
+# set; a pass writes the set in one transaction; and the init script's
+# start, status and stop run the watcher, a second start leaves one, and
+# no watcher process survives the stop. The
+# runner's nft is the version the image carries or newer; the
+# kernel side is the image's own business and is proven on the machine
+# (image.health).
+
+name: inbound-ci
+
+on:
+  push:
+    branches: [master, next]
+    paths:
+      - 'meta-forgefirm/recipes-forgefirm/forgefirm-inbound/**'
+      - 'scripts/inbound-rules-test.py'
+      - '.github/workflows/inbound-ci.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: nft
+        run: sudo apt-get update && sudo apt-get install -y nftables
+
+      - name: The inbound filter on real traffic
+        run: |
+          # 77 is the script's "could not run here": on this runner that is a failure.
+          sudo python3 -B scripts/inbound-rules-test.py

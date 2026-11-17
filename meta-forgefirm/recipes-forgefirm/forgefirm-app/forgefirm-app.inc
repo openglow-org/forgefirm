@@ -1,3 +1,5 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 # Shared fetch for the ForgeFIRM web-service apps (gfhome, python3-ffmachine,

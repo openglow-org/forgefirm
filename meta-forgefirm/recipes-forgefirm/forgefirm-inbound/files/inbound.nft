@@ -1,0 +1,45 @@
+#!/usr/sbin/nft -f
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+#
+# The inbound filter (forgefirm-inbound loads it from rcS, before the
+# network starts). Over IPv6 the machine takes global addresses, which a
+# host anywhere can reach when the site's router lets unsolicited traffic
+# in. A new TCP connection over IPv6 is taken from the link alone: from a
+# link-local address, from a prefix the router announces as on-link, or
+# from the prefix of one of the machine's own global addresses.
+# Every other first segment is dropped, so a host off the link reaches no
+# listener at all: not the Grbl port, not the control panel, not SSH, not
+# a port an extension package listens on.
+#
+# Stateless: the rule reads a connection's first segment alone (SYN
+# without ACK), so no connection tracking is built, the replies to the
+# machine's own connections out (the cloud service, time, the extension
+# catalog) are never judged, and a connection already open stays open. A
+# first fragment carries the whole TCP header (the kernel discards one that
+# does not), so a SYN is judged whole. IPv4 is not filtered here: what
+# reaches the machine over IPv4 is the site router's to decide, as for any
+# host behind it.
+#
+# The set onlink holds the on-link prefixes, and forgefirm-inbound keeps it
+# current from the kernel's routes and the machine's own addresses.
+# Loading this file again empties it: until the watcher writes it whole
+# again, within six of its periods (30 s), only link-local sources pass.
+
+table ip6 inbound
+delete table ip6 inbound
+
+table ip6 inbound {
+	set onlink {
+		type ipv6_addr
+		flags interval
+		auto-merge
+	}
+
+	chain input {
+		type filter hook input priority filter; policy accept;
+		tcp flags & (syn | ack) == syn iifname != "lo" ip6 saddr != fe80::/10 ip6 saddr != @onlink counter drop
+	}
+}

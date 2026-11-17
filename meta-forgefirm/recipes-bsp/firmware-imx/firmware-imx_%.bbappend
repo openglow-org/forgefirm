@@ -1,3 +1,5 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 # NXP distributes the i.MX VPU/EPDC firmware blobs under its firmware EULA

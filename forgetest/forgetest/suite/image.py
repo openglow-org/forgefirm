@@ -5,6 +5,7 @@
 
 """image.* - the post-flash health of the running image (always-required)."""
 import gzip
+import json
 import mmap
 import os
 import struct
@@ -131,7 +132,12 @@ def fds_of(pid):
                   "DHCP client runs with -b and has left ifup (its parent is pid 1); no DHCPv6 "
                   "client is running; and IPv6 is the "
                   "kernel's own: enabled on wlan0, router advertisements accepted, a link-local "
-                  "address up (a global address is logged, not checked).")
+                  "address up (a global address is logged, not checked). And the hardening the "
+                  "boot sets: SYN cookies, the kernel's hardening options and no SysRq on the "
+                  "serial console, ICMP redirects refused on wlan0, the link protections on, /data "
+                  "and /var/volatile refusing set-uid and device files, /run and /var/volatile "
+                  "capped, the Wi-Fi passphrase file 0600, and the inbound filter loaded on the "
+                  "input hook with its on-link prefix watcher running.")
 def image_health(ctx):
     ev = ctx.evidence
     manifest = ctx.runner.manifest
@@ -174,7 +180,10 @@ def image_health(ctx):
     cfg = kernel_config()
     ctx.check(cfg is not None, "kernel config unavailable (/proc/config.gz, /boot/config-*)")
     for opt, want in (("CONFIG_PREEMPT", ("y",)), ("CONFIG_IMX2_WDT", ("y", "m")),
-                      ("CONFIG_PANIC_ON_OOPS", ("y",))):
+                      ("CONFIG_PANIC_ON_OOPS", ("y",)), ("CONFIG_SYN_COOKIES", ("y",)),
+                      ("CONFIG_MAGIC_SYSRQ_SERIAL", ("n",)), ("CONFIG_SECURITY_DMESG_RESTRICT", ("y",)),
+                      ("CONFIG_HARDENED_USERCOPY", ("y",)), ("CONFIG_FORTIFY_SOURCE", ("y",)),
+                      ("CONFIG_SLAB_FREELIST_HARDENED", ("y",)), ("CONFIG_BUG_ON_DATA_CORRUPTION", ("y",))):
         val = cfg.get(opt, "n")
         ev[opt] = val
         ctx.log("%s=%s", opt, val)
@@ -306,7 +315,7 @@ def image_health(ctx):
     ctx.check(not user_wd, "a userspace watchdog daemon is running: %s", user_wd)
 
     # 7. file modes and space
-    for path in ("/data/forgefirm/panel.token", "/data/forgefirm/forgefirm.conf"):
+    for path in ("/data/forgefirm/panel.token", "/data/forgefirm/forgefirm.conf", "/data/etc/wpa_supplicant.conf"):
         if os.path.exists(path):
             m = stat.S_IMODE(os.stat(path).st_mode)
             ev[path] = "%o" % m
@@ -343,11 +352,19 @@ def image_health(ctx):
         return (mounts.get(path) or {}).get("opts") or []
 
     ev["mounts"] = {p: mounts[p] for p in ("/", "/data", "/var/lib", "/etc/passwd",
-                                           "/etc/hostname", "/etc/issue") if p in mounts}
+                                           "/etc/hostname", "/etc/issue", "/run", "/var/volatile") if p in mounts}
     ctx.log("/ mounted %s; /data %s; /var/lib %s", ",".join(mount_opts("/")) or "(absent)",
             ",".join(mount_opts("/data")) or "(absent)", ",".join(mount_opts("/var/lib")) or "(absent)")
     ctx.check("ro" in mount_opts("/"), "the rootfs is not mounted read-only: %s", mounts.get("/"))
     ctx.check("rw" in mount_opts("/data"), "/data is not mounted read-write: %s", mounts.get("/data"))
+    # /data and /var/volatile (/tmp) honor no set-uid bit and no device
+    # node, and the two tmpfs mounts are capped (fstab: 32 MiB /run, 64 MiB
+    # /var/volatile), so filling /tmp cannot take the machine's memory.
+    for path in ("/data", "/var/volatile"):
+        ctx.check({"nosuid", "nodev"} <= set(mount_opts(path)), "%s does not refuse set-uid and device files: %s",
+                  path, mounts.get(path))
+    for path, size in (("/run", "size=32768k"), ("/var/volatile", "size=65536k")):
+        ctx.check(size in mount_opts(path), "%s is not the capped tmpfs (%s): %s", path, size, mounts.get(path))
     ctx.check("rw" in mount_opts("/var/lib"),
               "/var/lib is not a writable copy (read-only-rootfs-hook.sh): %s", mounts.get("/var/lib"))
     factory = sorted(p for p in mounts if p.startswith("/factory/"))
@@ -421,6 +438,41 @@ def image_health(ctx):
     ev["global"] = world
     ctx.check(local, "wlan0 has no link-local IPv6 address")
     ctx.log("wlan0: %d link-local, %d global IPv6 address(es)", len(local), len(world))
+
+    # 11. the network as the boot left it: SYN cookies on, ICMP redirects
+    # refused on wlan0 (sysctl.conf runs before wlan0's stanza sets its
+    # own), and the kernel's link protections on.
+    want = {"net/ipv4/tcp_syncookies": "1", "net/ipv4/conf/wlan0/accept_redirects": "0",
+            "net/ipv6/conf/wlan0/accept_redirects": "0", "fs/protected_hardlinks": "1",
+            "fs/protected_symlinks": "1", "fs/protected_fifos": "1", "fs/protected_regular": "1"}
+    got = {k: (_read("/proc/sys/" + k, "") or "").strip() for k in want}
+    ev["sysctl"] = got
+    for k, v in want.items():
+        ctx.check(got[k] == v, "%s is %r, expected %s", k, got[k] or None, v)
+    # The inbound filter: its table on the input hook, its set of on-link
+    # prefixes, and the watcher that keeps the set current (which prefixes
+    # it holds is the network's, logged, not checked).
+    rc, out = hw.run(["/usr/sbin/nft", "-j", "list", "table", "ip6", "inbound"], timeout=10)
+    table = []
+    if rc == 0:
+        try:
+            table = json.loads(out).get("nftables", [])
+        except ValueError:
+            pass
+    chains = [o["chain"] for o in table if "chain" in o]
+    sets = [o["set"] for o in table if "set" in o]
+    ev["inbound_chains"] = [(c.get("name"), c.get("hook"), c.get("policy")) for c in chains]
+    ev["inbound_onlink"] = [s.get("elem") for s in sets if s.get("name") == "onlink"]
+    ctx.log("inbound filter: chains %s, on-link prefixes %s", ev["inbound_chains"], ev["inbound_onlink"])
+    ctx.check(("input", "input", "accept") in ev["inbound_chains"],
+              "table ip6 inbound is not on the input hook (nft rc %s): %s", rc, out.strip()[:200])
+    ctx.check(any(s.get("name") == "onlink" for s in sets), "table ip6 inbound has no set onlink")
+    # a command substitution of the watcher's carries its command line for
+    # the moment it runs: the watcher is the one whose parent is not one
+    cands = {p[0]: p[1] for p in procs if p[3].endswith("forgefirm-inbound watch")}
+    watcher = [pid for pid, ppid in cands.items() if ppid not in cands]
+    ev["inbound_watcher"] = watcher
+    ctx.check(len(watcher) == 1, "the on-link prefix watcher is not one running process: %s", watcher)
 
 
 

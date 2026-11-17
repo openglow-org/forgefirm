@@ -1,3 +1,5 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 SUMMARY = "Boot-slot selection and inventory for Glowforge factory hardware"
@@ -10,9 +12,10 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 
 # ffboot rewrites the boot environment on every install and slot switch,
 # so it is a fingerprinted component like the daemons: the manifest entry
-# records the two files, and the acceptance tests that cover ffboot are
-# invalidated when either moves (the installer copies the tool out of the
-# rootfs it just wrote).
+# records the two files (the installer copies the tool out of the rootfs
+# it just wrote). They are layer files as well, so a change to either is
+# also a change of the layer's content and invalidates every acceptance
+# result, the tests that cover ffboot among them.
 inherit forgefirm-manifest
 FORGEFIRM_MANIFEST_SRC = "${THISDIR}/files"
 

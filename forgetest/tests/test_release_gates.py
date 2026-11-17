@@ -84,6 +84,24 @@ with open(os.path.join(os.environ["STUB_LOGS"], "source-bundle.log"), "w") as f:
 out = sys.argv[sys.argv.index("--out") + 1]
 open(os.path.join(out, "forgefirm-source-v%s.tar.gz" % sys.argv[1]), "w").close()
 """
+# sshd's configuration as the release image carries it, twice (the
+# read-only rootfs runs sshd_config_readonly): root and empty passwords
+# refused, the host keys on /data.
+SSHD = "PermitRootLogin no\nPermitEmptyPasswords no\n" + "".join(
+    "HostKey /data/forgefirm/ssh/ssh_host_%s_key\n" % k for k in ("rsa", "ecdsa", "ed25519"))
+# The Python library of the release image, and the dev image's: the same,
+# plus what the real dev image carries beyond it, under the names it
+# carries them (a package, a module file, and extension modules with a
+# leading underscore, a _test suffix and the ABI tag), which forgetest
+# declares (FORGETEST_BB), and forgetest itself.
+LIB = "usr/lib/python3.12/"
+DYN = LIB + "lib-dynload/%s.cpython-312-arm-linux-gnueabihf.so"
+PYLIB = {LIB + "json/__init__.py": "", DYN % "_json": "", LIB + "site-packages/README.txt": ""}
+DEV_PYLIB = dict(PYLIB, **{DYN % "mmap": "", LIB + "ctypes/__init__.py": "", DYN % "_ctypes": "",
+                           DYN % "_ctypes_test": "", LIB + "statistics.py": "", DYN % "_statistics": "",
+                           LIB + "site-packages/forgetest/__init__.py": ""})
+FORGETEST_BB = ('RDEPENDS:${PN} = " \\\n    python3-core \\\n    python3-ctypes \\\n    python3-mmap \\\n'
+                '    python3-statistics \\\n    forgectrl \\\n"\n')
 
 
 def write(path, text, mode=0o644):
@@ -176,19 +194,25 @@ class ReleaseGateTests(unittest.TestCase):
         return os.path.join(cls.keys, name + ".priv")
 
     @classmethod
-    def rootfs(cls, name, manifest, shadow):
-        src = os.path.join(cls.tmp, "src-" + name)
+    def rootfs(cls, name, manifest, shadow, files=PYLIB, images=None):
+        """A root filesystem (<images>/<name>.ext4, cls.images by default)
+        carrying what the gates read, and files {path: text}."""
+        images = images or cls.images
+        src = os.path.join(images, "src-" + name)
         write(os.path.join(src, "etc", "forgefirm-manifest.json"), json.dumps(manifest))
         write(os.path.join(src, "etc", "forgefirm-version"), "v%s\n" % VERSION)
         write(os.path.join(src, "etc", "shadow"), shadow)
         write(os.path.join(src, "etc", "fstab"), "/dev/root  /  auto  ro  1  0\n")
-        write(os.path.join(src, "etc", "ssh", "sshd_config"), "".join(
-            "HostKey /data/forgefirm/ssh/ssh_host_%s_key\n" % k for k in ("rsa", "ecdsa", "ed25519")))
+        for c in ("sshd_config", "sshd_config_readonly"):
+            write(os.path.join(src, "etc", "ssh", c), SSHD)
+        for rel, text in files.items():
+            write(os.path.join(src, rel), text)
         p = subprocess.run([shutil.which("mkfs.ext4", path=SEARCH), "-q", "-F", "-d", src,
-                            os.path.join(cls.images, name + ".ext4"), "4M"], capture_output=True, text=True)
+                            os.path.join(images, name + ".ext4"), "4M"], capture_output=True, text=True)
         if p.returncode:
             raise AssertionError(p.stderr)
-        write(os.path.join(cls.images, name + ".wic.gz"), "card image of %s\n" % name)
+        write(os.path.join(images, name + ".wic.gz"), "card image of %s\n" % name)
+        return os.path.join(images, name + ".ext4")
 
     @classmethod
     def build_fixture(cls):
@@ -212,18 +236,19 @@ class ReleaseGateTests(unittest.TestCase):
                    cls.shadow)
         # The dev image carries forgetest besides: one build all the same.
         dev = dict(comps, forgetest={"srcrev": None, "files": [["forgetest/x.py", "2" * 40]]})
-        cls.rootfs(DEV_NAME, {"format": 1, "components": dev, "platform": plat, "build": CLEAN_BUILD},
-                   cls.shadow)
+        cls.rel_manifest = {"format": 1, "components": comps, "platform": plat, "build": CLEAN_BUILD}
+        cls.dev_manifest = {"format": 1, "components": dev, "platform": plat, "build": CLEAN_BUILD}
+        cls.rootfs(DEV_NAME, cls.dev_manifest, cls.shadow, DEV_PYLIB)
         other = dict(dev, forgectrl={"srcrev": "bbb", "files": [["src/main.c", "3" * 40]]})
         cls.rootfs(OTHER_DEV_NAME, {"format": 1, "components": other, "platform": plat, "build": CLEAN_BUILD},
-                   cls.shadow)
+                   cls.shadow, DEV_PYLIB)
         # One build of a layer that differs from its commit: the same identity
         # as the clean build, a dirty layer in the build section.
         dirty = {"layers": {"meta-forgefirm": {"rev": "8" * 40, "dirty": True}}, "kas": {"dirty": False}}
         cls.rootfs(DIRTY_REL_NAME, {"format": 1, "components": comps, "platform": plat, "build": dirty},
                    cls.shadow)
         cls.rootfs(DIRTY_DEV_NAME, {"format": 1, "components": dev, "platform": plat, "build": dirty},
-                   cls.shadow)
+                   cls.shadow, DEV_PYLIB)
         cls.kas_dump = os.path.join(cls.tmp, "kas-dump.json")
         write(cls.kas_dump, json.dumps(KAS_DUMP))
 
@@ -242,6 +267,7 @@ class ReleaseGateTests(unittest.TestCase):
         cls.set_installer_key(t, cls.release_raw)
         write(os.path.join(t, "meta-forgefirm", "recipes-forgefirm", "images", "forgefirm-release.inc"),
               'FORGEFIRM_RELEASE ?= "%s"\n' % VERSION)
+        write(os.path.join(t, "meta-forgefirm", "recipes-forgefirm", "forgetest", "forgetest.bb"), FORGETEST_BB)
         cls.set_trusted_key(t, cls.release_raw)
         write(os.path.join(t, "README.md"), "> **ForgeFIRM is in beta.** Every release below 0.1.0 is a beta.\n")
         write(os.path.join(t, "releases", "v" + VERSION, "acceptance.json"), "{}\n")
@@ -476,6 +502,43 @@ class ReleaseGateTests(unittest.TestCase):
         p = c.run(VERSION)
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
         self.assertIsNone(c.log("mkfw.log"), "signed a rootfs built from a layer that differs from its commit")
+
+    def test_a_release_rootfs_with_the_dev_images_posture_stops_the_release_before_the_signatures(self):
+        # Whatever the build configuration told the rootfs lint, the release
+        # rootfs is read for the dev marker, the acceptance tool and sshd's
+        # root lines.
+        dev_sshd = SSHD.replace("PermitRootLogin no", "PermitRootLogin yes")
+        for what, files in (("the dev marker", dict(PYLIB, **{"etc/forgefirm-dev": "v0.0.42 (dev)\n"})),
+                            ("the acceptance tool", dict(PYLIB, **{"etc/init.d/forgetest": "#!/bin/sh\n"})),
+                            ("root over SSH", dict(PYLIB, **{"etc/ssh/sshd_config_readonly": dev_sshd})),
+                            ("no word on empty passwords",
+                             dict(PYLIB, **{"etc/ssh/sshd_config": SSHD.replace("PermitEmptyPasswords no\n", "")})),
+                            # sshd takes a value inside a Match block for the matching
+                            # connections alone: the global value is unset
+                            ("root refused inside a Match block only",
+                             dict(PYLIB, **{"etc/ssh/sshd_config": SSHD.replace("PermitRootLogin no\n", "")
+                                            + "Match User nobody\n    PermitRootLogin no\n"}))):
+            with self.subTest(what):
+                c = self.case_at("posture-" + what.replace(" ", "-"))
+                c.link("forgefirm-image-glowforge.rootfs.ext4",
+                       self.rootfs("rel", self.rel_manifest, self.shadow, files, images=c.root))
+                p = c.run(VERSION)
+                self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+                self.assertIsNone(c.log("mkfw.log"), "signed a release rootfs with %s" % what)
+
+    def test_a_dev_image_module_forgetest_does_not_declare_stops_the_release_before_the_signatures(self):
+        # The dev image's mmap, ctypes and statistics are forgetest's (the
+        # release that passed); a module nothing declares is one a release
+        # program could import on every campaign and miss on the release
+        # image.
+        c = self.case()
+        c.link("forgefirm-image-dev-glowforge.rootfs.ext4",
+               self.rootfs("dev", self.dev_manifest, self.shadow, dict(DEV_PYLIB, **{DYN % "_decimal": ""}),
+                           images=c.root))
+        p = c.run(VERSION)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIsNone(c.log("mkfw.log"), "signed with a dev image module forgetest does not declare")
+        self.assertIn("decimal", p.stderr)
 
     def test_the_root_password_gate_reads_a_large_shadow_to_its_end(self):
         # Root is the first line of a shadow larger than a pipe holds, so a

@@ -1,3 +1,5 @@
+# Copyright 2020 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 DESCRIPTION = "System Control Daemon for ForgeFIRM powered Glowforge"
@@ -19,11 +21,12 @@ inherit cmake update-rc.d forgefirm-manifest
 # jansson (settings, API bodies) and gnutls (the panel certificate) are
 # linked directly, not only through ulfius.
 DEPENDS += "ulfius jpeg jansson gnutls libxcrypt"
-# media-ctl / v4l2-ctl configure the imx-media pipeline at runtime;
-# the update manager drives ffboot + fwup and verifies against the
-# shipped keyring; release checks and downloads use curl; the WiFi
-# regulatory region (wifi_country) is applied with iw reg set.
-RDEPENDS:${PN} = "v4l-utils ffboot fwup forgefirm-keys curl iw"
+# media-ctl (a package of its own) and v4l2-ctl (v4l-utils) configure the
+# imx-media pipeline at runtime; the update manager drives ffboot + fwup
+# and verifies against the shipped keyring; release checks and downloads
+# use curl; the WiFi regulatory region (wifi_country) is applied with iw
+# reg set.
+RDEPENDS:${PN} = "media-ctl v4l-utils ffboot fwup forgefirm-keys curl iw"
 
 INITSCRIPT_NAME = "forgectrl"
 INITSCRIPT_PARAMS = "defaults 90"

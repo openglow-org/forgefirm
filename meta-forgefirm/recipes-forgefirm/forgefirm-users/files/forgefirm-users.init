@@ -31,6 +31,8 @@
 #   name:hash:uid
 # hash is a sha512-crypt string ($6$...), uid is 1000 or more.
 # Home directory /data/forgefirm/home/<name>, mode 0700. Shell /bin/sh.
+# The shadow line carries no aging: the fields after the hash are empty,
+# so no login reads the password as expired, whatever the clock says.
 #
 # Rules:
 #   - idempotent: a second run changes nothing;
@@ -39,15 +41,30 @@
 #   - every local account with a uid from 1000 to 65533 that the record
 #     does not name is left out of the render, so an account reset
 #     removes the old account; root and the system accounts are never
-#     touched.
+#     touched;
+#   - a record line that names root or a system account (one the files
+#     hold with a uid or gid outside 1000 to 65533) is skipped;
+#   - while an account reset is pending (/data/forgefirm/users.reset,
+#     written by forgectrl, removed when the new account is made), the
+#     record's accounts are left out of the render: the old account's
+#     password opens nothing;
+#   - one render at a time: each takes an exclusive lock and waits up to
+#     30 s for it (forgectrl renders on every account change, a person may
+#     run this by hand), so two never write the same file at once.
+#
+# Host tests set FF_USERS_LOCK_WAIT (the seconds a render waits for the
+# lock); the image sets none.
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 umask 077
 
 DATA_DIR=/data/forgefirm
 RECORD=$DATA_DIR/users
+RESET=$DATA_DIR/users.reset
 HOMES=$DATA_DIR/home
 STATE=/run/forgefirm/accounts
+LOCK=/run/forgefirm/accounts.lock
+LOCK_WAIT=${FF_USERS_LOCK_WAIT:-30}
 ACCOUNT_FILES="passwd shadow group gshadow"
 LOGIN_SHELL=/bin/sh
 UID_LOW=1000
@@ -88,6 +105,15 @@ operator_names () {
     '$3 + 0 >= lo && $3 + 0 <= hi && $1 != "root" { print $1 }' /etc/passwd
 }
 
+# system_name <name>: the files hold an account or a group of that name
+# outside the operator range (sshd, ntp, nobody, the extension pool...).
+# A record line with such a name would shadow it, and the next render
+# would drop the system's own line with the operator's.
+system_name () {
+  awk -F: -v n="$1" -v lo="$UID_LOW" -v hi="$UID_HIGH" \
+    '$1 == n && ($3 + 0 < lo || $3 + 0 > hi) { f = 1 } END { exit !f }' /etc/passwd /etc/group
+}
+
 # Each account file shows a tmpfs copy of itself. The copy keeps the
 # file's mode and owner (cp -p); a file the image does not carry is
 # skipped.
@@ -109,14 +135,14 @@ render_file () {
   f=$1
   [ -f "/etc/$f" ] || return 0
   is_mounted "/etc/$f" || { log "/etc/$f is not the tmpfs copy; not written"; return 1; }
-  tmp="$STATE/$f.new"
+  tmp="$STATE/$f.new.$$"
   {
     awk -F: -v drop=" $DROP " 'index(drop, " " $1 " ") == 0' "/etc/$f"
     printf '%s\n' "$ACCOUNTS" | while IFS=: read -r name hash uid; do
       [ -n "$name" ] || continue
       case "$f" in
         passwd)  printf '%s:x:%s:%s::%s/%s:%s\n' "$name" "$uid" "$uid" "$HOMES" "$name" "$LOGIN_SHELL" ;;
-        shadow)  printf '%s:%s:%s:0:99999:7:::\n' "$name" "$hash" "$DAY" ;;
+        shadow)  printf '%s:%s:::::::\n' "$name" "$hash" ;;
         group)   printf '%s:x:%s:\n' "$name" "$uid" ;;
         gshadow) printf '%s:!::\n' "$name" ;;
       esac
@@ -149,29 +175,36 @@ replay () {
   chmod go+x "$DATA_DIR" || log "cannot open $DATA_DIR for search: no account reaches its home"
   ACCOUNTS=""
   KEEP=""
-  while IFS=: read -r name hash uid rest; do
-    [ -n "$name" ] || continue
-    case "$name" in '#'*) continue ;; esac
-    if ! valid_name "$name" || ! valid_uid "$uid" || [ -z "$hash" ]; then
-      log "skipping a malformed record line ($name)"
-      continue
-    fi
-    if [ "$name" = root ]; then
-      log "ignoring a root line in the record"
-      continue
-    fi
-    case " $KEEP " in
-      *" $name "*) log "skipping a second line for $name"; continue ;;
-    esac
-    ACCOUNTS="$ACCOUNTS$name:$hash:$uid
+  if [ -e "$RESET" ]; then
+    log "an account reset is pending: the record's accounts are left out until the new account is made"
+  else
+    while IFS=: read -r name hash uid rest; do
+      [ -n "$name" ] || continue
+      case "$name" in '#'*) continue ;; esac
+      if ! valid_name "$name" || ! valid_uid "$uid" || [ -z "$hash" ]; then
+        log "skipping a malformed record line ($name)"
+        continue
+      fi
+      if [ "$name" = root ]; then
+        log "ignoring a root line in the record"
+        continue
+      fi
+      if system_name "$name"; then
+        log "skipping a record line that names the system account $name"
+        continue
+      fi
+      case " $KEEP " in
+        *" $name "*) log "skipping a second line for $name"; continue ;;
+      esac
+      ACCOUNTS="$ACCOUNTS$name:$hash:$uid
 "
-    KEEP="$KEEP $name"
-  done < "$RECORD"
+      KEEP="$KEEP $name"
+    done < "$RECORD"
+  fi
 
   bind_files || return 1
   BEFORE=$(operator_names)
   DROP=$(printf '%s' "$BEFORE" | tr '\n' ' ')
-  DAY=$(( $(date +%s) / 86400 ))
   for f in $ACCOUNT_FILES; do
     render_file "$f" || return 1
   done
@@ -195,7 +228,20 @@ replay () {
 
 case "$1" in
   start|reload|restart|force-reload)
-    replay
+    mkdir -p "${LOCK%/*}" || { log "cannot create ${LOCK%/*}"; exit 0; }
+    (
+      # busybox's flock has no timeout of its own: one try a second
+      n=0
+      until flock -n 9; do
+        if [ "$n" -ge "$LOCK_WAIT" ]; then
+          log "another render held the accounts for ${LOCK_WAIT} s: not rendered"
+          exit 0
+        fi
+        n=$((n + 1))
+        sleep 1
+      done
+      replay
+    ) 9> "$LOCK"
     ;;
   stop)
     ;;

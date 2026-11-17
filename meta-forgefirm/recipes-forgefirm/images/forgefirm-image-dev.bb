@@ -1,3 +1,5 @@
+# Copyright 2020 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 require forgefirm-image.bb
@@ -9,19 +11,13 @@ DESCRIPTION = "OpenGlow/ForgeFIRM development image for Glowforge"
 # the bench diagnostics page; it belongs to the bench, never to a release
 # image (https://docs.forgefirm.org/developers/acceptance/). The gfutilities
 # emulator fixtures are the canned frames its service-protocol test answers
-# the service with.
+# the service with. The standard-library modules forgetest declares beyond
+# the release image's (mmap, ctypes, statistics) come with forgetest.
 IMAGE_INSTALL += " \
   forgetest \
   python3-gfutilities-emulator \
-  python3-mmap \
-  python3-ctypes \
   htop \
 "
-
-# python3-mmap and python3-ctypes serve the bench scripts that read the SoC
-# pads through /dev/mem (resume_dark_lead.py, cp_watchdog_timing.py, the
-# accelerometer probes). They are bench tooling: the release image carries
-# neither, and forgetest itself imports neither.
 
 # The release recipe trims nano from the shared base list (bench
 # convenience, 8.7 MB with libmagic); the dev image keeps it. Removal specs

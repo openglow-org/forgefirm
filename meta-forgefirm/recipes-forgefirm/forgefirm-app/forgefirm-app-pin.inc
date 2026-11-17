@@ -1,3 +1,5 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 # forgefirm-app pin (python3-gfhardware repository, forgefirm-app/ tree).

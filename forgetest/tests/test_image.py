@@ -38,8 +38,9 @@ BSP_INTERFACES = os.path.join(
 # over the host's (an overlay with no upper layer, as the image's rootfs is
 # read-only), so the script makes its own copy under /run/forgefirm and
 # writes through its own bind mount. With "net", wlan0 is a veth carrying a
-# global IPv4 and IPv6 address and a link-local one. Exit 97: the
-# namespace could not be set up.
+# global IPv4 and IPv6 address and a link-local one. With "held", the
+# banner's lock is held while the script runs, and the script is given a
+# second. Exit 97: the namespace could not be set up.
 NAMESPACE = """
 T=$1; SCRIPT=$2
 mount --make-rprivate / && mount -t tmpfs tmpfs /run &&
@@ -52,7 +53,12 @@ if [ "$3" = net ]; then
         ip -6 addr add fe80::5/64 dev wlan0 nodad &&
         ip link set wlan0 up || exit 97
 fi
-sh "$SCRIPT"
+if [ "$4" = held ]; then
+    mkdir -p /run/forgefirm || exit 97
+    flock /run/forgefirm/issue.lock timeout 1 sh "$SCRIPT"
+else
+    sh "$SCRIPT"
+fi
 echo "rc=$?"
 echo "name=$(hostname)"
 echo "file=$(cat /etc/hostname)"
@@ -61,11 +67,12 @@ cat /etc/issue
 """
 
 
-def run_layer_script(script, macs, etc, net=False):
+def run_layer_script(script, macs, etc, net=False, held=False):
     """Run a layer script over a scratch tree: macs {interface: address or
-    None for a directory with no address file}, etc {file: text}. Returns
-    the namespace's output, or None when no namespace can be made here
-    (unprivileged where user namespaces are open, else root via sudo -n)."""
+    None for a directory with no address file}, etc {file: text}, held the
+    banner's lock held while it runs. Returns the namespace's output, or
+    None when no namespace can be made here (unprivileged where user
+    namespaces are open, else root via sudo -n)."""
     tree = tempfile.mkdtemp(prefix="forgetest-net.")
     try:
         for dev, mac in macs.items():
@@ -78,7 +85,8 @@ def run_layer_script(script, macs, etc, net=False):
         for name, text in etc.items():
             with open(os.path.join(tree, "etc", name), "w") as f:
                 f.write(text)
-        args = ["sh", "-c", NAMESPACE, "sh", tree, os.path.join(LAYER, script), "net" if net else ""]
+        args = ["sh", "-c", NAMESPACE, "sh", tree, os.path.join(LAYER, script), "net" if net else "",
+                "held" if held else ""]
         setup = []
         for cmd in (["unshare", "-Urmun"], ["sudo", "-n", "unshare", "-mun"]):
             try:
@@ -130,15 +138,60 @@ class MachineNameTests(unittest.TestCase):
         self.assertEqual(urls, ["  https://192.0.2.5/", "  https://[2001:db8::5]/"], issue)
         self.assertFalse(heading.startswith("#") or ".local" in issue, issue)
 
+    def test_the_banner_waits_for_a_run_in_progress(self):
+        # The boot's run and a lease event can come together: while one
+        # holds the banner, the other writes nothing.
+        base = "ForgeFIRM\n"
+        out = run_layer_script("forgefirm-banner/files/forgefirm-banner", {"wlan0": "02:00:00:00:12:ab"},
+                               {"issue": base}, net=True, held=True)
+        if out is None:
+            self.skipTest("no namespace can be made here")
+        self.assertEqual(field(out, "rc"), "124", "the banner ran past the lock: " + out)
+        self.assertEqual(out.split("--- issue\n", 1)[1], base, out)
+
+
+# A harness that needs /data runs in a root of its own, so nothing it does
+# can make or leave a /data on the host: a private mount namespace as root,
+# a tmpfs scratch root holding a recursive bind of every top-level
+# directory of the host but /data (and its top-level symlinks as they are),
+# and the harness run under chroot there, where /data is the harness's to
+# make. Two harnesses at once never share it, and its mounts go with the
+# namespace. Exit 97: the root could not be made. Arguments: the empty
+# directory to make it on, the harness script, then the script's own.
+PRIVATE_ROOT = r"""
+R=$1; S=$2; shift 2
+mount --make-rprivate / && mount -t tmpfs -o mode=0755 tmpfs "$R" || exit 97
+for p in /*; do
+    n=${p#/}
+    [ "$n" = data ] && continue
+    if [ -L "$p" ]; then
+        ln -s "$(readlink "$p")" "$R/$n" || exit 97
+    elif [ -d "$p" ]; then
+        { mkdir "$R/$n" && mount --rbind "$p" "$R/$n"; } || exit 97
+    fi
+done
+exec chroot "$R" sh -c "$S" sh "$@"
+"""
+
+
+def private_root(case, script, *args):
+    """The command that runs a harness script in a root of its own (root
+    through sudo -n), on a directory the case removes when it ends."""
+    where = tempfile.mkdtemp(prefix="forgetest-root.")
+    case.addCleanup(os.rmdir, where)
+    return ["sudo", "-n", "unshare", "-m", "sh", "-c", PRIVATE_ROOT, "sh", where, script] + list(args)
+
 
 # forgefirm-users rendering a record, as the image runs it, in a private
-# mount namespace as root: /run a fresh tmpfs, /etc read-only with the
+# root as root (PRIVATE_ROOT): /run a fresh tmpfs, /etc read-only with the
 # scratch tree's account files over the host's, and the scratch data
-# directory over /data (made for the run where the host has none, as
-# fflog_e2e.sh does, and removed after). The data directory is root's, as
-# on the machine, whoever made the scratch tree. Then, as the account's
-# own uid, what it can do with its home and with the data directory
-# around it. Exit 97: the namespace could not be set up.
+# directory over /data (made in the private root, as fflog_e2e.sh does,
+# and removed after). The data directory is root's, as
+# on the machine, whoever made the scratch tree. With "held", the harness
+# holds the render lock and the render waits no time for it. Then the four
+# account files as rendered, and, as the account's own uid when the render
+# made it, what it can do with its home and with the data directory around
+# it. Exit 97: the namespace could not be set up.
 ACCOUNTS = r"""
 T=$1; SCRIPT=$2
 made=
@@ -147,12 +200,21 @@ chown -R 0:0 "$T/data" &&
     mount --make-rprivate / && mount -t tmpfs tmpfs /run &&
     mount -t overlay overlay -o "lowerdir=$T/etc:/etc" /etc &&
     mount --bind "$T/data" /data || { [ -z "$made" ] || rmdir /data; exit 97; }
+if [ "$3" = held ]; then
+    { mkdir -p /run/forgefirm && exec 8> /run/forgefirm/accounts.lock && flock 8; } || exit 97
+    export FF_USERS_LOCK_WAIT=0
+fi
 sh "$SCRIPT" reload
 echo "rc=$?"
 echo "mode=$(stat -c %a /data/forgefirm)"
 python3 - <<'PY'
 import errno, json, os, pwd
-p = pwd.getpwnam("bench")
+print("files=" + json.dumps({f: open("/etc/" + f).read() for f in ("passwd", "shadow", "group", "gshadow")}))
+try:
+    p = pwd.getpwnam("bench")
+except KeyError:
+    print("reach=null")
+    raise SystemExit
 os.setgroups([])
 os.setgid(p.pw_gid)
 os.setuid(p.pw_uid)
@@ -182,24 +244,32 @@ rm -rf "$T/data"
 class AccountRenderTests(unittest.TestCase):
     """forgefirm-users, the layer's own init script, rendering the record."""
 
-    def test_the_render_opens_the_data_directory_to_its_account_and_no_further(self):
+    ETC = {"passwd": "root:x:0:0:root:/root:/bin/sh\n", "shadow": "root::19000:0:99999:7:::\n",
+           "group": "root:x:0:\n", "gshadow": "root:*::\n"}
+    RECORD = "bench:$6$salt$hash:1000\n"
+
+    def render(self, record=RECORD, etc=None, data=None, held=False):
+        """One render of record over the account files etc ({name: text},
+        the image's own), with data ({name: text}) beside the record in
+        /data/forgefirm. Returns (the rendered files, the account's reach,
+        the harness's output)."""
         tree = tempfile.mkdtemp(prefix="forgetest-users.")
         self.addCleanup(shutil.rmtree, tree, ignore_errors=True)
         os.makedirs(os.path.join(tree, "etc"))
-        for name, text in (("passwd", "root:x:0:0:root:/root:/bin/sh\n"), ("shadow", "root::19000:0:99999:7:::\n"),
-                           ("group", "root:x:0:\n"), ("gshadow", "root:*::\n")):
+        for name, text in dict(self.ETC, **(etc or {})).items():
             with open(os.path.join(tree, "etc", name), "w") as f:
                 f.write(text)
-        data = os.path.join(tree, "data", "forgefirm")
-        os.makedirs(data)
-        os.chmod(data, 0o700)                       # as a strict umask leaves it
-        with open(os.path.join(data, "users"), "w") as f:
-            f.write("bench:$6$salt$hash:1000\n")
-        os.chmod(os.path.join(data, "users"), 0o600)
+        d = os.path.join(tree, "data", "forgefirm")
+        os.makedirs(d)
+        os.chmod(d, 0o700)                          # as a strict umask leaves it
+        for name, text in dict(data or {}, users=record).items():
+            with open(os.path.join(d, name), "w") as f:
+                f.write(text)
+            os.chmod(os.path.join(d, name), 0o600)
         try:
-            p = subprocess.run(["sudo", "-n", "unshare", "-m", "sh", "-c", ACCOUNTS, "sh", tree,
-                                os.path.join(LAYER, "forgefirm-users", "files", "forgefirm-users.init")],
-                               capture_output=True, text=True, timeout=60)
+            p = subprocess.run(private_root(self, ACCOUNTS, tree,
+                                            os.path.join(LAYER, "forgefirm-users", "files", "forgefirm-users.init"),
+                                            *(["held"] if held else [])), capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.TimeoutExpired):
             p = None
         if p is None or "rc=" not in p.stdout:
@@ -207,11 +277,105 @@ class AccountRenderTests(unittest.TestCase):
                 raise AssertionError("the namespace was made but not set up: %s" % p.stderr.strip())
             self.skipTest("no namespace can be made here (root through sudo -n)")
         self.assertEqual(field(p.stdout, "rc"), "0", p.stdout + p.stderr)
-        self.assertEqual(field(p.stdout, "mode"), "711", p.stdout)
-        reach = json.loads(field(p.stdout, "reach"))
+        return json.loads(field(p.stdout, "files")), json.loads(field(p.stdout, "reach")), p.stdout
+
+    @staticmethod
+    def lines(text, name):
+        return [ln.split(":") for ln in text.splitlines() if ln.split(":")[0] == name]
+
+    def test_the_render_opens_the_data_directory_to_its_account_and_no_further(self):
+        _files, reach, out = self.render()
+        self.assertEqual(field(out, "mode"), "711", out)
         self.assertEqual((reach["uid"], reach["home"]), (1000, "/data/forgefirm/home/bench"), reach)
         self.assertEqual((reach["cd"], reach["write"]), ("ok", "ok"), reach)
         self.assertEqual((reach["list_data_dir"], reach["read_record"]), ("EACCES", "EACCES"), reach)
+
+    def test_the_shadow_line_carries_no_aging(self):
+        # A "last change" day of 0 reads as a password expired by root to
+        # sshd: every field after the hash is empty, whatever the clock says.
+        files, _reach, _out = self.render()
+        self.assertEqual(self.lines(files["shadow"], "bench"), [["bench", "$6$salt$hash"] + [""] * 7], files["shadow"])
+
+    def test_a_record_line_that_names_a_system_account_is_skipped(self):
+        # below the operator range (sshd, the group video) and above it (nobody)
+        etc = {"passwd": self.ETC["passwd"] + "sshd:x:799:799::/var/run/sshd:/bin/false\n"
+                                              "nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin\n",
+               "shadow": self.ETC["shadow"] + "sshd:!:19000::::::\n",
+               "group": self.ETC["group"] + "sshd:x:799:\nvideo:x:44:\n"}
+        files, reach, _out = self.render("sshd:$6$x$y:1001\nvideo:$6$x$y:1002\nnobody:$6$x$y:1003\n" + self.RECORD,
+                                         etc=etc)
+        self.assertEqual(self.lines(files["passwd"], "sshd"), [["sshd", "x", "799", "799", "", "/var/run/sshd",
+                                                                "/bin/false"]], files["passwd"])
+        self.assertEqual([ln[2] for ln in self.lines(files["passwd"], "nobody")], ["65534"], files["passwd"])
+        self.assertEqual(self.lines(files["shadow"], "sshd"), [["sshd", "!", "19000"] + [""] * 6], files["shadow"])
+        self.assertEqual([self.lines(files["group"], n) for n in ("sshd", "video")],
+                         [[["sshd", "x", "799", ""]], [["video", "x", "44", ""]]], files["group"])
+        self.assertEqual(self.lines(files["passwd"], "video"), [], files["passwd"])
+        self.assertEqual(reach["uid"], 1000, "the record's other account is rendered")
+
+    def test_a_pending_account_reset_renders_no_record_account(self):
+        files, reach, _out = self.render(data={"users.reset": ""})
+        self.assertIsNone(reach, "the account is rendered while its reset is pending")
+        self.assertEqual(self.lines(files["shadow"], "bench"), [], files["shadow"])
+
+    def test_a_render_waits_for_the_one_in_progress(self):
+        # The lock held by another render, which this one waits no time for:
+        # it writes nothing.
+        files, reach, _out = self.render(held=True)
+        self.assertIsNone(reach, "the render wrote the account files while another render held them")
+        self.assertEqual(files["shadow"], self.ETC["shadow"])
+
+
+# The grblhal init script asking forgectrl's supervisor for a start, as the
+# image runs it, in a private root as root (PRIVATE_ROOT): the scratch data
+# directory over /data (made in the private root, and removed after), and
+# a curl first on its PATH that writes down its command line and what it
+# read on its standard input. Exit 97: the namespace could not be set up.
+CONTROLLER_INIT = r"""
+T=$1; SCRIPT=$2
+made=
+[ -d /data ] || { mkdir /data && made=1; } || exit 97
+mount --make-rprivate / && mount --bind "$T/data" /data || { [ -z "$made" ] || rmdir /data; exit 97; }
+PATH="$T/bin:$PATH" sh "$SCRIPT" start > /dev/null
+echo "rc=$?"
+umount /data
+[ -z "$made" ] || rmdir /data
+"""
+
+
+@unittest.skipUnless(os.path.isdir(LAYER) and shutil.which("unshare"), "needs Linux and a forgefirm checkout")
+class ControllerInitTests(unittest.TestCase):
+    """grblhal.init, the layer's controller init script."""
+
+    def test_the_panel_token_never_rides_curls_command_line(self):
+        # Every local account reads a process's command line in /proc.
+        tree = tempfile.mkdtemp(prefix="forgetest-ctlinit.")
+        self.addCleanup(shutil.rmtree, tree, ignore_errors=True)
+        token = "0123456789abcdef" * 4
+        os.makedirs(os.path.join(tree, "data", "forgefirm"))
+        os.makedirs(os.path.join(tree, "bin"))
+        with open(os.path.join(tree, "data", "forgefirm", "panel.token"), "w") as f:
+            f.write(token + "\n")
+        with open(os.path.join(tree, "bin", "curl"), "w") as f:
+            f.write('#!/bin/sh\nprintf "%%s\\n" "$@" > %s/argv\ncat > %s/stdin\n' % (tree, tree))
+        os.chmod(os.path.join(tree, "bin", "curl"), 0o755)
+        try:
+            p = subprocess.run(private_root(self, CONTROLLER_INIT, tree,
+                                            os.path.join(LAYER, "grblhal-glowforge", "grblhal-glowforge", "grblhal.init")),
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            p = None
+        if p is None or "rc=" not in p.stdout:
+            if p is not None and p.returncode == 97:
+                raise AssertionError("the namespace was made but not set up: %s" % p.stderr.strip())
+            self.skipTest("no namespace can be made here (root through sudo -n)")
+        with open(os.path.join(tree, "argv")) as f:
+            argv = f.read().splitlines()
+        with open(os.path.join(tree, "stdin")) as f:
+            stdin = f.read()
+        self.assertEqual(argv[-1], "http://127.0.0.1:80/controller/start", argv)
+        self.assertFalse([a for a in argv if token in a], argv)
+        self.assertIn('header = "X-ForgeFIRM-Token: %s"\n' % token, stdin)
 
 
 class NetworkBootTests(unittest.TestCase):
@@ -343,15 +507,14 @@ class PackLicensesTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(self.manifest))
 
 
-# forgefirm-data, the layer's boot step after mountall, in a private mount
-# namespace as root: /run a fresh tmpfs and the scratch tree's eMMC data
-# directory over /data (made for the run where the host has none, and
-# removed after). The kernel command line and the card's data partition
+# forgefirm-data, the layer's boot step after mountall, in a private root
+# as root (PRIVATE_ROOT): /run a fresh tmpfs and the scratch tree's eMMC
+# data directory over /data (made in the private root, and removed after). The kernel command line and the card's data partition
 # (an ext4 image file, loop-mounted) are the script's two host-test
 # settings. A directory named in the scratch tree's busy file (one path
 # under /data to a line) gets a mount of its own first, so it cannot be
 # removed. With the no-data-mount file, nothing is mounted at /data: it is
-# a symlink to the eMMC tree (the host has no /data then), which
+# a symlink to the eMMC tree (made in the private root), which
 # /proc/mounts never names. With the fail-mount file, the script's mount
 # refuses once the target that file names (a shim first on its PATH).
 # With a third argument, the logging init script's legacy sweep runs after
@@ -486,11 +649,6 @@ class CardDataTests(unittest.TestCase):
         its own); no_data_mount leaves /data unmounted; fail_mount names a
         target the script's mount refuses once; sweep runs the logging init
         script's legacy sweep after the step. Returns the probe."""
-        if no_data_mount and os.path.lexists("/data"):
-            why = "this host has a /data of its own: an unmounted /data cannot be stood in for"
-            if os.environ.get("GITHUB_ACTIONS"):
-                self.fail(why)
-            self.skipTest(why)
         t = tempfile.mkdtemp(prefix="forgetest-card.")
         # Root's files go through sudo; where there is no root (the boot did
         # not run) the tree is this user's own.
@@ -524,10 +682,9 @@ class CardDataTests(unittest.TestCase):
                 p = subprocess.run(["debugfs", "-w", "-R", "feature " + card_feature, os.path.join(t, "card.img")],
                                    capture_output=True, text=True)
                 self.assertIn(card_feature, p.stdout, p.stderr)
-        args = ["sh", t, self.SCRIPT] + ([self.LOGGING] if sweep else [])
+        args = [t, self.SCRIPT] + ([self.LOGGING] if sweep else [])
         try:
-            p = subprocess.run(["sudo", "-n", "unshare", "-m", "sh", "-c", CARD_DATA] + args,
-                               capture_output=True, text=True, timeout=120)
+            p = subprocess.run(private_root(self, CARD_DATA, *args), capture_output=True, text=True, timeout=120)
         except (OSError, subprocess.TimeoutExpired):
             p = None
         if p is None or "rc=" not in p.stdout:
@@ -566,8 +723,12 @@ class CardDataTests(unittest.TestCase):
         emmc = dict(self.EMMC, **{"forgectrl.log": "old\n"})
         pr = self.run_boot("console=ttymxc0 root=/dev/mmcblk1p1 rw", emmc, self.CARD, sweep=True)
         self.assertEqual(pr["state"], "card", pr["log"])
-        # a filesystem error found while the card is in use stops its writes
-        self.assertIn("errors=remount-ro", pr["mounts"].get("/run/forgefirm-card", "").split(","), pr["mounts"])
+        # a filesystem error found while the card is in use stops its writes,
+        # and the folders shown over /data honor no set-uid bit and no
+        # device node, as the eMMC's /data
+        opts = pr["mounts"].get("/run/forgefirm-card", "").split(",")
+        self.assertTrue({"errors=remount-ro", "nosuid", "nodev"} <= set(opts), pr["mounts"])
+        self.assertTrue({"nosuid", "nodev"} <= set(pr["mounts"].get("/data/forgefirm", "").split(",")), pr["mounts"])
         # the logs from before syslog stay where they are on the eMMC: the
         # folder the sweep would take them to is the card's
         self.assertEqual(pr["emmc_legacy"], "left", pr["log"])
@@ -672,6 +833,15 @@ class CardDataTests(unittest.TestCase):
         pr = self.run_boot("root=/dev/mmcblk2p2 rw", emmc, busy=["forgefirm/ext/org.example"])
         self.assertEqual(pr["listing"], ["archive", "ext", "reset-requested", "ssh", "timestamp", "tls"],
                          pr["log"])
+
+    def test_a_setup_record_that_cannot_be_removed_keeps_the_account(self):
+        # A record that names an account is never left without the
+        # account's file, which forgectrl would read as no account at all.
+        emmc = dict(self.EMMC)
+        emmc.update({"forgefirm/reset-requested": "requested\n", "forgefirm/setup.json/busy/.keep": ""})
+        pr = self.run_boot("root=/dev/mmcblk2p2 rw", emmc, busy=["forgefirm/setup.json/busy"])
+        self.assertEqual(pr["listing"], ["archive", "reset-requested", "setup.json", "ssh", "timestamp", "tls",
+                                         "users"], pr["log"])
 
     def test_a_failed_card_boot_runs_no_reset(self):
         # The folder shown is the eMMC's, read-only: the request waits, and
@@ -802,11 +972,13 @@ class RootfsLintTests(unittest.TestCase):
         self.put("etc/ssh/sshd_config_readonly", self.SSHD)
         self.put("etc/network/interfaces", "auto lo\niface lo inet loopback\n" + NetworkBootTests.STANZA)
         self.put("etc/nsswitch.conf", "hosts:          files dns\n")
-        for name in ("forgectrl", "forgeext", "grblhal", "forgefirm-logging"):
+        for name in ("forgectrl", "forgeext", "grblhal", "gfcloud", "forgefirm-logging"):
             self.put("etc/init.d/" + name, "#!/bin/sh\n", mode=0o755)
         os.makedirs(self.path("etc/rc6.d"))
-        for link in ("rc5.d/S90forgectrl", "rc5.d/S91forgeext", "rc6.d/K09forgeext", "rc6.d/K80grblhal",
-                     "rc6.d/K90forgectrl"):
+        os.makedirs(self.path("etc/rc0.d"))
+        for link in ("rc5.d/S90forgectrl", "rc5.d/S91forgeext") + tuple(
+                "%s/%s" % (rl, k) for rl in ("rc0.d", "rc6.d")
+                for k in ("K09forgeext", "K80gfcloud", "K80grblhal", "K90forgectrl")):
             os.symlink("../init.d/" + link.split("/")[1][3:], self.path("etc/" + link))
         self.put("etc/default/rcS", "VERBOSE=no\nROOTFS_READ_ONLY=yes\n")
         self.put("etc/fstab", "/dev/root  /  auto  ro  1  0\n/dev/mmcblk2p3  /data  auto  defaults  0  0\n")
@@ -883,6 +1055,14 @@ class RootfsLintTests(unittest.TestCase):
         os.rename(self.path("etc/rc5.d/S91forgeext"), self.path("etc/rc5.d/S89forgeext"))
         self.assertFails("init-order")
 
+    def test_the_cloud_controller_stopped_after_forgectrl_at_halt_fails(self):
+        os.rename(self.path("etc/rc0.d/K80gfcloud"), self.path("etc/rc0.d/K95gfcloud"))
+        self.assertFails("init-order")
+
+    def test_a_runlevel_that_starts_a_controller_fails(self):
+        os.symlink("../init.d/grblhal", self.path("etc/rc5.d/S92grblhal"))
+        self.assertFails("init-order")
+
     def test_forgefirm_data_after_a_reader_of_its_folder_fails(self):
         os.rename(self.path("etc/rcS.d/S04forgefirm-data"), self.path("etc/rcS.d/S37forgefirm-data"))
         self.assertFails("data-order")
@@ -913,6 +1093,16 @@ class RootfsLintTests(unittest.TestCase):
         self.assertFails("factory", "release")
         p = self.lint("dev")
         self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_the_dev_images_files_fail_a_release_image_only(self):
+        for rel in ("etc/forgefirm-dev", "etc/init.d/forgetest", "usr/lib/python3.12/site-packages/forgetest/__init__.py"):
+            with self.subTest(rel):
+                self.put(rel, "")
+                self.assertFails("dev-only", "release")
+                p = self.lint("dev")
+                self.assertEqual(p.returncode, 0, p.stderr)
+                os.remove(self.path(rel))
+                shutil.rmtree(self.path("usr/lib/python3.12/site-packages/forgetest"), ignore_errors=True)
 
 
 def image_recipe_value(recipe, name):

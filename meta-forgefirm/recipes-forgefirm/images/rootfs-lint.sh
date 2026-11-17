@@ -29,9 +29,11 @@
 #   mdns       no mDNS responder: no /etc/avahi, no avahi-daemon, no
 #              libnss_mdns, and the hosts line of nsswitch.conf names no
 #              mdns source.
-#   init-order runlevel 5 starts forgectrl before forgeext, and runlevel 6
-#              stops grblhal before forgectrl and forgeext before
-#              forgectrl: the links sort in that order.
+#   init-order runlevel 5 starts forgectrl before forgeext, and runlevels
+#              0 and 6 stop each controller (grblhal, gfcloud) and forgeext
+#              before forgectrl: the links sort in that order. No runlevel
+#              starts a controller's script (forgectrl's supervisor starts
+#              the controller).
 #   data-order forgefirm-data is on the image and rcS starts it after
 #              mountall.sh (which mounts /data) and slotmigrate (which
 #              needs /data unmounted), and before every other rcS script
@@ -47,6 +49,9 @@
 #              directory, and no /usr/share/udhcpc/default6.script.
 #   factory    on a release image, no /etc/fstab line mounts anything
 #              under /factory/ (the dev image mounts the factory slots).
+#   dev-only   on a release image, nothing of the dev image's: no dev
+#              marker (/etc/forgefirm-dev), no forgetest init script and
+#              no forgetest package in a Python library.
 
 root=${1:?rootfs}
 kind=${2:?release or dev}
@@ -179,8 +184,17 @@ before() {
     fi
 }
 before "rc5.d starts forgectrl before forgeext" "$(link rc5.d S forgectrl)" "$(link rc5.d S forgeext)"
-before "rc6.d stops grblhal before forgectrl" "$(link rc6.d K grblhal)" "$(link rc6.d K forgectrl)"
-before "rc6.d stops forgeext before forgectrl" "$(link rc6.d K forgeext)" "$(link rc6.d K forgectrl)"
+for rl in rc0.d rc6.d; do
+    for name in grblhal gfcloud forgeext; do
+        before "$rl stops $name before forgectrl" "$(link $rl K $name)" "$(link $rl K forgectrl)"
+    done
+done
+for rl in rc2.d rc3.d rc4.d rc5.d; do
+    for name in grblhal gfcloud; do
+        s=$(link $rl S $name)
+        [ -z "$s" ] || fail init-order "$rl/$s starts a controller, which forgectrl's supervisor starts"
+    done
+done
 
 # ------------------------------------------------------------ data-order
 order=data-order
@@ -232,6 +246,18 @@ done
 # --------------------------------------------------------------- factory
 if [ "$kind" = release ] && active "$root/etc/fstab" | awk '$2 ~ /^\/factory\// { f = 1 } END { exit !f }'; then
     fail factory "/etc/fstab mounts a factory slot under /factory/ on a release image"
+fi
+
+# -------------------------------------------------------------- dev-only
+if [ "$kind" = release ]; then
+    for p in /etc/forgefirm-dev /etc/init.d/forgetest; do
+        if [ -e "$root$p" ] || [ -L "$root$p" ]; then
+            fail dev-only "$p is on a release image"
+        fi
+    done
+    for p in "$root"/usr/lib/python3*/site-packages/forgetest; do
+        [ -e "$p" ] && fail dev-only "${p#"$root"} is on a release image"
+    done
 fi
 
 exit $failed

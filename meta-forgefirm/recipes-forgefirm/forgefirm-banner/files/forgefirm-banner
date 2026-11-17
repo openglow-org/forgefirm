@@ -1,4 +1,9 @@
 #!/bin/sh
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+#
 # Rewrites /etc/issue, the serial-console login banner: the lines the
 # image build wrote, then one https:// URL per global address of wlan0
 # (and eth0 when the machine has one). The address is the only way in
@@ -12,12 +17,15 @@
 # is written through the mount. Before that the image's own file shows.
 # The image's own text is kept at that moment in a second copy, so the
 # banner needs no marker line in the file and shows nothing but itself.
+# One run at a time: the boot's run and a lease event can come together,
+# so each holds an exclusive lock while it works and the second waits.
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 
 ISSUE=/etc/issue
 STATE=/run/forgefirm/issue
 BASE=/run/forgefirm/issue.base
+LOCK=/run/forgefirm/issue.lock
 
 # One URL per global address; an IPv6 address gets its URL brackets.
 # Tentative, deprecated and temporary addresses are left out.
@@ -44,10 +52,12 @@ is_mounted () {
 
 [ -f "$ISSUE" ] || exit 0
 
+mkdir -p "${STATE%/*}" || exit 1
+exec 9> "$LOCK" && flock 9 || exit 1
+
 # The image's own text: the file as it is before the first write of the
 # boot. /run is a tmpfs, so the copy is made once per boot, and the
 # first caller is the one that finds the file untouched.
-mkdir -p "${STATE%/*}" || exit 1
 [ -f "$BASE" ] || cp -p "$ISSUE" "$BASE" || exit 1
 if ! is_mounted "$ISSUE"; then
   cp -p "$BASE" "$STATE" \

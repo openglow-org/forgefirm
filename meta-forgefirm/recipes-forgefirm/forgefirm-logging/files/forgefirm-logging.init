@@ -36,9 +36,9 @@ RULES=/data/forgefirm/rsyslog-forgefirm.conf
 
 # The daemons log to /dev/log with non-blocking datagrams and drop what
 # the socket will not take. The kernel default queue is 10 datagrams;
-# forgectrl's arm-time burst alone is about 20, so a 10-deep queue lost
-# the lines around every job start (the named safing writes among them).
-# 512 holds any burst the daemons make until rsyslog drains it.
+# forgectrl's arm-time burst alone is about 20, so a 10-deep queue would
+# lose the lines around every job start (the named safing writes among
+# them). 512 holds any burst the daemons make until rsyslog drains it.
 DGRAM_QLEN=512
 
 render() {

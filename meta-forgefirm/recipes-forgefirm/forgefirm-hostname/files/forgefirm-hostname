@@ -1,4 +1,9 @@
 #!/bin/sh
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+#
 # Sets the machine's hostname to forgefirm-<xxxx>, where xxxx is the
 # last four hex digits of the wlan0 MAC address (eth0 on a machine with
 # no WiFi). The name is the same at every boot, two machines on one

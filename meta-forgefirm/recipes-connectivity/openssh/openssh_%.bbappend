@@ -1,8 +1,12 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 
 # ForgeFIRM SSH policy, set in the installed files so the release image
 # carries it as built:
-#   PermitRootLogin no          root logs in at the serial console only
+#   PermitRootLogin no          root logs in at the serial console, not
+#                               over SSH (an operator account reaches root
+#                               with su: forgefirm-image.bb, Root policy)
 #   PermitEmptyPasswords no     an account without a password cannot log in
 #   PasswordAuthentication yes  operator accounts log in with a password
 # The dev image's debug-tweaks turns PermitRootLogin and

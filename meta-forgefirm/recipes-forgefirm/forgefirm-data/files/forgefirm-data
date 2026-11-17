@@ -51,7 +51,9 @@
 #    everything in it goes but what an install keeps or the machine itself
 #    is: the factory archive, the sshd host keys, the TLS key and
 #    certificate, the boot state (timestamp, random-seed), and the logs
-#    from before syslog (legacy-logs). The marker goes last, and only when
+#    from before syslog (legacy-logs). The setup record goes before the
+#    account file, and a record that cannot be removed keeps the account
+#    file beside it. The marker goes last, and only when
 #    everything else went: a wipe cut short by a power loss keeps it and
 #    runs again at the next boot. One in which a removal failed keeps it
 #    too, and forgectrl withdraws it when it starts and logs that, so a
@@ -131,7 +133,9 @@ card () {
   mkdir -p "$CARD" "$EMMC" || return 1
   # errors=remount-ro: a filesystem error found while the card is in use
   # stops the writes to it, whatever the card's superblock asks for.
-  if ! mount -t ext4 -o noatime,errors=remount-ro "$CARD_DEV" "$CARD"; then
+  # nosuid,nodev as the eMMC's /data: the folders shown over /data are
+  # binds of this mount and carry its flags.
+  if ! mount -t ext4 -o noatime,errors=remount-ro,nosuid,nodev "$CARD_DEV" "$CARD"; then
     log "the card's data partition ($CARD_DEV) did not mount"
     return 1
   fi
@@ -214,10 +218,18 @@ reset () {
   [ -e "$DATA/$RESET" ] || return 0
   log "a reset was requested: clearing $DATA (the factory archive, the host keys, the certificate and the boot state stay)"
   left=0
+  # The setup record goes first, and the account file only after it: a
+  # record that names an account must never be left without that
+  # account's file, which forgectrl would read as a machine with no
+  # account. A record that cannot be removed keeps the account.
+  keep_users=
+  if [ -e "$DATA/setup.json" ] || [ -L "$DATA/setup.json" ]; then
+    rm -rf "$DATA/setup.json" || { log "could not remove $DATA/setup.json: the account stays with it"; left=1; keep_users=users; }
+  fi
   for p in "$DATA"/* "$DATA"/.[!.]* "$DATA"/..?*; do
     [ -e "$p" ] || [ -L "$p" ] || continue
     name=${p##*/}
-    case " $KEEP $RESET " in *" $name "*) continue ;; esac
+    case " $KEEP $RESET setup.json $keep_users " in *" $name "*) continue ;; esac
     is_mounted "$p" && continue
     rm -rf "$p" || { log "could not remove $p"; left=1; }
   done

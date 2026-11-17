@@ -7,14 +7,15 @@
 # Provides:          grblhal
 # Required-Start:    $local_fs
 # Required-Stop:
-# Default-Start:     2 3 4 5
+# Default-Start:
 # Default-Stop:      0 1 6
 # Short-Description: grblHAL motion controller (Grbl over TCP:23)
 ### END INIT INFO
 
 # The controller lifecycle belongs to the forgectrl supervisor: it
 # spawns the controller selected by controller_mode as a direct child
-# (that relationship carries the pulse-device fd and death detection).
+# (that relationship carries the pulse-device fd and death detection),
+# at boot included, so only the stop links of this script are installed.
 # This script is the manual emergency lever, routed THROUGH the
 # supervisor: stop asks it to stop the child and hold it down (a bare
 # pkill would be safed and respawned seconds later); start resumes
@@ -24,11 +25,13 @@ DAEMON_BIN=/usr/bin/grblHAL_glowforge
 TOKEN_FILE=/data/forgefirm/panel.token
 CTRL_URL="http://127.0.0.1:${FORGECTRL_PORT:-80}"
 
+# The panel token reaches curl on its standard input, as a configuration
+# line, never on its command line, which every local account can read in
+# /proc.
 super_post() {
   [ -r "$TOKEN_FILE" ] || return 1
-  curl -sf -m 20 -X POST \
-    -H "X-ForgeFIRM-Token: $(cat "$TOKEN_FILE")" \
-    "$CTRL_URL/controller/$1" >/dev/null 2>&1
+  printf 'header = "X-ForgeFIRM-Token: %s"\n' "$(cat "$TOKEN_FILE")" \
+    | curl -sf -m 20 -X POST --config - "$CTRL_URL/controller/$1" >/dev/null 2>&1
 }
 
 case "$1" in

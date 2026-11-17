@@ -1,0 +1,192 @@
+#!/bin/sh
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+### BEGIN INIT INFO
+# Provides:          forgefirm-inbound
+# Required-Start:    mountkernfs
+# Required-Stop:
+# Default-Start:     S
+# Default-Stop:
+# Short-Description: ForgeFIRM inbound filter: new IPv6 TCP connections from the link alone
+### END INIT INFO
+
+# Runs at S31 in rcS, before the network starts (rc5). start loads the
+# inbound filter, table ip6 inbound from /etc/forgefirm/inbound.nft (a new
+# TCP connection over IPv6 is taken only from a link-local address or an
+# on-link prefix), and starts the watcher that keeps its set of on-link
+# prefixes current.
+#
+# The watcher reads the kernel's IPv6 routes and the machine's own
+# addresses every few seconds, and when the on-link prefixes change it
+# replaces the set's elements in one nft transaction. An on-link prefix is
+# a route that is up and has no gateway (a prefix the router announces as
+# on-link) and is not a default route, not a link-local or multicast
+# prefix, not on lo, and not a reject, anycast or local route; or the
+# prefix of one of the machine's own global addresses, which a router can
+# hand out without announcing it on-link. Until the watcher has filled the
+# set, and for up to one period (5 s) after a new prefix appears, a
+# connection from that prefix is dropped; the client sends its SYN again
+# (after about 1, 3 and 7 s), and the first one after the watcher's pass
+# gets in. Every sixth pass, and on the first, the watcher
+# writes the set whole and loads the rules again if the table is gone, so
+# a reload or a removal by hand lasts no longer than that.
+#
+#   start     load the rules and start the watcher (restart is the same)
+#   stop      stop the watcher; the rules stay in the kernel
+#   status    the rules, the set and the watcher; nonzero when either half
+#             is missing
+#   watch     the watcher itself, in the foreground
+#   render    one pass of the watcher: the set made to match the routes
+#
+# Host tests set FF_INBOUND_INTERVAL (the watcher's period in seconds,
+# default 5) and FF_INBOUND_RULES (the rule file); the image sets neither.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+RULES=${FF_INBOUND_RULES:-/etc/forgefirm/inbound.nft}
+ROUTES=/proc/net/ipv6_route
+ADDRS=/proc/net/if_inet6
+PIDFILE=/run/forgefirm-inbound.pid
+INTERVAL=${FF_INBOUND_INTERVAL:-5}
+REFRESH=6
+
+log () {
+  echo "forgefirm-inbound: $*"
+  { echo "forgefirm-inbound: $*" > /dev/kmsg; } 2>/dev/null
+}
+
+# The on-link prefixes, one per line, sorted, each with its host bits
+# cleared.
+#
+# /proc/net/ipv6_route has one route per line: the destination and its
+# length in hex, the source and its length, the next hop, the metric, two
+# counters, the flags in hex, and the device. The flags tested are RTF_UP
+# (0x1), RTF_GATEWAY (0x2), RTF_REJECT (0x200), RTF_ANYCAST (0x100000) and
+# RTF_LOCAL (0x80000000).
+#
+# /proc/net/if_inet6 has one address per line: the address, the interface
+# index, the prefix length and the scope in hex, the flags, and the
+# device. Scope 00 is global (a unique local address included).
+#
+# A prefix of length 0 is never on-link here: it would stand for every
+# address.
+onlink () {
+  awk -v routes="$ROUTES" '
+    function hex(s,   i, n) {
+      n = 0
+      for (i = 1; i <= length(s); i++)
+        n = n * 16 + index("0123456789abcdef", substr(s, i, 1)) - 1
+      return n
+    }
+    function set(f, b) { return int(f / b) % 2 == 1 }
+    function prefix(a, plen,   i, b, d, k, out) {
+      out = ""
+      for (i = 0; i < 32; i++) {
+        b = plen - 4 * i
+        d = hex(substr(a, i + 1, 1))
+        if (b <= 0) d = 0
+        else if (b < 4) { k = 2 ^ (4 - b); d = int(d / k) * k }
+        out = out (i && i % 4 == 0 ? ":" : "") substr("0123456789abcdef", d + 1, 1)
+      }
+      return out "/" plen
+    }
+    FILENAME == routes && NF >= 10 {
+      dst = tolower($1); plen = hex(tolower($2)); flags = hex(tolower($9))
+      if (length(dst) != 32 || plen == 0 || $10 == "lo") next
+      if (substr(dst, 1, 2) == "ff" || substr(dst, 1, 3) ~ /^fe[89ab]$/) next
+      if (!set(flags, 1) || set(flags, 2) || set(flags, 512) || set(flags, 1048576) || set(flags, 2147483648)) next
+      print prefix(dst, plen)
+    }
+    FILENAME != routes && NF >= 6 {
+      a = tolower($1); plen = hex(tolower($3))
+      if (length(a) != 32 || $4 != "00" || $6 == "lo" || plen == 0 || plen >= 128) next
+      print prefix(a, plen)
+    }' "$ROUTES" "$ADDRS" | sort -u
+}
+
+# apply <prefixes>: the set's elements replaced by these, in one
+# transaction.
+apply () {
+  {
+    echo "flush set ip6 inbound onlink"
+    [ -z "$1" ] || echo "add element ip6 inbound onlink { $(echo $1 | tr ' ' ',') }"
+  } | nft -f -
+}
+
+render () {
+  apply "$(onlink)"
+}
+
+watch () {
+  last=
+  applied=
+  pass=0
+  while :; do
+    now=$(onlink)
+    if [ "$pass" -eq 0 ] && ! nft list table ip6 inbound >/dev/null 2>&1; then
+      nft -f "$RULES" && log "the inbound rules were gone: loaded again"
+    fi
+    if [ "$pass" -eq 0 ] || [ -z "$applied" ] || [ "$now" != "$last" ]; then
+      if apply "$now"; then
+        [ -n "$applied" ] && [ "$now" = "$last" ] || log "on-link prefixes: $(echo ${now:-none})"
+        last=$now
+        applied=1
+      fi
+    fi
+    pass=$(( (pass + 1) % REFRESH ))
+    sleep "$INTERVAL"
+  done
+}
+
+stop_watch () {
+  [ -f "$PIDFILE" ] && start-stop-daemon -K -q -p "$PIDFILE"
+  rm -f "$PIDFILE"
+}
+
+status () {
+  rc=0
+  if nft list table ip6 inbound >/dev/null 2>&1; then
+    echo "inbound rules: loaded"
+    nft list set ip6 inbound onlink 2>/dev/null | sed -n 's/^[[:space:]]*elements = /on-link prefixes: /p'
+  else
+    echo "inbound rules: NOT loaded"; rc=1
+  fi
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    echo "watcher: running (pid $(cat "$PIDFILE"))"
+  else
+    echo "watcher: NOT running"; rc=1
+  fi
+  return $rc
+}
+
+case "$1" in
+  start|restart|reload|force-reload)
+    rc=0
+    nft -f "$RULES" || { log "the inbound rules did not load"; rc=1; }
+    stop_watch
+    start-stop-daemon -S -q -b -m -p "$PIDFILE" -a /bin/sh -- "$0" watch \
+      || { log "the watcher did not start"; rc=1; }
+    exit $rc
+    ;;
+  stop)
+    stop_watch
+    ;;
+  status)
+    status
+    exit $?
+    ;;
+  watch)
+    watch
+    ;;
+  render)
+    render
+    exit $?
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status|watch|render}"
+    exit 1
+    ;;
+esac
+
+exit 0
