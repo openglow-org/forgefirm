@@ -183,12 +183,21 @@ def image_health(ctx):
                       ("CONFIG_PANIC_ON_OOPS", ("y",)), ("CONFIG_SYN_COOKIES", ("y",)),
                       ("CONFIG_MAGIC_SYSRQ_SERIAL", ("n",)), ("CONFIG_SECURITY_DMESG_RESTRICT", ("y",)),
                       ("CONFIG_HARDENED_USERCOPY", ("y",)), ("CONFIG_FORTIFY_SOURCE", ("y",)),
-                      ("CONFIG_SLAB_FREELIST_HARDENED", ("y",)), ("CONFIG_BUG_ON_DATA_CORRUPTION", ("y",))):
+                      ("CONFIG_SLAB_FREELIST_HARDENED", ("y",)), ("CONFIG_BUG_ON_DATA_CORRUPTION", ("y",)),
+                      ("CONFIG_KEXEC", ("n",)), ("CONFIG_CRASH_DUMP", ("n",))):
         val = cfg.get(opt, "n")
         ev[opt] = val
         ctx.log("%s=%s", opt, val)
         ctx.check(val in want, "%s=%s, expected one of %s", opt, val, want)
-    # The boot-armed hardware watchdog: U-Boot arms WDOG1 at 60 s and the
+    # A CPU stuck with preemption off is a soft lockup after twice this
+    # many seconds; the boot arguments set 2 (uEnv.txt), the kernel's
+    # default is 10.
+    thresh = (_read("/proc/sys/kernel/watchdog_thresh", "") or "").strip()
+    ev["watchdog_thresh"] = thresh
+    ctx.log("kernel.watchdog_thresh: %s", thresh)
+    ctx.check(thresh == "2", "kernel.watchdog_thresh %r, expected 2 (a soft lockup after 4 s)", thresh or None)
+    # The hardware watchdog: U-Boot arms WDOG1 at 60 s, the boot arguments
+    # set 40 s at the driver's probe (imx2_wdt.timeout=40), and the
     # kernel's core keeps it fed (no userspace opens it, so the sysfs state
     # reads "inactive": that attribute says whether a process holds the
     # device, not whether the hardware runs). The hardware's own word is
@@ -204,10 +213,10 @@ def image_health(ctx):
     ev["watchdog"] = wd
     ctx.log("watchdog0: %s", wd)
     ctx.check(wd["identity"], "watchdog0 has no sysfs view (CONFIG_WATCHDOG_SYSFS)")
-    ctx.check(wd["timeout"] == "60", "watchdog0 timeout %r, expected 60 s", wd["timeout"] or None)
+    ctx.check(wd["timeout"] == "40", "watchdog0 timeout %r, expected 40 s", wd["timeout"] or None)
     ctx.check(wcr is not None, "WDOG1 WCR unreadable through /dev/mem")
     ctx.check(wd["wde"], "WDOG1 is not enabled (WCR %s): nothing resets a hung kernel", wd["wcr"])
-    ctx.check(wd["period_s"] == 60.0, "WDOG1 period %s s (WCR %s), expected 60", wd["period_s"], wd["wcr"])
+    ctx.check(wd["period_s"] == 40.0, "WDOG1 period %s s (WCR %s), expected 40", wd["period_s"], wd["wcr"])
     ctx.check(wd["state"] == "inactive", "watchdog0 is %r: a process holds the device, which the image "
               "does not do", wd["state"] or None)
     rel = _read("/proc/sys/kernel/osrelease", "").strip()
