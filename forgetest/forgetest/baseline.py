@@ -105,6 +105,9 @@ FC_SILENCE_S = 30
 # Baseline._heater_side).
 HEATER_ATTR = "thermal/heater_pwm"
 PUMP_ATTR = "thermal/water_pump_on"
+# Two of the cooling engine's ticks and a margin: what a pump read off at
+# idle is given to come back on (_pump_side).
+PUMP_TICK_S = 2.5
 # How far the heater may sit from the duty the coolant flow watch reports
 # while it holds, in counts (2 % of 65535): the hold moves its duty a little
 # every half second, and the heater and the watch are read apart.
@@ -1298,15 +1301,17 @@ class Baseline:
 
     def _pump_side(self, left):
         """The coolant pump runs whenever the engine idles in its own
-        posture. The engine writes it on at its start and at each release (a
-        diagnostic's, a quiet hold's), and no tick writes it again, so a pump
-        a run switched off stays off into the next job, which fires on it:
-        no fire gate reads the pump. A quiet hold still standing (every fan
-        off, and the pump with it when a bench tool asked) is the run's, and
-        its release puts the engine's posture back, the fans' duties with it.
-        The duties themselves are the engine's to keep: its tick reads each
-        back and writes again the one it did not command. In any other phase,
-        or under a diagnostic, the pump is the engine's or the tool's."""
+        posture: the engine writes it on every tick, and off only under a
+        quiet hold's pump hold, which it applies at idle alone. A quiet hold
+        still standing (every fan off, and the pump with it when a bench
+        tool asked) is the run's, and its release puts the engine's posture
+        back at its next tick, the fans' duties and the pump with it. A pump
+        read off at idle is given two of the engine's ticks to come back on
+        (PUMP_TICK_S); one that stays off (an engine that is not writing it)
+        is the leftover, switched on here: no fire gate reads the pump. The
+        duties themselves are the engine's to keep: its tick reads each back
+        and writes again the one it did not command. In any other phase, or
+        under a diagnostic, the pump is the engine's or the tool's."""
         c = self.fc_dict("/cool/status")
         if c is None:
             return
@@ -1328,6 +1333,11 @@ class Baseline:
         got = hw.sysfs_read(PUMP_ATTR)
         if got is None or got == "1":
             return
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < PUMP_TICK_S and not self.abort():
+            time.sleep(min(0.25, PUMP_TICK_S))
+            if hw.sysfs_read(PUMP_ATTR) == "1":
+                return
         try:
             hw.sysfs_write(PUMP_ATTR, "1")
             back = hw.sysfs_read(PUMP_ATTR)

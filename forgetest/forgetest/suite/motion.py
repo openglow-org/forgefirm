@@ -16,6 +16,7 @@ import json
 import os
 import signal
 import struct
+import threading
 import time
 
 from ..catalog import test
@@ -1011,9 +1012,12 @@ def _energize_after(ctx, g, fc):
                   "no underrun, but the step producer comes back later than its lead and its "
                   "late events clamp; unarmed that is a warning in the controller's log and the "
                   "move completes with every step (the armed case faults, proven on the host). "
-                  "forgectrl restart mid-move: the busy controller finishes the move unmanaged "
-                  "and the new daemon retakes supervision at idle. After each drill the head is "
-                  "jogged back by the kernel-measured distance. SIGKILL during $H (the web-service "
+                  "forgectrl restart mid-move: the controller dies with the daemon within 3 s, its "
+                  "exit is the pulse device's last close, and the kernel's dead man's switch halts "
+                  "the move, locks the latch and makes the head safe (the UV LED, lit for the drill, "
+                  "goes off); the new daemon probes motion and starts its own controller. After each "
+                  "drill the head is jogged back by the kernel-measured distance (for the restart, "
+                  "read before the new controller re-zeroes the counters). SIGKILL during $H (the web-service "
                   "homing; cloud mode turned on for it with the phrase the cloud step asks for, when "
                   "it is off, and put back): the homing runner the controller left behind "
                   "is ended before the respawn, the kernel is idle when the new controller starts, "
@@ -1029,16 +1033,7 @@ def deadman(ctx):
         return v is not None and bool(v & (1 << 3))
 
     def wait_running(timeout=30, not_pid=None):
-        """A running controller; with not_pid, one other than that pid (a
-        killed controller can still read as running until it is reaped)."""
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            st, m = fc.get("/mode")
-            if (isinstance(m, dict) and m.get("controller") == "running" and m.get("pid")
-                    and m.get("pid") != not_pid):
-                return m
-            ctx.sleep(0.5)
-        return None
+        return _wait_running(ctx, fc, timeout, not_pid)
 
     # ---- 1. SIGKILL mid-move
     m0 = wait_running(10)
@@ -1198,50 +1193,58 @@ def deadman(ctx):
     ctx.check(latch_locked(), "latch unlocked after the short stall")
     _return_x(ctx, (x1 - x0) if (x0 is not None and x1 is not None) else None)
 
-    # ---- 3. forgectrl restart mid-move: the move finishes, supervision retaken at idle
+    # ---- 3. forgectrl restart mid-move: the controller dies with the daemon,
+    # its exit is the pulse device's last close, and the kernel's dead man's
+    # switch halts the move; the new daemon probes motion and spawns its own
     m2 = wait_running(10)
     pid2 = m2["pid"]
-    x0 = _kernel_x_mm(ctx)
-    with ctx.grbl() as g:
-        clean_slate(ctx, g)
-        g.command("G91")
-        g.command("G1X30F300", timeout=0.5)     # ~6 s of motion
-        ctx.sleep(1.0)
-        rc, out = hw.initd("forgectrl", "restart")
-        ctx.log("forgectrl restart mid-move -> rc %s", rc)
-        peak, states, st = wait_idle(ctx, g, 30)
-        ev["restart"] = {"rc": rc, "states": states}
-        ctx.log("move after the restart: states %s", states)
-        ctx.check(ran(states), "the move did not finish after the forgectrl restart: %s", states)
-        g.command("G90")
-    t0 = time.time()
-    m3 = None
-    while time.time() - t0 < 60:
-        st, m3 = fc.get("/mode")
-        if isinstance(m3, dict) and m3.get("controller") == "running":
-            break
-        ctx.sleep(1)
-    ev["restart"]["mode_after"] = m3
-    ctx.log("mode after restart: %s", m3)
-    ctx.check(m3 and m3.get("controller") == "running", "supervision not retaken after the restart: %s", m3)
-    ctx.check(m3.get("motion") == "verified", "motion not verified after the retake: %s", m3)
-    # the retake, by design: the busy controller (unmanaged, its own fd carrying
-    # the dead-man) finished its move; at idle the new supervisor stopped it,
-    # re-probed motion, and started a supervised one under the broker
-    ev["restart"]["replaced_at_idle"] = m3.get("pid") != pid2
-    ctx.log("retake: unmanaged pid %s finished the move; supervised pid %s started at idle",
-            pid2, m3.get("pid"))
-    ctx.check(latch_locked(), "latch unlocked after the restart drill")
-    x1 = _kernel_x_mm(ctx)
-    _return_x(ctx, (x1 - x0) if (x0 is not None and x1 is not None) else None)
+    spm = _baseline.counter_steps_per_mm()
+    x0 = _kernel_position()[0]
+    x1 = None
+    try:
+        with ctx.grbl() as g:
+            clean_slate(ctx, g)
+            g.command("G91")
+            g.command("G1X30F300", timeout=0.5)     # ~6 s of motion
+            ctx.sleep(1.0)
+        rec = {"pid": pid2, "state_before": hw.sysfs_read("cnc/state")}
+        done = {}
+        restart = threading.Thread(target=lambda: done.update(rc=hw.initd("forgectrl", "restart", timeout=120)[0]))
+        hw.sysfs_write("head/uv_led", str(RESTART_UV))  # lit as the restart begins
+        t0 = time.time()
+        restart.start()
+        while time.time() - t0 < 10 and ("gone_s" not in rec or "halt_s" not in rec):
+            if "gone_s" not in rec and not _alive(pid2):
+                rec["gone_s"] = round(time.time() - t0, 2)
+            if "halt_s" not in rec and hw.sysfs_read("cnc/state") != "running":
+                rec["halt_s"] = round(time.time() - t0, 2)
+                x1 = _kernel_position()[0]          # before the new controller re-zeroes the counters
+            time.sleep(0.02)
+        rec["state_after"] = hw.sysfs_read("cnc/state")
+        rec["latch_locked"] = latch_locked()
+        restart.join(130)
+        rec["initd_rc"] = done.get("rc")
+        rec["uv_led"] = hw.sysfs_int("head/uv_led")
+        rec["mode_after"] = wait_running(90, not_pid=pid2)      # the daemon refuses until it listens
+        ev["restart"] = rec
+        ctx.log("forgectrl restart mid-move: %s", rec)
+        problems = _restart_problems(rec)
+        ctx.check(not problems, "the restart drill: %s", "; ".join(problems))
+    finally:
+        # The drill's own emitter off on every way out. head/safe would also
+        # take the lens driver from the controller the new daemon started.
+        hw.sysfs_write("head/uv_led", "0")
+    m3 = rec["mode_after"] or {}
+    _return_x(ctx, (x1 - x0) / spm if x1 is not None else None)
     machine_idle(ctx)
 
     # ---- 4. SIGKILL during $H: the homing runner is ended, the kernel idle, one writer
     homing_kill(ctx, wait_running)
 
     ctx.log("PASS: kill respawned in %s s, hang -> underrun in %s s, short stall warned and completed, "
-            "restart retook supervision (pid %s), the kill during $H ended the runner (%s)",
-            respawn_s, halt_s, m3.get("pid"), ev.get("homing_kill", {}).get("runner_gone_s", "skipped"))
+            "the restart ended the controller in %s s and the new daemon started pid %s, the kill "
+            "during $H ended the runner (%s)", respawn_s, halt_s, ev["restart"].get("gone_s"),
+            m3.get("pid"), ev.get("homing_kill", {}).get("runner_gone_s", "skipped"))
 
 
 def _pulse_holders():
@@ -1540,6 +1543,71 @@ def _rail_lines():
     if rc != 0:
         return -1
     return sum(1 for line in out.splitlines() if "40V on" in line or "40V off" in line)
+
+
+def _wait_running(ctx, fc, timeout=30, not_pid=None):
+    """motion.deadman's wait for a running controller; with not_pid, one
+    other than that pid (a killed controller can still read as running
+    until it is reaped). A forgectrl that refuses the request (a restarted
+    daemon still coming up) is waited out. The document, or None."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            st, m = fc.get("/mode")
+        except hw.HwError:
+            m = None
+        if (isinstance(m, dict) and m.get("controller") == "running" and m.get("pid")
+                and m.get("pid") != not_pid):
+            return m
+        ctx.sleep(0.5)
+    return None
+
+
+# motion.deadman's restart drill: the bound on the controller's death after
+# the restart begins (about 1 s on a quiet machine: the daemon stops its
+# HTTP framework, then its lifecycle thread, whose end the parent-death
+# signal follows), and the UV LED's level for the drill (dark; the head's
+# safe state takes it to 0).
+RESTART_GONE_S = 3.0
+RESTART_UV = 20
+
+
+def _alive(pid):
+    """Whether the process is alive: listed, and neither a zombie nor dead."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X", "x")
+    except (OSError, IndexError):
+        return False
+
+
+def _restart_problems(rec):
+    """motion.deadman's judgment of its restart drill's record. The kernel
+    was running the move; the controller died within RESTART_GONE_S of the
+    restart; the kernel left running for a state other than underrun (the
+    dead man's switch at the device's last close, not a ring that ran dry);
+    the latch is locked and the head safe (its UV LED off); and
+    a controller other than the old one runs on verified motion. Every
+    problem in words; an empty list is the pass."""
+    p = []
+    if rec.get("state_before") != "running":
+        p.append("the kernel was %s before the restart, not running the move" % rec.get("state_before"))
+    gone = rec.get("gone_s")
+    if gone is None or gone > RESTART_GONE_S:
+        p.append("the controller (pid %s) was alive %.0f s after the restart began (%s)"
+                 % (rec.get("pid"), RESTART_GONE_S, gone))
+    if rec.get("halt_s") is None or rec.get("state_after") in ("running", "underrun"):
+        p.append("the kernel did not leave running through the dead man's switch (%s)" % rec.get("state_after"))
+    if not rec.get("latch_locked"):
+        p.append("the latch is not locked after the controller's death")
+    if rec.get("uv_led") != 0:
+        p.append("the head is not safe after the restart (uv_led %s)" % rec.get("uv_led"))
+    m = rec.get("mode_after") or {}
+    if m.get("controller") != "running" or m.get("pid") in (None, rec.get("pid")):
+        p.append("the new daemon started no controller of its own (%s)" % (m or None))
+    elif m.get("motion") != "verified":
+        p.append("the new daemon's controller runs on unverified motion (%s)" % m)
+    return p
 
 
 def _kernel_position():

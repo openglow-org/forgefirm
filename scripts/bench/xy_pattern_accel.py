@@ -390,8 +390,15 @@ def run_pattern(mode, home):
         k0 = fc_get("/status").get("pos") or {}
         und0 = int(sysfs("cnc/underruns"))
         print("x%d: quiet hold: %s" % (mode, quiet(True)))
-        pwm = {a: sysfs(a) for a in ("thermal/exhaust_pwm", "thermal/intake_pwm", "head/air_assist_pwm",
-                                     "head/purge_air", "thermal/water_pump_on", "thermal/tec_on")}
+        # The engine writes the hold's posture at its next tick (1 s apart).
+        posture = ("thermal/exhaust_pwm", "thermal/intake_pwm", "head/air_assist_pwm",
+                   "head/purge_air", "thermal/water_pump_on", "thermal/tec_on")
+        t_hold = time.monotonic()
+        while True:
+            pwm = {a: sysfs(a) for a in posture}
+            if all(v == "0" for v in pwm.values()) or time.monotonic() - t_hold > 2.0:
+                break
+            time.sleep(0.1)
         record["fans"] = pwm
         if any(v != "0" for v in pwm.values()):
             fail("a fan, the pump or the TEC is still commanded on: %s" % pwm)
@@ -412,6 +419,13 @@ def run_pattern(mode, home):
                                    "peak_feed": peak, "end_mpos": pos})
             print("  %-22s %5.2f s, peak %5.0f mm/min, end MPos (%.3f, %.3f)"
                   % (name, t_idle - t_run, peak, pos[0], pos[1]))
+            # The engine releases the hold itself when the coolant crosses
+            # its ceiling: the fans then run, and the reading is no quiet
+            # one. The pattern stops at the end of this leg.
+            if not (fc_get("/cool/status") or {}).get("quiet_hold"):
+                fail("the quiet hold was released during the pattern (the coolant crossed its ceiling, or "
+                     "the hold ran out of time): the reading is not quiet; run again once the coolant has "
+                     "cooled")
         g.cmd("G90")
         time.sleep(1.0)
         end = time.time() + 20
@@ -425,6 +439,7 @@ def run_pattern(mode, home):
         put_back(("release the quiet hold (the engine drops it itself within 600 s)", lambda: quiet(False)),
                  ("stop the sampler", lambda: sampler is not None and sampler.stop()),
                  ("put the accelerometer back", lambda: accel is not None and accel.restore()),
+                 ("put the controller back in absolute positioning", lambda: g.cmd("G90")),
                  ("close the Grbl connection", g.close))
     samples = sampler.samples
     record["samples"] = len(samples)

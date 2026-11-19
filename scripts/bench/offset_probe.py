@@ -441,9 +441,10 @@ def main():
                 print('  %+7.1f s  %s' % (t - edges[0][0], label), flush=True)
             else:
                 edges.append((time.time(), label))
-            if key == 'heater' and val:
-                # The kernel holds a heater write above zero only for its
-                # lease (heater_lease_ms, 5 s): written again every second.
+            if key in ('heater', 'tec') and val:
+                # The kernel holds a heater duty above zero, and a TEC on,
+                # only for its lease (heater_lease_ms, 5 s): written again
+                # every second.
                 end = time.time() + dwell
                 while time.time() < end:
                     time.sleep(min(1.0, max(0.0, end - time.time())))

@@ -11,9 +11,13 @@ SIGCONT (real child processes; Linux only). The wait for a move counts an
 Idle only once the move was seen started. A controller's kill is judged
 safed when it landed on a running kernel, the run ended inside a second,
 and the latch never read unlocked; the reap's time comes off the
-supervisor's own line. The kill during $H runs
-whatever cloud mode the machine was found in, and puts it back. A check
-that a line was not logged fails on a window it cannot read."""
+supervisor's own line. The kill during $H runs whatever cloud mode the
+machine was found in, and puts it back. A check that a line was not logged
+fails on a window it cannot read. The restart drill's wait for the new
+daemon's controller gets through a daemon that refuses requests while it
+comes up, and its judgment passes the record of a controller that died
+with the daemon and fails one that outlived it or any other rule's
+breach."""
 import os
 import shutil
 import signal
@@ -271,6 +275,53 @@ class LogAbsenceTests(unittest.TestCase):
         os.remove(log)                                  # rotated away, nothing in its place
         with self.assertRaises(Failed):
             motion._log_absent(ctx, log, 0, "late events clamped", "no clamp")
+
+
+class RestartJudgmentTests(unittest.TestCase):
+    PASS = {"pid": 812, "state_before": "running", "gone_s": 0.9, "halt_s": 0.9, "state_after": "idle",
+            "latch_locked": True, "uv_led": 0,
+            "mode_after": {"controller": "running", "pid": 990, "motion": "verified"}}
+
+    def test_a_controller_that_died_with_the_daemon_passes(self):
+        self.assertEqual(motion._restart_problems(dict(self.PASS)), [])
+
+    def test_each_rule_fails_alone(self):
+        for breach in ({"state_before": "idle"}, {"halt_s": None}, {"state_after": "running"},
+                       {"state_after": "underrun"}, {"latch_locked": False},
+                       {"mode_after": {"controller": "running", "pid": 990, "motion": "unverified"}}):
+            with self.subTest(breach=breach):
+                self.assertTrue(motion._restart_problems(dict(self.PASS, **breach)))
+
+    def test_the_wait_outlasts_a_daemon_coming_up(self):
+        class Fc:
+            def __init__(self, answers):
+                self.answers = list(answers)
+
+            def get(self, path):
+                a = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+                if isinstance(a, Exception):
+                    raise a
+                return 200, a
+
+        refused = motion.hw.HwError("forgectrl GET /mode: connection refused")
+        old = {"controller": "running", "pid": 812, "motion": "verified"}
+        new = {"controller": "running", "pid": 990, "motion": "verified"}
+        ctx = Ctx()
+        ctx.sleep = lambda s: None
+        self.assertEqual(motion._wait_running(ctx, Fc([refused, refused, old, new]), 5, not_pid=812), new)
+        self.assertIsNone(motion._wait_running(ctx, Fc([refused]), 0.05, not_pid=812))
+
+    def test_a_controller_that_outlived_the_daemon_fails(self):
+        # The busy controller finished its move unmanaged; the new daemon
+        # replaced it at idle, on verified motion.
+        survived = dict(self.PASS, gone_s=None, halt_s=6.2)
+        self.assertTrue(motion._restart_problems(survived))
+        slow = dict(self.PASS, gone_s=motion.RESTART_GONE_S + 0.5)
+        self.assertTrue(motion._restart_problems(slow))
+        lit = dict(self.PASS, uv_led=motion.RESTART_UV)
+        self.assertTrue(motion._restart_problems(lit))
+        kept = dict(self.PASS, mode_after={"controller": "running", "pid": 812, "motion": "verified"})
+        self.assertTrue(motion._restart_problems(kept))
 
 
 if __name__ == "__main__":

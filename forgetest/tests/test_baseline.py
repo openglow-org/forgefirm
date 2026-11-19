@@ -53,8 +53,12 @@ class BaselineFixture:
         helpers.host_run(self)
         helpers.latch_drives_interlock(self)
         self.lines = []
+        # a pump left off is judged once the engine's ticks are out
+        self._pump_tick = baseline.PUMP_TICK_S
+        baseline.PUMP_TICK_S = 0.05
 
     def tearDown(self):
+        baseline.PUMP_TICK_S = self._pump_tick
         shutil.rmtree(self.tmp, ignore_errors=True)
         for k in ("GF_SYSFS_ROOT", "GF_LEDS_ROOT", "FORGECTRL_URL"):
             os.environ.pop(k, None)
@@ -1604,12 +1608,21 @@ class BaselineModeTests(BaselineFixture, unittest.TestCase):
         self.assertIn(("/settings", {"cool_max_c": "30"}), self.fc.posts)
 
     def test_a_pump_left_off_at_idle_is_switched_on(self):
-        # Nothing re-asserts the pump per tick, and no fire gate reads it.
+        # One that stays off past the engine's ticks: no fire gate reads it.
         self.lamp_at_idle()
         self._attr("thermal/water_pump_on", "0")
         left = {x.item: x for x in self.bl().enforce("post", captured=None)}
         self.assertEqual(left["thermal/water_pump_on"].action, "restored")
         self.assertEqual(self._read("thermal/water_pump_on"), "1")
+
+    def test_a_pump_the_engine_puts_back_on_is_no_leftover(self):
+        # Read off just after a hold's release: the engine's next tick
+        # writes it on, and the judge waits for that tick.
+        self.lamp_at_idle()
+        self._attr("thermal/water_pump_on", "0")
+        with mock.patch.object(baseline.time, "sleep", lambda s: self._attr("thermal/water_pump_on", "1")):
+            left = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertNotIn("thermal/water_pump_on", left)
 
     def test_a_quiet_hold_left_standing_is_released(self):
         self.lamp_at_idle()
