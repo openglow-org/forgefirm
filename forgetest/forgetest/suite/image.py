@@ -132,7 +132,8 @@ def fds_of(pid):
                   "DHCP client runs with -b and has left ifup (its parent is pid 1); no DHCPv6 "
                   "client is running; and IPv6 is the "
                   "kernel's own: enabled on wlan0, router advertisements accepted, a link-local "
-                  "address up (a global address is logged, not checked). And the hardening the "
+                  "address up (a global address is logged, not checked). And what the boot "
+                  "arguments set: the console log level at 5. And the hardening the "
                   "boot sets: SYN cookies, the kernel's hardening options and no SysRq on the "
                   "serial console, ICMP redirects refused on wlan0, the link protections on, /data "
                   "and /var/volatile refusing set-uid and device files, /run and /var/volatile "
@@ -196,6 +197,14 @@ def image_health(ctx):
     ev["watchdog_thresh"] = thresh
     ctx.log("kernel.watchdog_thresh: %s", thresh)
     ctx.check(thresh == "2", "kernel.watchdog_thresh %r, expected 2 (a soft lockup after 4 s)", thresh or None)
+    # The console prints only what is below its level: the boot arguments
+    # set 5 (uEnv.txt, loglevel=5), so warnings and worse reach the console
+    # and the info lines stay in the kernel log; the kernel's default is 7.
+    printk = (_read("/proc/sys/kernel/printk", "") or "").split()
+    console_level = printk[0] if printk else ""
+    ev["console_loglevel"] = console_level
+    ctx.log("kernel.printk: %s", " ".join(printk))
+    ctx.check(console_level == "5", "console log level %r, expected 5 (loglevel=5)", console_level or None)
     # The hardware watchdog: U-Boot arms WDOG1 at 60 s, the boot arguments
     # set 40 s at the driver's probe (imx2_wdt.timeout=40), and the
     # kernel's core keeps it fed (no userspace opens it, so the sysfs state
