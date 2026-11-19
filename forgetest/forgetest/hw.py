@@ -15,8 +15,10 @@ exercised against a mock on a host:
   FORGETEST_INITD        default /etc/init.d
 """
 import glob
+import gzip
 import json
 import os
+import re
 import select
 import socket
 import struct
@@ -26,6 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 
 class HwError(Exception):
@@ -43,6 +46,10 @@ class HwError(Exception):
 # read as a dead daemon.
 SLOW_PATHS = ("/mode", "/controller/start", "/controller/stop")
 SLOW_TIMEOUT_S = 120.0
+# The typed phrase POST /settings takes with cloud_enabled=1 from off (the
+# cloud step's consent); a test that needs cloud mode gives it, as the
+# runner does for a test that declares cloud mode.
+CLOUD_PHRASE = "I UNDERSTAND"
 
 
 class Forgectrl:
@@ -186,6 +193,15 @@ def sysfs_write(attr, value):
 # head reads 1800-2900 on its probe move, a wedged one <= 250).
 HEAD_ACCEL_I2C = "3-001e"
 ACCEL_P2P_MOVING = 800
+# The fewest samples a window holds before it can show the head at rest:
+# one sample has a peak-to-peak of 0 whatever the head did. The sampler
+# lands two to three reads a second on the bench reference.
+ACCEL_STILL_MIN_SAMPLES = 5
+# How long the sampler waits after a read that failed before it reads
+# again, so a part that stops answering is not polled in a tight loop.
+ACCEL_RETRY_S = 0.1
+# forgectrl's probe line: "head accel p2p x=<n> y=<n> (moving>=... dead<=...)".
+_PROBE_P2P = re.compile(r"head accel p2p x=(-?\d+) y=(-?\d+)")
 
 
 def head_accel_dir():
@@ -226,11 +242,28 @@ def head_accel_read(d):
     return tuple(out)
 
 
+def probe_p2p(line):
+    """The (x, y) peak-to-peak forgectrl's liveness probe reports in its
+    line, or None when the line carries no reading."""
+    m = _PROBE_P2P.search(line or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def probe_moved(line):
+    """What the probe's own reading says, judged against the moving
+    threshold, whatever word the line ends on: True when it reached it,
+    False when it did not, None when the line carries no reading."""
+    p = probe_p2p(line)
+    return None if p is None else max(p) >= ACCEL_P2P_MOVING
+
+
 class AccelSampler:
     """Samples the head accelerometer in a thread for as long as it is
     running; `p2p(t0, t1)` is the peak-to-peak on X and Y over the samples
-    in that window and how many there were. Used as a context manager
-    around a motion the test wants the head to have made."""
+    in that window and how many there were, and `moved` and `still` are the
+    judgments of a window. A read that fails is no sample: it is counted,
+    with its time, and never stands in for a reading. Used as a context
+    manager around a motion the test wants the head to have made."""
 
     def __init__(self, period=0.0):
         self.dir = head_accel_dir()
@@ -239,6 +272,7 @@ class AccelSampler:
         self._stop = threading.Event()
         self._th = None
         self.errors = 0
+        self.error_times = []        # when each failed read was made
 
     @property
     def available(self):
@@ -259,10 +293,13 @@ class AccelSampler:
     def _loop(self):
         while not self._stop.is_set():
             v = head_accel_read(self.dir)
+            now = time.time()
             if v is None:
                 self.errors += 1
-            else:
-                self.samples.append((time.time(), v[0], v[1]))
+                self.error_times.append(now)
+                self._stop.wait(ACCEL_RETRY_S)
+                continue
+            self.samples.append((now, v[0], v[1]))
             if self.period:
                 self._stop.wait(self.period)
 
@@ -274,6 +311,27 @@ class AccelSampler:
         if not xs:
             return 0, 0, 0
         return max(xs) - min(xs), max(ys) - min(ys), len(xs)
+
+    def window_errors(self, t0, t1=None):
+        """How many reads failed in [t0, t1]."""
+        t1 = time.time() if t1 is None else t1
+        return sum(1 for t in self.error_times if t0 <= t <= t1)
+
+    def moved(self, t0, t1=None):
+        """The head moved in [t0, t1]: its peak-to-peak on X or Y reached
+        ACCEL_P2P_MOVING."""
+        p2px, p2py, _n = self.p2p(t0, t1)
+        return max(p2px, p2py) >= ACCEL_P2P_MOVING
+
+    def still(self, t0, t1=None, floor=ACCEL_STILL_MIN_SAMPLES):
+        """True when [t0, t1] shows the head at rest, False when it shows it
+        moving, None when the window cannot say: fewer than `floor` samples,
+        or a read that failed inside it (a window with gaps reads quieter
+        than the head was)."""
+        _x, _y, n = self.p2p(t0, t1)
+        if n < floor or self.window_errors(t0, t1):
+            return None
+        return not self.moved(t0, t1)
 
 
 # ----------------------------------------------------------- button LEDs
@@ -418,6 +476,80 @@ class ButtonEdges:
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
+
+
+# ----------------------------------------------------------------- logs
+
+class LogMark(int):
+    """Where a log file ends, in bytes, and the file's inode then: the start
+    of a window log_window reads. It is the byte offset wherever an offset
+    is used; arithmetic on it gives a plain offset, with no inode."""
+
+    def __new__(cls, size, ino=None):
+        mark = super().__new__(cls, size)
+        mark.ino = ino
+        return mark
+
+
+def log_size(path):
+    """Where a log file ends now (a LogMark): the offset a window starts
+    at, with the file's inode. 0, with no inode, for a file that does not
+    exist."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return LogMark(0)
+    return LogMark(st.st_size, st.st_ino)
+
+
+def _whole(path):
+    """A file's bytes, gunzipped when its name ends in .gz, or None."""
+    try:
+        if path.endswith(".gz"):
+            with gzip.open(path, "rb") as f:
+                return f.read()
+        with open(path, "rb") as f:
+            return f.read()
+    except (OSError, EOFError, zlib.error):
+        return None
+
+
+def log_window(path, offset):
+    """The text written to a log since `offset` (a LogMark, or a plain
+    offset), or None when the window cannot be read. The logs rotate by
+    rename (forgefirm.logrotate: logrotate renames the file, creates a new
+    one, then compresses the old one to .1.gz). The log rotated inside the
+    window when the live file is not the one the mark was taken on (another
+    inode) or is shorter than the offset: the window is then the rotated
+    file from the offset (.1, or .1.gz once compressed) and the live file
+    whole. A window that reaches neither (no rotated file as long as the
+    offset, a file that cannot be read, a live file that is not there)
+    cannot be read, and a check of a line's absence has nothing to judge
+    on. A plain offset carries no inode: only a shorter live file shows its
+    rotation."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    size = st.st_size
+    ino = getattr(offset, "ino", None)
+    if size >= offset and (ino is None or st.st_ino == ino):
+        try:
+            with open(path, "rb") as f:
+                f.seek(offset)
+                return f.read().decode("utf-8", "replace")
+        except OSError:
+            return None
+    old = None
+    for rotated in (path + ".1", path + ".1.gz"):
+        data = _whole(rotated)
+        if data is not None and len(data) >= offset:
+            old = data[offset:]
+            break
+    live = _whole(path)
+    if old is None or live is None:
+        return None
+    return (old + live).decode("utf-8", "replace")
 
 
 # --------------------------------------------------------------- init.d
@@ -658,9 +790,16 @@ class Grbl:
         self.sock.sendall(data)
 
     def command(self, line, timeout=None):
-        """Send one line, return the response lines up to ok/error."""
+        """Send one line, return the response lines up to ok/error. A line
+        answered with neither in time (the reply lost, the connection
+        closed) raises HwError: the lines collected so far are no answer,
+        and a caller looking for an error line would read them as
+        accepted."""
         self.send_raw((line.strip() + "\n").encode())
-        return self.wait_response(timeout or self.timeout)
+        lines = self.wait_response(timeout or self.timeout)
+        if not lines or not (lines[-1] == "ok" or lines[-1].startswith("error:")):
+            raise HwError("grbl: no ok or error: for %r (got %r)" % (line.strip(), lines))
+        return lines
 
     def wait_response(self, timeout):
         deadline = time.time() + timeout

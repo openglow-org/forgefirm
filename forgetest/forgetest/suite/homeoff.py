@@ -16,13 +16,18 @@ controller start zero them again.
 import re
 import sys
 
-from ..baseline import XY_STEPS_PER_MM, counter_frame, counter_steps_per_mm, read_position
+from .. import hw
+from ..baseline import RETURN_MAX_MM, XY_STEPS_PER_MM, counter_frame, counter_steps_per_mm, read_position
 from ..runner import Failed
 from . import cloud as logs     # the log paths, read at each call
-from .cloud import log_lines_since, log_size
-from .motion import _drop_reference, clean_slate, machine_idle, wait_idle
+from .cloud import log_size
+from .motion import _drop_reference, _program_total, clean_slate, machine_idle, ran, wait_idle
 
-RETURN_MAX_MM = 600.0       # no hand-back jogs farther on an axis: the bed is smaller
+# The hand-back's jog runs on a controller with no reference and so no
+# soft limits, from a travel read out of log lines: it is bounded as the
+# baseline's own return is (RETURN_MAX_MM on an axis, beyond which the
+# head is left where it stands and the run fails), at the baseline's feed.
+RETURN_FEED = 1200
 # The client's own record of a motion's end: the kernel counters, which
 # the motion zeroed at its start (the "(actual/expected)" line of the same
 # motion is not this one). A print's park keeps the counters and drives
@@ -45,13 +50,15 @@ def session_travel(offset, path=None):
     the steps are x8 steps. A motion refused before it moved logs no end
     and moved nothing; a motion with no "end motion" (one that raised after
     it moved, or a client killed inside it) leaves the travel unknown, and
-    so does a log rotated under the run."""
+    so does a log window that cannot be read (rotated under the run with
+    the rotated file gone, or unreadable): no line read is no travel known."""
     path = path or logs.GFHOME_LOG
-    if log_size(path) < offset:
+    text = hw.log_window(path, offset)
+    if text is None:
         return None
     x = y = 0
     inside, end = False, None
-    for ln in log_lines_since(path, offset):
+    for ln in text.splitlines():
         ln = ln.rstrip()
         m = MOTION_END.search(ln)
         if ln.endswith(" start motion"):
@@ -71,8 +78,10 @@ def judge_whole_motions(ctx, ev, offset):
     """Every service motion of the homing session since offset ran whole.
     One that stopped short (the cooling engine's stop, a fault) left the
     head short of the camera home, and the position declared there is
-    false."""
-    short = [ln.strip()[:160] for ln in log_lines_since(logs.GFHOME_LOG, offset)
+    false. A log window that cannot be read fails it: no line read shows
+    no motion whole."""
+    lines = logs.window_lines(ctx, logs.GFHOME_LOG, offset, "that every service motion of the homing ran whole")
+    short = [ln.strip()[:160] for ln in lines
              if "run stopped short" in ln
              or ("_finish_action motion [" in ln and 'event ":completed"' not in ln)]
     ev["short_motions"] = short
@@ -148,15 +157,17 @@ def _jog_back(ctx, rec, travel, since):
     rec["mm"] = [round(dx, 3), round(dy, 3)]
     ctx.log("the head is %.3f/%.3f mm from where the test found it", dx, dy)
     ctx.check(abs(dx) <= RETURN_MAX_MM and abs(dy) <= RETURN_MAX_MM,
-              "a travel of %.1f/%.1f mm exceeds %.0f mm - not jogging back", dx, dy, RETURN_MAX_MM)
+              "a travel of %.1f/%.1f mm exceeds %.0f mm - not jogging back: the head is left where it "
+              "stands", dx, dy, RETURN_MAX_MM)
     if abs(dx) >= 0.05 or abs(dy) >= 0.05:
         with ctx.grbl() as g:
             clean_slate(ctx, g)
             start = read_position()
-            r = g.command("$J=G91 G21 X%.3f Y%.3f F2400" % (-dx, -dy))
+            mark = _program_total()     # a return of a few tenths can reach the kernel whole at once
+            r = g.command("$J=G91 G21 X%.3f Y%.3f F%d" % (-dx, -dy, RETURN_FEED))
             ctx.check(not any(x.startswith("error") for x in r), "the return jog was refused: %s", r)
-            states = wait_idle(ctx, g, timeout=60)[1]
-            ctx.check(states[-1:] != ["TIMEOUT"], "the return jog did not end: %s", states)
+            states = wait_idle(ctx, g, timeout=60, since=mark)[1]
+            ctx.check(ran(states), "the return jog did not run to its end: %s", states)
         machine_idle(ctx)
         end = read_position()
         rec["counters_across_jog"] = [start, end]

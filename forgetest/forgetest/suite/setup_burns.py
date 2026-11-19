@@ -127,18 +127,42 @@ def home_offset_remedy(ctx):
             "($ME), not with Set home here, before the burn" % (raw[0] or "blank", raw[1] or "blank"))
 
 
+def referenced(status):
+    """X and Y referenced by a manual home, as /status reports them."""
+    axes = (status or {}).get("homed_axes")
+    return isinstance(axes, int) and (axes & 3) == 3 and (status or {}).get("home_source") == "manual"
+
+
+def head_referenced():
+    """Precheck: the head's place can be judged before the burn. The burn
+    draws twelve lit lines from wherever the head stands, and only a manual
+    home that references X and Y places the head against the gantry stops;
+    a controller started since then has dropped that reference. The test
+    cannot make the home: it needs the head pushed against the stops."""
+    try:
+        st = hw.Forgectrl().status()
+    except hw.HwError as e:
+        return "forgectrl unreachable: %s" % e
+    if not referenced(st):
+        return ("X and Y are not referenced by a manual home (homed_axes %s, home_source %s): the head's "
+                "place against the gantry stops cannot be judged before a lit burn"
+                % (st.get("homed_axes"), st.get("home_source")))
+    return None
+
+
 def head_at_home(ctx):
     """The head's place on record before the wizard starts, read from
     /status under the campaign's own controller: the wizard restarts the
     controller before its home prompt, and a fresh controller drops the
-    X/Y reference, so a read at that prompt places nothing. When X and Y
-    are referenced by a manual home, the head is judged within
-    HOME_TOL_MM against the gantry stops, where the wizard draws from,
-    as that home declared them (anchor_stops): X0 Y0 for a home with no
-    offset, and minus manual_home_x and manual_home_y for a home made
-    with them, which moves the head to X0 Y0, that far in front of the
-    stops. Unreferenced, the head's place rests on the operator's word
-    at the ready gate, and the record says so."""
+    X/Y reference, so a read at that prompt places nothing. X and Y must
+    be referenced by a manual home (the precheck asks the same at the
+    start; a controller started since then dropped it), and the head is
+    judged within HOME_TOL_MM against the gantry stops, where the wizard
+    draws from, as that home declared them (anchor_stops): X0 Y0 for a
+    home with no offset, and minus manual_home_x and manual_home_y for a
+    home made with them, which moves the head to X0 Y0, that far in front
+    of the stops. Unreferenced, nothing starts: the burn is lit, and the
+    head's place is the machine's to show."""
     fc = ctx.forgectrl
     read = {}
 
@@ -154,13 +178,12 @@ def head_at_home(ctx):
     pos = read.get("pos") or {}
     axes = read.get("homed_axes")
     source = read.get("home_source")
-    referenced = isinstance(axes, int) and (axes & 3) == 3 and source == "manual"
+    judged = referenced(read)
     rec = ctx.evidence["head_at_start"] = {"pos": pos, "homed_axes": axes, "home_source": source,
-                                           "judged": referenced}
-    if not referenced:
-        ctx.log("the head's place rests on the operator's word at the ready gate (X and Y unreferenced: "
-                "homed_axes %s, home_source %s, pos %s)", axes, source, pos)
-        return
+                                           "judged": judged}
+    ctx.check(judged, "X and Y are not referenced by a manual home (homed_axes %s, home_source %s, pos %s): "
+              "the head's place against the gantry stops cannot be judged, and the burn is not started",
+              axes, source, pos)
     found = anchor_stops()
     ctx.check(found is not None, "the home anchor (%s) does not read as the manual home /status reports: the "
               "gantry stops cannot be placed before the burn", baseline.ANCHOR_PATH)
@@ -351,11 +374,14 @@ def focus_window_ok(ctx, r, before):
 
 
 @test("setup.focus", title="The focus burn: the ladder in the lens window, and the edge it writes",
-      subsystem="setup", kind="live", hardware="takeover", mode="grbl", est_min=10,
+      subsystem="setup", kind="live", mode="grbl", est_min=10,
       covers=BURN_COVERS,
       requires=["forgectrl.auth", "setup.check-motion", "laser.emission-witness", "setup.check-lens"],
-      actions=["button"], hands=["scrap"],
-      steps=["The gantry stops installed and the head at its home against them. A fresh flat scrap "
+      actions=["button"], hands=["scrap"], precheck=head_referenced,
+      steps=["The gantry stops installed and the head at its home against them, referenced by a manual "
+             "home (the test does not start without one). Start this test on its own right after the "
+             "manual home: a test before it in a queue that restarts the controller drops the home. "
+             "A fresh flat scrap "
              "of wood about 3 mm (1/8 in) thick and at least 78 x 68 mm (3.1 x 2.7 in), pushed into "
              "the back-left corner of the cut area: as far left as it goes, its top edge at the top "
              "of the cut area; lid closed. Eye protection on, exhaust on, extinguisher in reach.",
@@ -365,11 +391,11 @@ def focus_window_ok(ctx, r, before):
              "the button again at the arm, as the page asks.",
              "Nothing else: the test answers every prompt itself and puts back the setting the "
              "burn writes."],
-      description="The focus burn as a fresh head runs it. Before anything starts, the head's "
-                  "place is read from /status and recorded: judged against the gantry stops when "
-                  "a manual home references X and Y (where that home declared them: X0 Y0, or "
-                  "minus the manual_home_x and manual_home_y it read), else left to the "
-                  "operator's word at the ready gate. The "
+      description="The focus burn as a fresh head runs it. It starts only with X and Y referenced "
+                  "by a manual home, and before anything starts the head's place is read from "
+                  "/status, recorded, and judged against the gantry stops (where that home declared "
+                  "them: X0 Y0, or minus the manual_home_x and manual_home_y it read); a head that "
+                  "is unreferenced by then, or off the stops, fails before any start. The "
                   "edge setting is cleared, so the burn starts from the bench reference's edge, "
                   "while the lens window stays the one the Lens travel check wrote (or the "
                   "fallback). POST "

@@ -183,7 +183,7 @@ def check_switches(ctx):
 
 
 @test("setup.check-airflow", title="The airflow check measures the fans and sets the floors",
-      subsystem="setup", kind="auto", hardware="takeover", est_min=3,
+      subsystem="setup", kind="auto", est_min=3,
       covers=DARK_COVERS + [("forgectrl", "src/cool.c"), ("forgectrl", "src/airflow.*"),
                             ("forgectrl", "src/gates.c"), ("forgectrl", "src/super.c")],
       requires=["forgectrl.auth"], precheck=intakes_counted,
@@ -270,7 +270,7 @@ def check_airflow(ctx):
 
 
 @test("setup.check-motion", title="The motion check proves the rail, the lens reference, and the jogs",
-      subsystem="setup", kind="auto", hardware="takeover", est_min=5,
+      subsystem="setup", kind="auto", est_min=5,
       covers=DARK_COVERS + [("forgectrl", "src/super.c"), ("forgectrl", "src/liveness.c"),
                             ("forgectrl", "src/lenshome.*"),
                             ("forgectrl", "src/accel.c"), ("forgectrl", "src/cool.c")],
@@ -281,8 +281,9 @@ def check_airflow(ctx):
                   "finds the hall reference in five agreeing passes, the controller comes back in "
                   "loopback posture, and the head jogs 50 mm each way on X and Y with the "
                   "accelerometer as the witness. The one prompt (the jogs are about to move) is "
-                  "answered Continue. The result carries the probe line, the passes, and a "
-                  "witnessed reading for each jog; the controller must be back in its normal "
+                  "answered Continue. The result carries the probe line, whose head-accel p2p must "
+                  "reach the moving threshold (the reading judged, not the probe's word), the "
+                  "passes, and a witnessed reading for each jog; the controller must be back in its normal "
                   "posture, and the kernel position counters must read what they read before: "
                   "every move played to its end (the probe's return leg under the cooling "
                   "engine's dead-man, the last jog under the controller stop).")
@@ -293,6 +294,9 @@ def check_motion(ctx):
     last = run_check(ctx, "motion", lambda p: "Continue" if p.get("id") == "jogs" else None, 420)
     ctx.clear_notice()
     r = last.get("result") or {}
+    ctx.check(hw.probe_moved(r.get("probe")) is True,
+              "the probe reported a head-accel p2p of %s, under the moving threshold %d (or none): '%s'",
+              hw.probe_p2p(r.get("probe")), hw.ACCEL_P2P_MOVING, r.get("probe"))
     ctx.check(r.get("z_referenced") is True, "the lens was not referenced: %s", r)
     ctx.check(len(r.get("z_passes") or []) == 5, "not five reference passes: %s", r.get("z_passes"))
     moves = r.get("moves") or {}
@@ -311,7 +315,7 @@ def check_motion(ctx):
 
 
 @test("setup.check-lens", title="The lens travel check finds the stops and writes the window",
-      subsystem="setup", kind="auto", hardware="takeover", est_min=4,
+      subsystem="setup", kind="auto", est_min=4,
       covers=DARK_COVERS + [("forgectrl", "src/lensfind.*"), ("forgectrl", "src/lens.*"),
                             ("forgectrl", "src/lenshome.*"), ("forgectrl", "src/accel.c"),
                             ("forgectrl", "src/cool.c"), ("forgectrl", "src/super.c")],
@@ -410,7 +414,7 @@ def check_lens(ctx):
 
 
 @test("setup.cloud-header-capture", title="The cloud header check takes one print's envelope",
-      subsystem="setup", kind="operator", hardware="takeover", mode="grbl", est_min=8,
+      subsystem="setup", kind="operator", mode="grbl", est_min=8,
       covers=DARK_COVERS + [("forgectrl", "src/super.c"),
                             ("python3-gfhardware", "gfhardware/machine.py"),
                             ("python3-gfhardware", "forgefirm-app/gfcloud.py"),
@@ -434,7 +438,9 @@ def cloud_header_capture(ctx):
     with Restore(ctx, ["cloud_enabled", "homing_mode", "controller_mode"]):
         s = fc.settings() or {}
         if s.get("cloud_enabled") != "1":
-            st, body = fc.post("/settings", data={"cloud_enabled": "1"})
+            # from off, forgectrl takes cloud_enabled=1 only with the typed
+            # phrase the cloud step asks for
+            st, body = fc.post("/settings", data={"cloud_enabled": "1", "phrase": hw.CLOUD_PHRASE})
             ctx.check(st == 200, "cloud_enabled=1 -> %s %s", st, body)
             ctx.log("cloud mode turned on for the test")
         ctx.notice("Print any small design from the Glowforge app once it shows the machine "

@@ -11,10 +11,40 @@ from ..catalog import test
 # The write guard reads the account and the session store (a machine with
 # an account needs a session from the LAN; this host and the dev image
 # write with the token), so both are the guard's domain. The fuse view
-# is two-factor: the token and the physical button, read by button.c.
+# is two-factor: the token and the physical button, read by button.c. The
+# report channel's secret is the supervisor's, handed to the controller
+# at its spawn, and the reports it lets through are the cooling engine's
+# to keep (its report age).
 _COVERS_AUTH = [("forgectrl", "src/auth.*"), ("forgectrl", "src/peer.*"), ("forgectrl", "src/main.c"),
                 ("forgectrl", "src/session.*"), ("forgectrl", "src/users.*"), ("forgectrl", "src/button.*"),
-                ("forgectrl", "src/ui/login.*"), ("forgectrl", "src/ui/wizard.js")]
+                ("forgectrl", "src/ui/login.*"), ("forgectrl", "src/ui/wizard.js"),
+                ("forgectrl", "src/super.c"), ("forgectrl", "src/cool.*"), ("forgectrl", "src/coolfmt.*")]
+
+
+# The running controller reports to the cooling engine once a second
+# (glowforge_cooling.c, REPORT_PERIOD_MS); the engine's report age is the
+# seconds since the last report it took (-1 with none since a stop).
+REPORT_PERIOD_S = 1.0
+REPORT_FRESH_S = 3.0
+REPORT_READS = 3
+
+
+def reports_arriving(ctx, fc, reads=REPORT_READS, apart=2 * REPORT_PERIOD_S):
+    """The engine's report age read `reads` times, `apart` seconds apart:
+    each must be fresh (0 to REPORT_FRESH_S), which only the controller's
+    own secret-bearing reports keep it. Returns the ages."""
+    ages = []
+    for i in range(reads):
+        if i:
+            ctx.sleep(apart)
+        st, cs = fc.get("/cool/status")
+        age = cs.get("report_age_s") if st == 200 and isinstance(cs, dict) else None
+        ages.append(age)
+        ctx.check(isinstance(age, (int, float)) and 0 <= age <= REPORT_FRESH_S,
+                  "the cooling engine's report age reads %s (reads %s): the running controller's own "
+                  "reports do not reach the engine", age, ages)
+    ctx.log("the engine's report age across %d reads %.0f s apart: %s", reads, apart, ages)
+    return ages
 
 
 def lan_ip():
@@ -39,12 +69,17 @@ def lan_ip():
                   "return, the SSH switch and the wizard's own routes included); a non-literal "
                   "Host, a non-literal Origin and a cross-site Sec-Fetch-Site are refused, while "
                   "the machine's own hostname passes and that name with a domain on it does not; "
-                  "the cooling report channel accepts the loopback peer and refuses a non-loopback "
-                  "one (over HTTP the write is sent to HTTPS first, 302; over HTTPS the route "
-                  "answers 403 loopback only); the fuse view is two-factor "
+                  "the cooling report channel refuses a loopback report without the running "
+                  "controller's secret or with another, while the controller's own reports keep "
+                  "the engine's report age fresh, and refuses a non-loopback peer (over HTTP the "
+                  "write is sent to HTTPS first, 302; over HTTPS the route answers 403 loopback "
+                  "only); the fuse view is two-factor "
                   "(token and the physical button) and refused without either; "
                   "the flash and factory-restore chain is refused unauthenticated; a page "
-                  "asked for without a session is sent to the login carrying its path.")
+                  "asked for without a session is sent to the login carrying its path. It runs on "
+                  "the machine because what it proves is the booted daemon's listeners as they "
+                  "face the network: the real TLS listener and its redirect, the board's own "
+                  "hostname and LAN address, and the physical button behind the fuse view.")
 def auth(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -154,36 +189,23 @@ def auth(ctx):
               "/cool/state from loopback without the secret -> %s %r", st, body)
     st, body = fc.post("/cool/state", params=report, headers={"X-ForgeFIRM-Report": "0" * 32})
     ctx.check(st == 403, "/cool/state with a secret that is not the controller's -> %s %r", st, body)
-    # The secret itself, as only root on this host can read it: out of
-    # the running controller's environment. It is never logged.
-    secret = None
-    pid = (fc.get("/mode")[1] or {}).get("pid")
-    if pid:
-        try:
-            with open("/proc/%d/environ" % int(pid), "rb") as f:
-                for item in f.read().split(b"\0"):
-                    if item.startswith(b"GF_REPORT_SECRET="):
-                        secret = item.split(b"=", 1)[1].decode("ascii", "replace")
-        except OSError:
-            pass
-    ev["controller_has_a_secret"] = bool(secret)
-    ctx.check(secret and len(secret) == 32, "the running controller (pid %s) was handed no report secret", pid)
-    st, body = fc.post("/cool/state", params=report, headers={"X-ForgeFIRM-Report": secret})
-    ev["cool_state_from_loopback"] = st
-    ctx.log("POST /cool/state from loopback with the controller's secret -> %s", st)
-    ctx.check(st == 200, "/cool/state refused the controller's own secret (%s %r): the controller's "
-              "reports never reach the engine", st, body)
+    # The running controller's own reports, which carry its secret, reach
+    # the engine: the engine's report age stays fresh across reads a few
+    # report periods apart, with the refused reports above changing nothing.
+    # The secret itself is read nowhere.
+    ages = reports_arriving(ctx, fc)
+    ev["report_age_s"] = ages
 
     # ...and a non-loopback peer is refused, even with a token. Over HTTP
     # the write is sent to HTTPS first (302, the listener's rule); over
-    # HTTPS the route itself refuses the peer (403 loopback only). Neither
-    # request follows the redirect, and the self-signed certificate is
-    # not verified.
+    # HTTPS the route itself refuses the peer (403 loopback only), before
+    # it reads any secret. Neither request follows the redirect, and the
+    # self-signed certificate is not verified.
     from .setup import request, decode
     ip = lan_ip()
     ev["lan_ip"] = ip
     ctx.check(ip, "cannot determine the board's LAN address")
-    token = {"X-ForgeFIRM-Token": fc.token, "X-ForgeFIRM-Report": secret}
+    token = {"X-ForgeFIRM-Token": fc.token, "X-ForgeFIRM-Report": "0" * 32}
     st, body, hdrs = request("http://%s" % ip, "POST", "/cool/state", data=report, headers=token)
     loc = hdrs.get("location", "")
     ev["cool_state_from_lan_http"] = {"status": st, "location": loc}

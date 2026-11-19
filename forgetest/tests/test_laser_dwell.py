@@ -13,9 +13,12 @@ read-gap verdict over the dark stretch after the M5: a sample whose
 daemon did not serve before the sampling stopped is a gap too, and a
 stretch with a kernel window unread fails the rule; the sampling runs on
 past the close; and the head's reports place the rapid inside the armed
-window only."""
+window only. And the armed kill's expected stop judged on the latch as the
+stop's answer left it."""
 import unittest
 
+import helpers
+from forgetest.runner import Failed
 from forgetest.suite import laser
 
 
@@ -72,6 +75,29 @@ def covered(r):
     """The rule emission_witness applies to read_gaps' report."""
     return (r["read"] >= laser.RAPID_MIN_READS and r["gap_max_s"] is not None
             and r["gap_max_s"] <= laser.EMISSION_READ_GAP_S)
+
+
+class ExpectedStopTests(unittest.TestCase):
+    """laser.armed-kill's expected stop: the latch is judged as sysfs read
+    it the moment the stop answered, before the restart or the hand-back
+    could relock it."""
+
+    STOPPED = {"post_status": 200, "zero_at_s": 0.4, "tail_zero": True, "kernel_not_running": True}
+
+    def test_a_stop_that_left_the_latch_unlocked_fails(self):
+        ctx = helpers.JudgeCtx()
+        laser.judge_expected_stop(ctx, dict(self.STOPPED, interlock_circuit_at_stop=45))     # locked
+        for ilk in (37, None):                       # unlocked; unreadable
+            with self.assertRaises(Failed):
+                laser.judge_expected_stop(ctx, dict(self.STOPPED, interlock_circuit_at_stop=ilk))
+
+    def test_a_stop_judged_on_each_of_its_witnesses(self):
+        # the latch locked, and one witness short at a time
+        for short in ({"post_status": 500}, {"zero_at_s": 2.6}, {"zero_at_s": None},
+                      {"tail_zero": False}, {"kernel_not_running": False}):
+            with self.subTest(short=short), self.assertRaises(Failed):
+                laser.judge_expected_stop(helpers.JudgeCtx(),
+                                          dict(self.STOPPED, interlock_circuit_at_stop=45, **short))
 
 
 class RapidReadTests(unittest.TestCase):

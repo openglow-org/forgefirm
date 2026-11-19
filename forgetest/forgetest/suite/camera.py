@@ -305,10 +305,9 @@ def sensor_profile(ctx):
       description="/cam/h264 answers a fragmented MP4: a codec header naming the SPS profile, an "
                   "init segment (ftyp+moov) followed by media fragments (moof+mdat) within a few "
                   "seconds, and /cam/status reporting the H.264 encoder active with this client "
-                  "counted. Also records which demosaic path (GPU or CPU) served the stream. On a "
-                  "machine whose image lacks Mesa or whose encoder refused, the endpoint must "
-                  "answer 503 rather than hang - that is a pass for the endpoint but is recorded "
-                  "in the evidence.")
+                  "counted. Also records which demosaic path (GPU or CPU) served the stream. The "
+                  "image ships the encoder, so a 503 (no Mesa, or an encoder that refused) fails "
+                  "the test, with the endpoint's answer in the evidence.")
 def h264_stream(ctx):
     import urllib.error
     import urllib.request
@@ -323,9 +322,7 @@ def h264_stream(ctx):
     except urllib.error.HTTPError as e:
         ev["status"] = e.code
         ev["body"] = e.read()[:200].decode("utf-8", "replace")
-        ctx.check(e.code == 503, "H.264 refused with %s, not 503: %s", e.code, ev["body"])
-        ctx.log("H.264 unavailable on this machine (503): %s", ev["body"])
-        return
+        ctx.fail("H.264 refused with %s: %s", e.code, ev["body"])
     with r:
         codec = r.headers.get("X-H264-Codec", "")
         ctype = r.headers.get("Content-Type", "")

@@ -11,6 +11,7 @@ and round-trip; the laser stays latched (the tests never touch it); the
 suite is the only Grbl client while a test runs.
 """
 import contextlib
+import datetime
 import json
 import os
 import signal
@@ -65,14 +66,37 @@ def wait_state(ctx, g, prefix, timeout):
     return None
 
 
-def wait_idle(ctx, g, timeout=30.0, poll=0.05, grace=0.3):
-    """Poll until Idle; returns (peak_feed_mm_min, states_seen, final_report).
-    An Idle report inside the first `grace` seconds counts only once a
-    non-Idle state was seen: a move just commanded may not have started."""
+# How long a move just commanded has to show that it started before the
+# wait gives up on it.
+START_S = 5.0
+
+
+def _program_total():
+    """The bytes the kernel has been handed (cnc/position), or None."""
+    try:
+        return _kernel_position()[4]
+    except (OSError, struct.error):
+        return None
+
+
+def wait_idle(ctx, g, timeout=30.0, poll=0.05, start_s=START_S, since=None):
+    """Poll until the move just commanded has run and the controller is
+    Idle; returns (peak_feed_mm_min, states_seen, final_report). An Idle
+    counts only once the move was seen started: a report in any state but
+    Idle, or the kernel handed bytes since the wait began (the program
+    total, which a tail of the move before this one still playing does not
+    move). A move not seen started within start_s ends the wait with
+    NOSTART last in the states, and one not back at Idle within timeout
+    with TIMEOUT: ran() is False for both. `since` is the program total
+    read before the move was sent: a move short enough to reach the kernel
+    whole before the wait begins moved the total since then. Without it
+    the total is read as the wait begins."""
     peak = 0.0
     states = []
     t0 = time.time()
     deadline = t0 + timeout
+    total0 = since if since is not None else _program_total()
+    started = False
     st = None
     while time.time() < deadline:
         ctx.checkpoint()
@@ -86,10 +110,22 @@ def wait_idle(ctx, g, timeout=30.0, poll=0.05, grace=0.3):
                 peak = max(peak, float(str(f).split(",")[0]))
             except ValueError:
                 pass
-        if state.startswith("Idle") and (time.time() - t0 >= grace or len(states) > 1):
+        if not state.startswith("Idle"):
+            started = True
+        elif not started:
+            total = _program_total()
+            started = total0 is not None and total is not None and total != total0
+        if state.startswith("Idle") and started:
             return peak, states, st
+        if not started and time.time() - t0 >= start_s:
+            return peak, states + ["NOSTART"], st
         time.sleep(poll)
     return peak, states + ["TIMEOUT"], st
+
+
+def ran(states):
+    """The move a wait_idle followed started and came back to Idle."""
+    return states[-1:] not in (["TIMEOUT"], ["NOSTART"])
 
 
 def machine_idle(ctx, timeout=15.0):
@@ -173,7 +209,7 @@ def pacing(ctx):
 
         g.realtime(ord("~"))                 # resume
         peak, states, st = wait_idle(ctx, g, 30)
-        ctx.check("TIMEOUT" not in states, "did not return to Idle after the resume: %s", states)
+        ctx.check(ran(states), "did not run to Idle after the resume: %s", states)
         end = st.get("MPos")
         moved = end[0] - start[0]
         ev["moved_mm"] = round(moved, 3)
@@ -210,7 +246,9 @@ def pacing(ctx):
                   "the kernel's X counter to its start within a step. "
                   "No jog refused, every move returns to Idle, position drift within 0.05 mm, and "
                   "the head accelerometer - the supervisor's own motion witness - saw the head move "
-                  "on every jog it could sample; the counters alone are not proof of motion.")
+                  "over the jogs, on at least two of the eight legs (a sysfs read lands two or three "
+                  "samples in a leg, so one leg alone can miss it); the counters alone are not proof "
+                  "of motion.")
 def jog_roundtrip(ctx):
     ev = ctx.evidence
 
@@ -321,7 +359,7 @@ def jog_roundtrip(ctx):
             r = g.command("$J=G91X%.3fF3000" % -dx)
             ctx.check(not any(x.startswith("error") for x in r), "the jog back was refused: %s", r)
             _, states, _ = wait_idle(ctx, g)
-            ctx.check("TIMEOUT" not in states, "the jog back did not return to Idle")
+            ctx.check(ran(states), "the jog back did not run to Idle: %s", states)
         machine_idle(ctx)
         p2 = _kernel_position()
         under1, faults1 = hw.sysfs_int("cnc/underruns"), hw.sysfs_read("cnc/faults")
@@ -452,7 +490,7 @@ def jog_roundtrip(ctx):
                         name, leg, peak, states, p2px, p2py, n)
                 moves.append({"name": name, "leg": leg, "peak": peak, "states": states,
                               "accel_p2p": [p2px, p2py], "accel_samples": n, "t0": t0, "t1": t1})
-                ctx.check("TIMEOUT" not in states, "%s %s did not return to Idle", name, leg)
+                ctx.check(ran(states), "%s %s did not run to Idle: %s", name, leg, states)
         ev["moves"] = moves
         # The witness sees the ramps, not the travel: a sysfs read lands
         # two or three samples in a one-second leg, and two samples on
@@ -462,14 +500,14 @@ def jog_roundtrip(ctx):
         # sequence: the head moved during the jogs (p2p over all the
         # legs), and on more than one of them, never one leg alone.
         p2px, p2py, n = accel.p2p(moves[0]["t0"], moves[-1]["t1"])
-        moving = [m for m in moves if max(m["accel_p2p"]) >= hw.ACCEL_P2P_MOVING]
+        moving = [m for m in moves if accel.moved(m["t0"], m["t1"])]
         ev["accel_overall"] = {"p2p": [p2px, p2py], "samples": n, "errors": accel.errors}
         ev["accel_moving_legs"] = [m["name"] + " " + m["leg"] for m in moving]
         ctx.log("accel over all %d legs: p2p x=%d y=%d (%d samples, %d errors); motion seen on %d legs",
                 len(moves), p2px, p2py, n, accel.errors, len(moving))
         ctx.check(n >= 8, "the accelerometer landed only %d samples over the jogs (%d read errors): "
                   "the motion witness is not reading", n, accel.errors)
-        ctx.check(max(p2px, p2py) >= hw.ACCEL_P2P_MOVING,
+        ctx.check(accel.moved(moves[0]["t0"], moves[-1]["t1"]),
                   "the head did not move during the jogs (accel p2p x=%d y=%d, below %d): the counters "
                   "ran without the gantry", p2px, p2py, hw.ACCEL_P2P_MOVING)
         ctx.check(len(moving) >= 2, "the accelerometer saw motion on only %d leg(s) of %d (one jolt is "
@@ -613,7 +651,7 @@ def microstep_modes(ctx):
                 rr = g.command("$J=G91X40F12000")
                 ctx.check(not any(x.startswith("error") for x in rr), "x%d: jog refused: %s", mode, rr)
                 peak, states, _ = wait_idle(ctx, g, 30)
-                ctx.check("TIMEOUT" not in states, "x%d: the jog out did not return to Idle: %s", mode, states)
+                ctx.check(ran(states), "x%d: the jog out did not run to Idle: %s", mode, states)
                 # grblHAL's Idle leads the kernel by the stream depth and
                 # the decel tail: the counters are read once the machine
                 # itself is idle.
@@ -627,7 +665,7 @@ def microstep_modes(ctx):
                 rr = g.command("$J=G91X-40F12000")
                 ctx.check(not any(x.startswith("error") for x in rr), "x%d: jog back refused: %s", mode, rr)
                 peak2, states, _ = wait_idle(ctx, g, 30)
-                ctx.check("TIMEOUT" not in states, "x%d: the jog back did not return to Idle: %s", mode, states)
+                ctx.check(ran(states), "x%d: the jog back did not run to Idle: %s", mode, states)
                 machine_idle(ctx)
                 t1 = time.time()
                 final = g.status_report()["MPos"]
@@ -640,7 +678,7 @@ def microstep_modes(ctx):
                 ctx.check(drift <= 0.05, "x%d: position drift %.3f mm", mode, drift)
                 ctx.check(max(peak, peak2) >= 6000, "x%d: the jog peaked at only %.0f mm/min", mode,
                           max(peak, peak2))
-                ctx.check(max(p2px, p2py) >= hw.ACCEL_P2P_MOVING,
+                ctx.check(accel.moved(t0, t1),
                           "x%d: the head did not move during the jog (accel p2p x=%d y=%d, below %d): "
                           "the counters ran without the gantry", mode, p2px, p2py, hw.ACCEL_P2P_MOVING)
             machine_idle(ctx)
@@ -670,8 +708,11 @@ def microstep_modes(ctx):
                   "probe was skipped at spawn, the controller is respawned once so it runs. Then "
                   "the regression: with every axis masked (cnc/motor_lock=15, as a bench tool "
                   "may leave it) forgectrl is restarted and its fresh probe must still read "
-                  "MOTION OK - the probe unmasks the axes itself - with the head-accel p2p at "
-                  "or above the moving threshold.")
+                  "MOTION OK - the probe unmasks the axes itself - with the head-accel p2p its "
+                  "line reports at or above the moving threshold. The catalog reads that number, "
+                  "not only the word: the probe's own sysfs reads are the accelerometer's for the "
+                  "move, and a second reader beside them would halve the probe's samples, while a "
+                  "dead verdict at a controller start runs the rail-off ladder.")
 def liveness_probe(ctx):
     fc = ctx.forgectrl
     ev = ctx.evidence
@@ -710,20 +751,30 @@ FORGECTRL_LOG = "/data/log/forgefirm/forgectrl/forgectrl.log"
 
 
 def _log_offset(path):
-    try:
-        return os.path.getsize(path)
-    except OSError:
-        return 0
+    return hw.log_size(path)
+
+
+def _log_window_lines(path, offset, needle):
+    """The lines carrying needle written since offset, across a rotation
+    (hw.log_window), or None when that window cannot be read."""
+    text = hw.log_window(path, offset)
+    return None if text is None else [ln.strip() for ln in text.splitlines() if needle in ln]
 
 
 def _log_lines(path, offset, needle):
-    try:
-        with open(path, "rb") as f:
-            f.seek(offset)
-            data = f.read().decode("utf-8", "replace")
-    except OSError:
-        return []
-    return [ln.strip() for ln in data.splitlines() if needle in ln]
+    """As _log_window_lines, for a line the test waits to see: a window
+    that cannot be read shows nothing yet."""
+    return _log_window_lines(path, offset, needle) or []
+
+
+def _log_absent(ctx, path, offset, needle, what):
+    """The lines carrying needle since offset, for a check that none was
+    written: a window that cannot be read fails the test, since an absence
+    read on nothing shows nothing."""
+    lines = _log_window_lines(path, offset, needle)
+    ctx.check(lines is not None, "%s since the test's mark cannot be read (rotated away, or unreadable): "
+              "%s is not shown", path, what)
+    return lines
 
 
 def _probe_lines(path, offset):
@@ -765,6 +816,10 @@ def _liveness_masked_restart(ctx, fc, ev):
               "fresh probe under a leftover mask did not verify motion: %s", m)
     ctx.check(lines and "MOTION OK" in lines[0],
               "the first probe after the restart was not MOTION OK: %s", lines[:1])
+    ev["masked_restart"]["probe_p2p"] = hw.probe_p2p(lines[0])
+    ctx.check(hw.probe_moved(lines[0]) is True,
+              "the probe read MOTION OK on a head-accel p2p of %s, under the moving threshold %d (or none "
+              "at all): the verdict is not the reading", ev["masked_restart"]["probe_p2p"], hw.ACCEL_P2P_MOVING)
     ctx.check(len(lines) == 1, "the probe needed the recovery ladder (%d probes) - a false dead verdict", len(lines))
     ctx.check(ctx.sysfs("cnc/motor_lock") == "0", "motor_lock reads %s after the controller start (expected 0)",
               ctx.sysfs("cnc/motor_lock"))
@@ -811,12 +866,82 @@ def _return_x(ctx, delta_mm):
         st = g.status_report()["state"]
         if st.startswith("Alarm"):
             g.command("$X")
+        mark = _program_total()
         g.command("$J=G91X%.3fF1200" % (-delta_mm))
-        wait_idle(ctx, g, 30)
+        wait_idle(ctx, g, 30, since=mark)
     machine_idle(ctx)
 
 
 CONTROLLER_COMM = "grblHAL_glowfor"         # the controller's /proc comm (15 characters)
+# The window after a controller's kill in which the kernel is read: the
+# reap's stop ramps a run down in about a quarter second (the ramp at the
+# mode's tick), and a respawn comes no sooner than a second after the reap
+# (forgectrl's RESPAWN_MIN_S); over a standing underrun it waits up to ten
+# seconds (RESPAWN_IDLE_WAIT_S) before it respawns.
+KILL_SAFING_S = 1.0
+
+
+def _kill_safing(t0, seconds=KILL_SAFING_S):
+    """The kernel's state and the latch read every 5 ms from t0 (a
+    controller's kill) for `seconds`: when the kernel left running, every
+    state it showed, the state it reads at the end, and whether the latch
+    was ever not read locked (an unreadable read counts). The position
+    record is read once, when the kernel leaves running: the bytes it had
+    played and been handed, whose difference is what the run left
+    unplayed."""
+    left_at = left_pos = None
+    seen = []
+    unlocked = False
+    end = t0 + seconds
+    while time.time() < end:
+        st = hw.sysfs_read("cnc/state")
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        if ilk is None or not ilk & (1 << 3):
+            unlocked = True             # unreadable counts as not shown locked
+        if st is not None and (not seen or seen[-1] != st):
+            seen.append(st)
+        if left_at is None and st is not None and st != "running":
+            left_at = round(time.time() - t0, 3)
+            try:
+                left_pos = list(_kernel_position())
+            except (OSError, struct.error):
+                left_pos = None
+        time.sleep(0.005)
+    final = hw.sysfs_read("cnc/state")
+    return {"left_running_at_s": left_at, "states": seen, "state_at_end": final,
+            "position_at_stop": left_pos,
+            "unplayed_bytes": (left_pos[4] - left_pos[3]) if left_pos else None,
+            "latch_unlocked_seen": unlocked}
+
+
+def _kill_safed(safing, seconds=KILL_SAFING_S):
+    """Why a _kill_safing record does not show the kill safed, or None: the
+    kill landed on a running kernel (its first read is running), the
+    kernel left running inside the window, and the latch never read
+    unlocked. That the reap writes cnc/stop and locks the latch is
+    forgectrl's super_test, case A (a controller death is a signal). The
+    state the kernel ends the window in is recorded, not judged, since a
+    stop that lands later than the ring's bytes can cover its ramp (a
+    reap past about 75 ms) ends the run in an underrun that the stop does
+    not clear."""
+    first = safing["states"][:1]
+    if first != ["running"]:
+        return ("the kill did not land mid-move: the kernel read %s right after it"
+                % (first[0] if first else "nothing"))
+    if safing["left_running_at_s"] is None:
+        return "the kernel was still running %.1f s after the kill" % seconds
+    if safing["latch_unlocked_seen"]:
+        return "the latch read unlocked, or could not be read, within %.1f s of the kill" % seconds
+    return None
+
+
+def _line_epoch(line):
+    """The time of a log line, from its ISO stamp, as seconds since the
+    epoch, or None."""
+    try:
+        return datetime.datetime.fromisoformat(line.split(" ", 1)[0]).timestamp()
+    except (ValueError, IndexError, AttributeError):
+        return None
 
 
 @contextlib.contextmanager
@@ -866,11 +991,18 @@ def _energize_after(ctx, g, fc):
       subsystem="motion", kind="auto", mode="grbl", est_min=6,
       covers=_MOTION_COVERS + [("forgectrl", "src/main.c"), ("forgectrl", "init/**")],
       requires=["motion.pacing", "kernel.k1-k2"],
-      steps=["Bed clear; the head needs 40 mm of free +X travel and must not be at the left rail. "
-             "With cloud mode enabled the test also homes through the web service and kills the "
-             "controller mid-homing (about a minute); the head ends wherever the homing was."],
+      steps=["Bed clear; the head needs 40 mm of free +X travel and must not be at the left rail; "
+             "the machine on the network. The test also homes through the web service and kills the "
+             "controller mid-homing (about a minute); the head ends wherever the homing was. It turns "
+             "cloud mode on for that drill when it is off, and puts it back."],
       description="SIGKILL of the controller mid-move: the supervisor reaps it, safes (cnc/stop, "
-                  "latch relocked - it never unlocked), and respawns within seconds. SIGSTOP (a "
+                  "latch relocked - it never unlocked), and respawns within seconds. Read from "
+                  "sysfs every 5 ms for a second after the kill, the kernel was running at the kill, "
+                  "leaves running inside that second, and the latch never reads unlocked; the state "
+                  "it ends the second in, the bytes the run left unplayed and the reap's time (the "
+                  "supervisor's 'controller exited' line against the kill) are recorded. That the "
+                  "reap writes cnc/stop and locks the latch is forgectrl's host test (super_test, "
+                  "case A: a controller death is a signal). SIGSTOP (a "
                   "hang) mid-move: the ring drains into a kernel underrun (fast halt, latch "
                   "locked); the process resumed from the hang recovers on a soft reset and an unlock "
                   "(the alarm is critical, so $X alone is refused; the reset acknowledges the "
@@ -882,7 +1014,8 @@ def _energize_after(ctx, g, fc):
                   "forgectrl restart mid-move: the busy controller finishes the move unmanaged "
                   "and the new daemon retakes supervision at idle. After each drill the head is "
                   "jogged back by the kernel-measured distance. SIGKILL during $H (the web-service "
-                  "homing, with cloud mode enabled): the homing runner the controller left behind "
+                  "homing; cloud mode turned on for it with the phrase the cloud step asks for, when "
+                  "it is off, and put back): the homing runner the controller left behind "
                   "is ended before the respawn, the kernel is idle when the new controller starts, "
                   "and the pulse device has one controller on it.")
 def deadman(ctx):
@@ -912,16 +1045,18 @@ def deadman(ctx):
     ctx.check(m0, "controller not running")
     pid0 = m0["pid"]
     x0 = _kernel_x_mm(ctx)
-    unlocked_seen = False
+    log_kill = _log_offset(FORGECTRL_LOG)
     with ctx.grbl() as g:
         clean_slate(ctx, g)
         g.command("G91")
         g.command("G1X30F300", timeout=0.5)
         ctx.sleep(1.0)
+        t_kill = time.time()
         _os.kill(pid0, _signal.SIGKILL)
-        ctx.log("SIGKILL sent to controller pid %d mid-move", pid0)
-    t0 = time.time()
-    while time.time() - t0 < 15:
+        safing = _kill_safing(t_kill)
+        ctx.log("SIGKILL sent to controller pid %d mid-move; the kernel after it: %s", pid0, safing)
+    unlocked_seen = safing["latch_unlocked_seen"]
+    while time.time() - t_kill < 15:
         if not latch_locked():
             unlocked_seen = True
         st, m = fc.get("/mode")
@@ -929,9 +1064,19 @@ def deadman(ctx):
             break
         ctx.sleep(0.2)
     m1 = wait_running(30)
-    respawn_s = round(time.time() - t0, 1)
-    ev["sigkill"] = {"old_pid": pid0, "new": m1, "respawn_s": respawn_s, "unlocked_seen": unlocked_seen}
-    ctx.log("after SIGKILL: respawned as %s in %s s; latch unlocked seen: %s", m1, respawn_s, unlocked_seen)
+    respawn_s = round(time.time() - t_kill, 1)
+    # The reap's time, from the supervisor's own line against the kill:
+    # recorded, so the end state the window saw can be read against it.
+    exited = _log_lines(FORGECTRL_LOG, log_kill, "controller exited")
+    t_reap = _line_epoch(exited[0]) if exited else None
+    safing["reap_s"] = round(t_reap - t_kill, 3) if t_reap is not None else None
+    ev["sigkill"] = {"old_pid": pid0, "new": m1, "respawn_s": respawn_s, "unlocked_seen": unlocked_seen,
+                     "kernel": safing}
+    ctx.log("after SIGKILL: reaped %s s after the kill, the kernel at the window's end %s with %s bytes "
+            "unplayed; respawned as %s %s s after the kill; latch unlocked seen: %s", safing["reap_s"],
+            safing["state_at_end"], safing["unplayed_bytes"], m1, respawn_s, unlocked_seen)
+    why = _kill_safed(safing)
+    ctx.check(why is None, "%s", why)
     ctx.check(m1 and m1.get("pid") != pid0, "supervisor did not respawn the controller")
     ctx.check(not unlocked_seen, "the latch unlocked during the kill/respawn")
     ctx.check(m1.get("motion") != "fault", "motion fault after the respawn")
@@ -1002,7 +1147,7 @@ def deadman(ctx):
         g.command("$J=G91X-5F1200")
         peak, states, st = wait_idle(ctx, g, 15)
         ev["sigstop"]["recovery_states"] = states
-        ctx.check("TIMEOUT" not in states and not str((st or {}).get("state", "")).startswith("Alarm"),
+        ctx.check(ran(states) and not str((st or {}).get("state", "")).startswith("Alarm"),
                   "the controller did not move again after the reset and unlock (states %s)", states)
     ctx.check(kstate == "underrun", "the ring did not drain into a kernel underrun (state %s)", kstate)
     ctx.check(latch_locked(), "latch unlocked after the underrun")
@@ -1043,7 +1188,7 @@ def deadman(ctx):
                          "state_after": (st or {}).get("state")}
     ctx.log("short stall: states %s, underruns +%s, warning %r, kernel dx %s mm", states,
             ev["short_stall"]["underruns"], warned, ev["short_stall"]["kernel_dx_mm"])
-    ctx.check("TIMEOUT" not in states and str((st or {}).get("state", "")).startswith("Idle"),
+    ctx.check(ran(states) and str((st or {}).get("state", "")).startswith("Idle"),
               "the move did not complete after the short stall (states %s)", states)
     ctx.check(ev["short_stall"]["underruns"] == 0, "the short stall drained the ring (underruns +%s)",
               ev["short_stall"]["underruns"])
@@ -1067,7 +1212,7 @@ def deadman(ctx):
         peak, states, st = wait_idle(ctx, g, 30)
         ev["restart"] = {"rc": rc, "states": states}
         ctx.log("move after the restart: states %s", states)
-        ctx.check("TIMEOUT" not in states, "the move did not finish after the forgectrl restart")
+        ctx.check(ran(states), "the move did not finish after the forgectrl restart: %s", states)
         g.command("G90")
     t0 = time.time()
     m3 = None
@@ -1120,70 +1265,84 @@ def homing_kill(ctx, wait_running):
     """SIGKILL the GRBL controller while gfhome (the web-service homing
     runner, its own process group on the inherited pulse fd) is moving
     the head. The supervisor must end the runner before it starts another
-    controller, or two processes write the ring. Skipped when cloud mode
-    is not enabled on the machine (the runner needs the service)."""
-    import os as _os
-    import signal as _signal
+    controller, or two processes write the ring. The runner needs cloud
+    mode: a machine with cloud mode off gets it for the drill, with the
+    phrase the cloud step asks for, and gets it back afterward (after
+    homing_mode, which forgectrl takes back to none when cloud mode goes
+    off)."""
     fc = ctx.forgectrl
     ev = ctx.evidence
     before = fc.settings()
-    if str(before.get("cloud_enabled", "")).lower() not in ("1", "true", "yes", "on"):
-        ctx.log("kill during $H: skipped, cloud mode is not enabled on this machine")
-        return
+    cloud = before.get("cloud_enabled", "")
     hm = before.get("homing_mode", "")
-    ev["homing_kill"] = {"homing_mode": hm}
-    if hm != "gfcloud":
-        st, body = fc.post("/settings", data={"homing_mode": "gfcloud"})
-        ctx.check(st == 200, "homing_mode=gfcloud -> %s %s", st, body)
+    ev["homing_kill"] = {"homing_mode": hm, "cloud_enabled": cloud}
+    if cloud != "1":
+        st, body = fc.post("/settings", data={"cloud_enabled": "1", "phrase": hw.CLOUD_PHRASE})
+        ctx.log("cloud mode turned on for the kill during $H (cloud_enabled was %r) -> %s", cloud, st)
+        ctx.check(st == 200, "cloud_enabled=1 for the kill during $H -> %s %s", st, body)
     try:
-        m4 = wait_running(10)
-        ctx.check(m4, "controller not running before the homing drill")
-        pid4 = m4["pid"]
-        off = _log_offset(FORGECTRL_LOG)
-        runner_up = None
-        try:
-            with ctx.grbl() as g:
-                clean_slate(ctx, g)
-                g.send_raw(b"$H\n")
-                runner_up = ctx.wait_for(lambda: bool(hw.pidof("gfhome.py")), 30)
-                ctx.check(runner_up is not None, "the homing runner never started for $H")
-                ctx.sleep(3.0)                  # into the session: the runner drives the head
-                ctx.log("SIGKILL sent to controller pid %d during $H (runner pid %s)",
-                        pid4, hw.pidof("gfhome.py"))
-                _os.kill(pid4, _signal.SIGKILL)
-        except (hw.HwError, OSError) as e:
-            ctx.log("the Grbl connection ended with the kill: %s", e)
-        t_kill = time.time()
-        gone_s = ctx.wait_for(lambda: not hw.pidof("gfhome.py"), 15)
-        ev["homing_kill"]["runner_gone_s"] = gone_s
-        ctx.check(gone_s is not None, "the homing runner outlived its controller")
-        m5 = None
-        while time.time() - t_kill < 60:
-            st, m5 = fc.get("/mode")
-            if isinstance(m5, dict) and m5.get("controller") == "running" and m5.get("pid") != pid4:
-                break
-            ctx.sleep(0.5)
-        kstate = hw.sysfs_read("cnc/state")
-        holders = _pulse_holders()
-        lines = _log_lines(FORGECTRL_LOG, off, "homing runner")
-        halted = _log_lines(FORGECTRL_LOG, off, "halting it")
-        ev["homing_kill"].update({"respawn_s": round(time.time() - t_kill, 1), "mode_after": m5,
-                                  "kernel_state_at_respawn": kstate, "pulse_holders": holders,
-                                  "super_lines": [ln[-160:] for ln in lines[-3:]]})
-        ctx.log("kill during $H: runner gone in %s s, respawned as %s, kernel %s, pulse held by %s",
-                gone_s, m5 and m5.get("pid"), kstate, holders)
-        ctx.check(m5 and m5.get("pid") != pid4, "no respawn after the kill during $H: %s", m5)
-        ctx.check(lines, "the supervisor did not log the runner's end")
-        ctx.check(not halted, "the kernel had to be halted for the respawn: %s", halted[-1:])
-        ctx.check(kstate in ("idle", "disabled"), "the kernel was %s when the new controller started", kstate)
-        ctx.check("gfhome.py" not in holders and holders.count("grblHAL_glowfor") <= 1,
-                  "more than one controller on the pulse device: %s", holders)
-        ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle after the drill")
+        if hm != "gfcloud":
+            st, body = fc.post("/settings", data={"homing_mode": "gfcloud"})
+            ctx.check(st == 200, "homing_mode=gfcloud -> %s %s", st, body)
+        _homing_kill_drill(ctx, wait_running)
     finally:
         if hm != "gfcloud":
             st, body = (fc.post("/settings", params={"homing_mode": ""}) if not hm
                         else fc.post("/settings", data={"homing_mode": hm}))
             ctx.log("restore homing_mode=%r -> %s", hm, st)
+        if cloud != "1":
+            st, body = (fc.post("/settings", params={"cloud_enabled": ""}) if not cloud
+                        else fc.post("/settings", data={"cloud_enabled": cloud}))
+            ctx.log("restore cloud_enabled=%r -> %s", cloud, st)
+
+
+def _homing_kill_drill(ctx, wait_running):
+    """The kill during $H itself (homing_kill makes the settings it needs)."""
+    fc = ctx.forgectrl
+    ev = ctx.evidence
+    m4 = wait_running(10)
+    ctx.check(m4, "controller not running before the homing drill")
+    pid4 = m4["pid"]
+    off = _log_offset(FORGECTRL_LOG)
+    runner_up = None
+    try:
+        with ctx.grbl() as g:
+            clean_slate(ctx, g)
+            g.send_raw(b"$H\n")
+            runner_up = ctx.wait_for(lambda: bool(hw.pidof("gfhome.py")), 30)
+            ctx.check(runner_up is not None, "the homing runner never started for $H")
+            ctx.sleep(3.0)                  # into the session: the runner drives the head
+            ctx.log("SIGKILL sent to controller pid %d during $H (runner pid %s)",
+                    pid4, hw.pidof("gfhome.py"))
+            os.kill(pid4, signal.SIGKILL)
+    except (hw.HwError, OSError) as e:
+        ctx.log("the Grbl connection ended with the kill: %s", e)
+    t_kill = time.time()
+    gone_s = ctx.wait_for(lambda: not hw.pidof("gfhome.py"), 15)
+    ev["homing_kill"]["runner_gone_s"] = gone_s
+    ctx.check(gone_s is not None, "the homing runner outlived its controller")
+    m5 = None
+    while time.time() - t_kill < 60:
+        st, m5 = fc.get("/mode")
+        if isinstance(m5, dict) and m5.get("controller") == "running" and m5.get("pid") != pid4:
+            break
+        ctx.sleep(0.5)
+    kstate = hw.sysfs_read("cnc/state")
+    holders = _pulse_holders()
+    lines = _log_lines(FORGECTRL_LOG, off, "homing runner")
+    halted = _log_absent(ctx, FORGECTRL_LOG, off, "halting it", "that the kernel was not halted for the respawn")
+    ev["homing_kill"].update({"respawn_s": round(time.time() - t_kill, 1), "mode_after": m5,
+                              "kernel_state_at_respawn": kstate, "pulse_holders": holders,
+                              "super_lines": [ln[-160:] for ln in lines[-3:]]})
+    ctx.log("kill during $H: runner gone in %s s, respawned as %s, kernel %s, pulse held by %s",
+            gone_s, m5 and m5.get("pid"), kstate, holders)
+    ctx.check(m5 and m5.get("pid") != pid4, "no respawn after the kill during $H: %s", m5)
+    ctx.check(lines, "the supervisor did not log the runner's end")
+    ctx.check(not halted, "the kernel had to be halted for the respawn: %s", halted[-1:])
+    ctx.check(kstate in ("idle", "disabled"), "the kernel was %s when the new controller started", kstate)
+    ctx.check("gfhome.py" not in holders and holders.count("grblHAL_glowfor") <= 1,
+              "more than one controller on the pulse device: %s", holders)
+    ctx.check(fc.wait_idle(15, abort=ctx.aborted), "machine not idle after the drill")
 
 
 # ------------------------------------------------- lid / button (the factory's)
@@ -1337,7 +1496,7 @@ def step_timing_under_load(ctx):
                     ctx.check(not any(x.startswith("error") for x in r),
                               "jog refused under load: %s", r)
                     _peak, states, _ = wait_idle(ctx, g, 30)
-                    ctx.check("TIMEOUT" not in states, "a leg did not return to Idle under load")
+                    ctx.check(ran(states), "a leg did not run to Idle under load: %s", states)
                     legs += 1
             elapsed = time.time() - t0
             hz = os.sysconf("SC_CLK_TCK")
@@ -1353,7 +1512,7 @@ def step_timing_under_load(ctx):
             load.wait()
             ctx.log("CPU hog stopped")
 
-    clamped = _log_lines(GRBLHAL_LOG, off, "late events clamped")
+    clamped = _log_absent(ctx, GRBLHAL_LOG, off, "late events clamped", "that no event clamped under the load")
     ev["clamp_lines"] = clamped
     ctx.check(not clamped,
               "step generation was starved while userspace competed for the core: %s",
@@ -1365,6 +1524,10 @@ def step_timing_under_load(ctx):
 # ------------------------------------------------- motor release
 
 HOLD_CURRENTS = ("33", "5")     # pic/x_step_current, pic/y_step_current at idle
+# The released window the accelerometer judges, after the refusals: at
+# the two to three reads a second of the bench reference, about ten
+# samples, twice the floor a "still" verdict needs.
+RELEASED_WINDOW_S = 3.5
 
 
 def _step_currents():
@@ -1411,7 +1574,7 @@ def _drop_reference(ctx, fc):
 
 
 @test("motion.release", title="Motor release: nothing moves a released gantry, only the operator energizes it",
-      subsystem="motion", kind="auto", hardware="takeover", mode="grbl", est_min=8,
+      subsystem="motion", kind="auto", mode="grbl", est_min=8,
       covers=_MOTION_COVERS + [("forgectrl", "src/status.*"), ("forgectrl", "src/wizdark.*")],
       requires=["motion.jog-roundtrip"],
       steps=["Bed clear; the head needs 50 mm of free travel each way on X and Y. Nobody touches the gantry."],
@@ -1421,10 +1584,12 @@ def _drop_reference(ctx, fc):
                   "$X are refused, a soft reset does not unlock it, and forgectrl refuses a switch "
                   "to cloud mode; the kernel's position record "
                   "is the witness that nothing was shipped (no step and no byte played), and the head "
-                  "accelerometer stays under the moving threshold in the window after the release. "
+                  "accelerometer stays under the moving threshold over a window of about four seconds "
+                  "after the release, which must hold at least five samples and no failed read. "
                   "$ME energizes with no fault. The drivers are then proven alive the way the machine "
                   "proves it to itself: the Setup motion check runs the liveness probe on the held "
-                  "device and the witnessed 50 mm jogs.")
+                  "device, with the head-accel p2p its line reports at or above the moving threshold, "
+                  "and the witnessed 50 mm jogs.")
 def motor_release(ctx):
     from .setup_dark import run_check
 
@@ -1468,12 +1633,17 @@ def motor_release(ctx):
             for line in ("$J=G91X10F2400", "G0X10", "$X"):
                 refusals[line] = _refused(ctx, g, line)
                 ctx.check(refusals[line], "%s was accepted while the motors are released", line)
-            ctx.sleep(1.0)
-            p2px, p2py, n = accel.p2p(t0)
+            ctx.sleep(RELEASED_WINDOW_S)
+            t1 = time.time()
+            p2px, p2py, n = accel.p2p(t0, t1)
+            errors = accel.window_errors(t0, t1)
+            still = accel.still(t0, t1)
             ev["released_accel_p2p"] = [p2px, p2py, n]
-            ctx.check(n > 0, "no accelerometer samples in the released window")
-            ctx.check(max(p2px, p2py) < hw.ACCEL_P2P_MOVING,
-                      "the head moved while released (accel p2p x=%d y=%d)", p2px, p2py)
+            ev["released_accel_errors"] = errors
+            ctx.check(still is not None,
+                      "the accelerometer cannot judge the released window: %d samples (at least %d) and %d "
+                      "failed reads", n, hw.ACCEL_STILL_MIN_SAMPLES, errors)
+            ctx.check(still, "the head moved while released (accel p2p x=%d y=%d)", p2px, p2py)
             g.realtime(0x18)
             ctx.sleep(2)
             g.drain()
@@ -1532,6 +1702,9 @@ def motor_release(ctx):
             {k: v.get("witnessed") for k, v in (res.get("moves") or {}).items()})
     ctx.check(res.get("probe") and last.get("result") is not None and not last.get("error"),
               "the motion check did not complete after the energize: %s", last.get("error") or last)
+    ctx.check(hw.probe_moved(res.get("probe")) is True,
+              "the probe after the energize reported a head-accel p2p of %s, under the moving threshold %d (or "
+              "none): '%s'", hw.probe_p2p(res.get("probe")), hw.ACCEL_P2P_MOVING, res.get("probe"))
     for name in ("+X", "-X", "+Y", "-Y"):
         m = (res.get("moves") or {}).get(name) or {}
         ctx.check(m.get("witnessed") is True,

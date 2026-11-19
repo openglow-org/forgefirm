@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import unittest
 
+from forgetest import hw
 from forgetest.runner import Failed
 from forgetest.suite import cloud, homeoff
 
@@ -101,6 +102,7 @@ class HandBackTests(unittest.TestCase):
             "clean_slate": lambda ctx, g: None,
             "wait_idle": self._jog_ends,
             "machine_idle": lambda ctx: None,
+            "_program_total": lambda: len(self.ctx.jogs),     # the mark: how many jogs were sent by then
         }
         saved = {k: getattr(homeoff, k) for k in patches}
         self.addCleanup(lambda: [setattr(homeoff, k, v) for k, v in saved.items()])
@@ -115,7 +117,9 @@ class HandBackTests(unittest.TestCase):
         self.counters = [0, 0, 0]
         self.anchor = False
 
-    def _jog_ends(self, ctx, g, timeout=30.0):
+    def _jog_ends(self, ctx, g, timeout=30.0, since=None):
+        # the wait's mark was taken before the jog was sent
+        self.assertEqual(since, len(self.ctx.jogs) - 1)
         # the jog played: the counters moved by what it asked, at the scale
         words = dict((w[0], float(w[1:])) for w in self.ctx.jogs[-1].split()[2:4])
         self.counters = [self.counters[0] + round(words["X"] * self.spm),
@@ -127,7 +131,8 @@ class HandBackTests(unittest.TestCase):
             f.write(text)
 
     def expect_jog(self, dx, dy):
-        self.assertEqual(self.ctx.jogs, ["$J=G91 G21 X%.3f Y%.3f F2400" % (-dx, -dy)])
+        # at the baseline's own feed for a return: no reference, no soft limits
+        self.assertEqual(self.ctx.jogs, ["$J=G91 G21 X%.3f Y%.3f F1200" % (-dx, -dy)])
 
     # -- the stopped-short judge --------------------------------------------
     def test_a_motion_stopped_short_fails_the_judge(self):
@@ -175,6 +180,7 @@ class HandBackTests(unittest.TestCase):
         self.assertEqual(self.ctx.jogs, [])
 
     def test_a_head_that_never_moved_is_not_jogged(self):
+        self.write("")                      # the session logged no motion since the mark
         homeoff.camera_home_return(self.ctx, {}, 0)
         self.assertEqual(self.ctx.jogs, [])
         self.assertEqual((self.restarts, self.ctx.rezeroed), (1, 1))
@@ -191,11 +197,61 @@ class HandBackTests(unittest.TestCase):
         # no drop before the jog (the switch back started the controller), one after
         self.assertEqual((self.restarts, self.ctx.rezeroed), (1, 1))
 
+    def test_a_travel_past_the_bound_leaves_the_head_where_it_stands(self):
+        # The whole three-motion session, 157 mm on X: the jog would run with
+        # no reference and no soft limits on a travel read out of log lines,
+        # so past the baseline's bound on an axis nothing moves and the run
+        # fails, with the head reported.
+        self.write(WHOLE.replace("gfhome[", "gfcloud["), self.cloudlog)
+        ev = {}
+        with self.assertRaises(Failed) as cm:
+            homeoff.cloud_mode_return(self.ctx, ev, 0)
+        self.assertIn("not jogging back", str(cm.exception))
+        self.assertEqual(self.ctx.jogs, [])
+        self.assertEqual(ev["cloud_return"]["mm"], [round((4774 - 71 - 13096) / homeoff.XY_STEPS_PER_MM, 3),
+                                                    round((4600 - 144 - 7399) / homeoff.XY_STEPS_PER_MM, 3)])
+        # and past it on Y alone: one short correction, and 120 mm of Y the
+        # counters ran since the switch back
+        second = WHOLE[WHOLE.index("2026-09-07T20:25:56.2"):WHOLE.index("2026-09-07T20:26:02.9")]
+        with open(self.cloudlog, "w", encoding="utf-8", newline="\n") as f:
+            f.write(second.replace("gfhome[", "gfcloud["))
+        self.counters = [0, round(120 * self.spm), 0]
+        with self.assertRaises(Failed) as cm:
+            homeoff.cloud_mode_return(self.ctx, {}, 0)
+        self.assertIn("not jogging back", str(cm.exception))
+        self.assertEqual(self.ctx.jogs, [])
+
     def test_after_cloud_mode_an_unknown_travel_moves_nothing(self):
         self.write(STOPPED.replace("gfhome[", "gfcloud[").split("machine:_motion_locked")[0], self.cloudlog)
         with self.assertRaises(Failed):
             homeoff.cloud_mode_return(self.ctx, {}, 0)
         self.assertEqual(self.ctx.jogs, [])
+
+    def rotated_away(self, path, during, after):
+        """A log that rotated inside the test's window (logrotate's rename
+        and create), the new file already past the mark, and the rotated
+        file gone: a window nothing can read. Returns the mark."""
+        self.write("a line before the test\n" * 4, path)
+        mark = hw.log_size(path)
+        self.write(during, path)
+        os.rename(path, path + ".1")
+        self.write(after + "a line after the rotation\n" * 20, path)
+        os.remove(path + ".1")
+        self.assertIsNone(hw.log_window(path, mark))
+        return mark
+
+    def test_a_window_that_cannot_be_read_is_no_travel_and_no_motion_shown_whole(self):
+        # the service's motions logged before the rotation, one of them short
+        whole = WHOLE[:WHOLE.index("2026-09-07T20:26:02.9")]
+        mark = self.rotated_away(self.cloudlog, whole.replace("gfhome[", "gfcloud["), "")
+        with self.assertRaises(Failed) as cm:
+            homeoff.cloud_mode_return(self.ctx, {}, mark)
+        self.assertIn("cannot be known", str(cm.exception))
+        self.assertEqual(self.ctx.jogs, [])
+        mark = self.rotated_away(self.log, STOPPED, "")
+        with self.assertRaises(Failed) as cm:
+            homeoff.judge_whole_motions(self.ctx, {}, mark)
+        self.assertIn("cannot be read", str(cm.exception))
 
 
 if __name__ == "__main__":

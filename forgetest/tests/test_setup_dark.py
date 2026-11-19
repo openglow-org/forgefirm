@@ -13,11 +13,12 @@ found, and the controller started again on a lens window put back."""
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import helpers  # noqa: E402
 from forgetest import catalog  # noqa: E402
-from forgetest.runner import Context, Run  # noqa: E402
+from forgetest.runner import Context, Failed, Run  # noqa: E402
 
 IDS = ["setup.check-switches", "setup.check-airflow", "setup.check-motion", "setup.check-lens"]
 # The check that puts the intake fan count back as found: it starts only
@@ -61,9 +62,10 @@ class RegistrationTests(unittest.TestCase):
         finally:
             fake.stop()
 
-    def test_the_checks_that_take_the_machine_say_so(self):
-        for tid in ("setup.check-airflow", "setup.check-motion", "setup.check-lens"):
-            self.assertEqual(self.reg[tid].hardware, "takeover", tid)
+    def test_the_checks_run_through_forgectrl(self):
+        # forgectrl's own wizard takes the machine; no check stops forgectrl
+        for tid in IDS:
+            self.assertEqual(self.reg[tid].hardware, "api", tid)
 
     def test_the_lens_check_covers_the_finder_and_the_frame(self):
         covers = set(self.reg["setup.check-lens"].covers)
@@ -448,6 +450,69 @@ class LensCheckTests(ScriptedCheck):
         run = self.run_check("setup.check-lens")
         self.assertEqual(self.lever_posts(), [])
         self.assertEqual(run.evidence["restart"], {"mode": "cloud", "pid": 100})
+
+
+class ScriptedCheckTests(unittest.TestCase):
+    """A check the daemon runs to its end on the first poll, with the
+    result it is given: setup.check-motion judges the probe's own reading,
+    and setup.cloud-header-capture turns cloud mode on with the typed phrase
+    forgectrl asks for."""
+
+    PROBE = "MOTION OK - head accel p2p x=%d y=%d (moving>=800 dead<=250)"
+
+    def setUp(self):
+        from forgetest.suite import setup_dark
+        p = mock.patch.object(setup_dark, "POLL_S", 0.01)
+        p.start()
+        self.addCleanup(p.stop)
+        self.fake = helpers.FakeForgectrl().start()
+        self.addCleanup(self.fake.stop)
+        self.fake.state["mode"]["local"] = False
+        self.result = None
+        self.wid = None
+
+        def on_get(path, q):
+            if path == "/wiz/dark":
+                return 200, {"id": self.wid, "running": False, "phase": "done", "log": [], "prompt": None,
+                             "result": self.result, "error": ""}
+            if path == "/wiz":
+                return 200, {"versions": {self.wid: 1}}
+            return None
+
+        def on_post(path, form):
+            if path.startswith("/wiz/") and path.endswith("/start"):
+                self.wid = path[len("/wiz/"):-len("/start")]
+                return (200, {"started": True}) if self.result is not None else (409, {"error": "busy"})
+            if path == "/settings" and form.get("cloud_enabled") == "1" and form.get("phrase") != "I UNDERSTAND":
+                return 400, {"error": "cloud_enabled=1 takes the phrase"}
+            return None
+        self.fake.on_get = on_get
+        self.fake.on_post = on_post
+
+    def run_check(self, tid):
+        t = catalog.load_suite()[tid]
+        t.fn(Context(Run("test", t.id, t.title), None, t))
+
+    def motion_result(self, x, y):
+        moves = {n: {"witnessed": True, "p2p_lp_x": 2000, "p2p_lp_y": 900} for n in ("+X", "-X", "+Y", "-Y")}
+        return {"probe": self.PROBE % (x, y), "z_referenced": True, "z_passes": [1, 2, 3, 4, 5], "moves": moves}
+
+    def test_the_motion_check_judges_the_probes_reading_not_its_word(self):
+        self.result = self.motion_result(4157, 1338)            # the bench reference's
+        self.run_check("setup.check-motion")
+        self.result = self.motion_result(600, 120)              # MOTION OK on a wedged gantry's reading
+        with self.assertRaises(Failed) as cm:
+            self.run_check("setup.check-motion")
+        self.assertIn("under the moving threshold", str(cm.exception))
+
+    def test_the_header_capture_turns_cloud_mode_on_with_the_phrase(self):
+        # the check then refuses to start: the failure is the check's own,
+        # not forgectrl's refusal of a cloud_enabled with no phrase
+        self.fake.state["settings"]["cloud_enabled"] = ""
+        with self.assertRaises(Failed) as cm:
+            self.run_check("setup.cloud-header-capture")
+        self.assertIn("the cloud.header check did not start", str(cm.exception))
+        self.assertIn(("/settings", {"cloud_enabled": "1", "phrase": "I UNDERSTAND"}), self.fake.posts)
 
 
 if __name__ == "__main__":

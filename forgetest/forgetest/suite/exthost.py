@@ -248,7 +248,11 @@ def _pool_counters():
                   "listeners. A process that restricts itself with landlock loses /etc and TCP "
                   "connects and keeps /usr; one that installs a seccomp filter gets EPERM from "
                   "the filtered call. The layer content (the recipe, the rules, the distro "
-                  "option) is in the platform identity of every fingerprint.")
+                  "option) is in the platform identity of every fingerprint. It runs on the "
+                  "machine because what it proves is the booted image: cgroup v2 as mounted at "
+                  "boot, forgectrl in the root group, the pool accounts as the render made them, "
+                  "the rules loaded in the running kernel, and forgectrl keeping its pid under a "
+                  "group's OOM.")
 def platform(ctx):
     ev = ctx.evidence
 
@@ -879,7 +883,10 @@ def _frozen(id_):
                   "while the window is open and served again once it closes, which is the other half "
                   "of keeping a package off the step stream: a capture costs kernel-side work that a "
                   "thread priority does not cover. The package, the key, the setting and the setup "
-                  "record are put back as found, the record under a forgectrl restart.")
+                  "record are put back as found, the record under a forgectrl restart. It runs on "
+                  "the machine because the window and the freeze are the board's own: a real armed "
+                  "window from the cooling engine over a dark print, the kernel's cgroup freezer, "
+                  "and the kernel's run start the freeze must lead.")
 def armed_freeze(ctx):
     import tempfile
     import threading

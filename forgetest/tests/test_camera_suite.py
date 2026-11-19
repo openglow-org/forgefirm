@@ -6,11 +6,14 @@
 """camera.lid-privacy's judgment of a running stream after the lid opens,
 over a scripted stream: the frames that come after the lid is seen open are
 measured against the size of the frames before it, and a stream that keeps
-delivering fails, whatever the transport does."""
+delivering fails, whatever the transport does. camera.h264-stream fails on
+an encoder that answers 503: the image ships one."""
 import threading
 import time
 import unittest
 
+import helpers
+from forgetest.runner import Context, Failed, Run
 from forgetest.suite import camera
 
 FRAME = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + camera.JPEG_SOI + b"\x00" * 2000 + b"\xff\xd9\r\n"
@@ -69,6 +72,18 @@ class StreamWatchTests(unittest.TestCase):
         # ended, but with more than the bound after the edge
         self.assertIsNotNone(camera.lid_stream_failure(
             dict(v, bytes=(camera.STREAM_FRAMES_AFTER_EDGE + 1) * v["frame_bytes"])))
+
+
+class H264Tests(unittest.TestCase):
+    def test_an_encoder_that_answers_503_fails(self):
+        fake = helpers.FakeForgectrl().start()
+        self.addCleanup(fake.stop)
+        fake.on_get = lambda path, q: (503, {"error": "no H.264 encoder"}) if path == "/cam/h264" else None
+        t = helpers.make_test("camera.h264-stream", [])
+        run = Run("test", t.id, t.title)
+        with self.assertRaises(Failed):
+            camera.h264_stream(Context(run, None, t))
+        self.assertEqual(run.evidence["status"], 503)
 
 
 if __name__ == "__main__":

@@ -12,12 +12,15 @@ the human, no button to race), `ready` pre-announces a timed step, and
 a `precheck` refuses a start the machine cannot honor instead of
 recording a FAIL.
 """
+import gzip
 import os
 import shutil
+import socket
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import helpers
 from forgetest import catalog, hw
@@ -187,6 +190,69 @@ class ReaderTests(unittest.TestCase):
         with self.assertRaises(hw.HwError):
             hw.Forgectrl().status()
 
+    def test_a_line_with_no_reply_is_no_answer(self):
+        # Neither ok nor error: arrived: never the lines collected so far,
+        # which a check for an error line reads as accepted.
+        clock = helpers.Clock()
+
+        class Silent:
+            def settimeout(self, t):
+                pass
+
+            def sendall(self, data):
+                pass
+
+            def recv(self, n):
+                clock.t += 0.2
+                raise socket.timeout()
+        g = hw.Grbl()
+        g.sock = Silent()
+        g.buf = b"[MSG:Pgm End]\r\n"                # a line of the controller's own, no ok
+        with mock.patch.object(hw, "time", clock):
+            with self.assertRaises(hw.HwError):
+                g.command("$J=G91X10F2400", timeout=1.0)
+
+    def test_a_rotated_log_is_read_across_the_rotation_and_a_lost_one_is_not_read(self):
+        # The live file shorter than the mark: the window is the rotated
+        # file's tail from the mark (compressed, as logrotate leaves it) and
+        # the new live file. With the rotated file gone it cannot be read.
+        tmp = tempfile.mkdtemp(prefix="forgetest-rot-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        live = os.path.join(tmp, "grblhal.log")
+        old = b"a line before the mark\n" * 4
+        with gzip.open(live + ".1.gz", "wb") as f:
+            f.write(old + b"late events clamped (rotated away)\n")
+        with open(live, "wb") as f:
+            f.write(b"after the rotation\n")
+        text = hw.log_window(live, len(old))
+        self.assertEqual(text, "late events clamped (rotated away)\nafter the rotation\n")
+        with gzip.open(live + ".1.gz", "wb") as f:
+            f.write(old[:20])                   # a rotated file shorter than the mark is not the one
+        self.assertIsNone(hw.log_window(live, len(old)))
+        os.remove(live + ".1.gz")
+        self.assertIsNone(hw.log_window(live, len(old)))
+        self.assertEqual(hw.log_window(live, 0), "after the rotation\n")      # no rotation: the live file
+
+    def test_a_log_rotated_and_grown_past_the_mark_is_read_across_the_rotation(self):
+        # The mark carries the file's inode: a live file longer than the
+        # mark that is another file rotated inside the window all the same.
+        tmp = tempfile.mkdtemp(prefix="forgetest-rot-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        live = os.path.join(tmp, "grblhal.log")
+        with open(live, "wb") as f:
+            f.write(b"a line before the mark\n" * 4)
+        mark = hw.log_size(live)
+        with open(live, "ab") as f:
+            f.write(b"late events clamped (rotated away)\n")
+        os.rename(live, live + ".1")            # logrotate: rename, create, compress
+        with open(live, "wb") as f:
+            f.write(b"after the rotation\n" * 10)
+        with open(live + ".1", "rb") as f, gzip.open(live + ".1.gz", "wb") as g:
+            g.write(f.read())
+        os.remove(live + ".1")
+        text = hw.log_window(live, mark)
+        self.assertTrue(text.startswith("late events clamped (rotated away)\nafter the rotation\n"), text)
+
     def test_a_status_report_buffered_before_the_question_is_dropped(self):
         dev = helpers.FakeGrbl().start()
         self.addCleanup(dev.stop)
@@ -286,7 +352,10 @@ class PrecheckTests(unittest.TestCase):
 
 
 class AccelSamplerTests(unittest.TestCase):
-    """The head accelerometer sampler over a fake iio tree."""
+    """The head accelerometer sampler over a fake iio tree, and the motion
+    witness's judgments on recorded traces: the threshold between a wedged
+    gantry and a live one, a failed read that is no sample, the head found
+    by its bus address, a still window's floor, and the probe's reading."""
 
     def setUp(self):
         from forgetest import hw
@@ -334,6 +403,73 @@ class AccelSamplerTests(unittest.TestCase):
         with s:
             pass
         self.assertEqual(s.p2p(0), (0, 0, 0))
+
+    def trace(self, xs, t0=100.0, period=0.4):
+        """A sampler holding a recorded trace: X as given, Y at rest, a
+        sample every `period` seconds from t0 (the bench reference's
+        sampler lands two to three a second)."""
+        s = self.hw.AccelSampler()
+        s.samples = [(t0 + i * period, x, 200) for i, x in enumerate(xs)]
+        return s
+
+    def test_a_wedged_trace_reads_no_motion_and_a_live_one_reads_motion(self):
+        # forgectrl's probe characterized the two sides on the bench
+        # reference: a wedged gantry's peak-to-peak at 250 or less, a live
+        # one's at 1800 or more (hw.py, liveness.c P2P_DEAD, P2P_MOVING)
+        wedged = self.trace([100, 350, 120, 340, 100, 300])
+        live = self.trace([100, 1900, 150, 1700, 100, 900])
+        self.assertEqual(wedged.p2p(0, 1000)[0], 250)
+        self.assertEqual(live.p2p(0, 1000)[0], 1800)
+        self.assertFalse(wedged.moved(0, 1000))
+        self.assertTrue(wedged.still(0, 1000))
+        self.assertTrue(live.moved(0, 1000))
+        self.assertFalse(live.still(0, 1000))
+
+    def test_a_failed_read_is_no_sample(self):
+        os.remove(os.path.join(self.dir, "in_accel_y_raw"))
+        self.assertIsNone(self.hw.head_accel_read(self.dir))
+        s = self.hw.AccelSampler()
+
+        class OneRead:
+            n = 0
+
+            def is_set(self):
+                OneRead.n += 1
+                return OneRead.n > 1
+
+            def wait(self, seconds):
+                pass
+        s._stop = OneRead()
+        s._loop()
+        self.assertEqual((s.samples, s.errors, len(s.error_times)), ([], 1, 1))
+
+    def test_the_head_is_found_by_its_bus_address_not_its_place(self):
+        other = os.path.join(self.tmp, "iio_device0")             # listed first
+        os.makedirs(other)
+        with open(os.path.join(other, "name"), "w") as f:
+            f.write("ads1015 2-0048\n")
+        self.assertEqual(self.hw.head_accel_dir(), self.dir)
+
+    def test_a_still_window_needs_its_floor_and_no_failed_read(self):
+        # one sample has a peak-to-peak of 0 whatever the head did, and a
+        # window with failed reads reads quieter than the head was: neither
+        # can show the head at rest
+        self.assertIsNone(self.trace([100]).still(0, 1000))
+        self.assertIsNone(self.trace([100, 140, 120, 130]).still(0, 1000))     # four: under the floor of five
+        quiet = self.trace([100, 140, 120, 130, 110])
+        self.assertTrue(quiet.still(0, 1000))
+        quiet.error_times = [100.5]
+        self.assertIsNone(quiet.still(0, 1000))
+        self.assertTrue(quiet.still(101, 1000, floor=2))     # the failed read before the window
+
+    def test_the_probe_line_is_judged_on_its_reading(self):
+        line = ("forgectrl[1380] INFO super: liveness probe: MOTION OK - head accel p2p x=%d y=%d "
+                "(moving>=800 dead<=250)")
+        self.assertIs(self.hw.probe_moved(line % (4785, 1114)), True)
+        self.assertIs(self.hw.probe_moved(line % (600, 120)), False)        # the word says OK
+        self.assertIs(self.hw.probe_moved(line % (4785, 500)), True)        # either axis reaching it
+        self.assertIsNone(self.hw.probe_moved("liveness probe: MOTION OK"))
+        self.assertEqual(self.hw.probe_p2p(line % (4785, 1114)), (4785, 1114))
 
 
 if __name__ == "__main__":

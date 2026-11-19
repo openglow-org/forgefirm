@@ -91,11 +91,11 @@ class RegistrationTests(unittest.TestCase):
         t = self.reg["setup.focus"]
         self.assertEqual(t.kind, "live")
         self.assertEqual(t.mode, "grbl")
-        self.assertEqual(t.hardware, "takeover")
+        self.assertEqual(t.hardware, "api")             # forgectrl runs the burn; nothing stops it
         self.assertEqual(list(t.actions), ["button"])
         self.assertEqual(list(t.hands), ["scrap"])
         self.assertFalse(t.fixture_runnable(("button", "lid", "interlock")))
-        self.assertIsNone(getattr(t, "precheck", None))
+        self.assertIs(t.precheck, setup_burns.head_referenced)
         self.assertEqual(list(t.requires),
                          ["forgectrl.auth", "setup.check-motion", "laser.emission-witness", "setup.check-lens"])
 
@@ -509,15 +509,23 @@ class BurnRunTests(unittest.TestCase):
         self.assertIn("home anchor", str(cm.exception))
         self.assertEqual(self.daemon.order, ["laser.focus", "laser.focus"])
 
-    def test_an_unreferenced_head_runs_on_the_operators_word(self):
-        # A fresh controller's counters-only position places nothing: the
-        # read is recorded, not judged, and the burn runs.
+    def test_an_unreferenced_head_starts_no_burn(self):
+        # A fresh controller's counters-only position places nothing, and
+        # the burn is lit: the precheck refuses the start, and a reference
+        # dropped after it (a controller start) fails the run before any
+        # burn starts or a controller lever is touched.
         self.fake.state["status"].update({"homed": False, "homed_axes": 4, "home_source": "startup",
                                           "pos": {"x": 12.5, "y": 0.0, "z": 0.0}})
-        run = self.run_test("setup.focus")
-        self.assertEqual(run.evidence["head_at_start"]["judged"], False)
-        self.assertEqual(run.evidence["head_at_start"]["home_source"], "startup")
-        self.assertEqual(self.daemon.order, ["laser.focus"])
+        t = catalog.load_suite()["setup.focus"]
+        self.assertIn("not referenced by a manual home", t.cannot_start())
+        with self.assertRaises(Failed) as cm:
+            self.run_test("setup.focus")
+        self.assertIn("not referenced by a manual home", str(cm.exception))
+        self.assertEqual(self.run.evidence["head_at_start"]["judged"], False)
+        self.assertEqual(self.daemon.order, [])
+        self.assertEqual(self.daemon.lever_posts(), [])
+        self.fake.state["status"].update({"homed": True, "homed_axes": 7, "home_source": "manual"})
+        self.assertIsNone(t.cannot_start())
 
     def test_a_burn_the_test_itself_never_saw_fails_and_still_restores(self):
         # The burn's result reports a lit burn, and the test's own reads

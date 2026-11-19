@@ -10,7 +10,8 @@ operator's eye-protection / fire-watch / exhaust acknowledgment; the
 test then prompts for the scrap and the button, streams a small job
 through the controller, and the machine fires only after the operator
 presses the physical arm button - nothing here defeats that gate, and
-forgetest never unlocks the laser latch. One emission per test; on abort
+nothing in this module unlocks the laser latch: the controller's arm does,
+on the press. One emission per test; on abort
 or error the job is soft-reset (`^X`: controlled stop, latch relocked).
 The witnesses are forgectrl's `/status` (`laser.emission_samples` = the
 kernel's LASER_ON sample count, `hv_current_raw`, `lid_ir`),
@@ -245,6 +246,23 @@ def kill_fast_trail(t0, seconds=1.5):
             stopped_at = round(now, 3)
         time.sleep(0.005)
     return {"latch_locked_at_s": locked_at, "kernel_stopped_at_s": stopped_at}
+
+
+def judge_expected_stop(ctx, rec):
+    """laser.armed-kill's expected stop, judged on its record: the stop
+    answered, the latch read locked from sysfs the moment it answered (an
+    unreadable read is not locked), emission dropped within 2.5 s and
+    stayed 0, and the kernel is not running."""
+    ilk = rec.get("interlock_circuit_at_stop")
+    ctx.check(rec.get("post_status") == 200, "POST /controller/stop -> %s", rec.get("post_status"))
+    ctx.check(ilk is not None and bool(ilk & IL_LASER_LATCH),
+              "the latch did not read locked when the stop answered (interlock_circuit=%s): the stop "
+              "did not relock it", ilk)
+    zero_at = rec.get("zero_at_s")
+    ctx.check(zero_at is not None and zero_at < 2.5,
+              "emission did not drop within 2.5 s of the stop (first 0 at %s)", zero_at)
+    ctx.check(rec.get("tail_zero"), "emission returned after the stop")
+    ctx.check(rec.get("kernel_not_running"), "the kernel was still running after the stop")
 
 
 def judge_kill(ctx, trail, what):
@@ -678,8 +696,9 @@ RAPID_MIN_READS = 4         # the fewest samples with the count (and with the HV
              "Each burn is cut short by the test; the sample trails judge the stops."],
       description="Both ways an armed job is killed, on one setup. Expected: mid-burn "
                   "POST /controller/stop - the supervisor writes cnc/stop and relocks before the "
-                  "SIGTERM, so emission drops within 2.5 s and stays 0, the kernel is not running, "
-                  "and the restart is a separate operator-judged step. Unexpected: mid-burn SIGKILL "
+                  "SIGTERM, so the latch reads locked the moment the stop answers (read from sysfs "
+                  "before anything after it could relock it), emission drops within 2.5 s and stays "
+                  "0, the kernel is not running, and the restart is a separate step. Unexpected: mid-burn SIGKILL "
                   "of the controller - the supervisor's exit safing must end the fire tail inside "
                   "the ring's in-flight window, leave the latch locked, and respawn the controller. "
                   "The death is a signal to the supervisor, not a poll: the latch relocks within "
@@ -696,18 +715,18 @@ def armed_kill(ctx):
         t_stop = time.time()
         code, body = fc.post("/controller/stop")
         post_dt = time.time() - t_stop
-        ctx.log("POST /controller/stop -> %s %s (%.2f s)", code, body, post_dt)
+        # The latch as the stop's answer leaves it, before anything after
+        # it (the restart, phase 2's own arm, the hand-back) could relock it.
+        ilk_stop = hw.sysfs_int("cnc/interlock_circuit")
+        ctx.log("POST /controller/stop -> %s %s (%.2f s); interlock_circuit %s", code, body, post_dt, ilk_stop)
         trail = kill_trail(ctx, t_stop)
         zero_at, tail_zero, not_running = judge_kill(ctx, trail, "stop")
         st_mode, mode = fc.get("/mode")
         ev["expected"] = {"post_status": code, "post_s": round(post_dt, 2), "zero_at_s": zero_at,
                           "tail_zero": tail_zero, "kernel_not_running": not_running,
-                          "mode_after_stop": mode, "trail": trail}
-    ctx.check(code == 200, "POST /controller/stop -> %s", code)
-    ctx.check(zero_at is not None and zero_at < 2.5,
-              "emission did not drop within 2.5 s of the stop (first 0 at %s)", zero_at)
-    ctx.check(tail_zero, "emission returned after the stop")
-    ctx.check(not_running, "the kernel was still running after the stop")
+                          "mode_after_stop": mode, "trail": trail,
+                          "interlock_circuit_at_stop": ilk_stop}
+    judge_expected_stop(ctx, ev["expected"])
     ev["beam_at_fire_stop"] = smp.get("beam")
     ctx.log("the controller is stopped (supervision held); restarting it (no motion, no laser)")
     st, body = fc.post("/controller/start")

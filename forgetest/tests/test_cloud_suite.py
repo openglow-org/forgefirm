@@ -14,11 +14,15 @@ skeleton of that excerpt.
 What is proven here: each test fails when the machine did the unsafe
 thing - a dark print whose press is asked for with the latch still locked,
 a print the kernel plays with the hardware button latch set, a lid stop
-that is polled rather than edge-driven, and a resume the kernel refused.
+that is polled rather than edge-driven or whose edge carries no time, a
+resume the kernel refused (read across a log rotation too, and never on a
+window the rotation took away), and a paused print whose latch is locked
+or whose armed window is closed between the two presses.
 cloud.button-latch's every judgment, and exthost.armed-freeze's of the
 run's start (it runs the dark print), are proven on their sample records
 over a scripted machine and a clock that moves only when the test sleeps."""
 import contextlib
+import gzip
 import os
 import shutil
 import struct
@@ -109,6 +113,8 @@ class Script:
                 self.run.answer(p["id"], p["options"][0])
             time.sleep(0.02)
 
+
+LOCKED_ILK, UNLOCKED_ILK = "45", "37"   # cnc/interlock_circuit, the laser lock at bit 3
 
 OFFLINE_LINE = ("2026-08-22T23:00:00.100000+00:00 gfcloud[3100] INFO offline:open OFFLINE service: "
                 "no web session; listening on /run/gfcloud-offline.sock")
@@ -279,31 +285,99 @@ class CloudSuiteTests(unittest.TestCase):
         return cm.exception
 
     # -- pause / resume ---------------------------------------------------------
-    def test_pause_resume_fails_when_the_kernel_refuses_the_resume(self):
+    def pause_hooks(self, lines, latch_while_paused=UNLOCKED_ILK):
+        """The app's print in cloud mode, replayed on the test's own steps,
+        not the wall clock: its prologue after the cue. At the first press
+        the client locks the latch for its stop and its backward run and
+        logs the pause; its settle (the latch unlocked again, as
+        `latch_while_paused`, None for a latch that cannot be read; the
+        window armed; "paused at") lands when the test next waits on the log.
+        The second press records whether "paused at" was logged by then,
+        locks the latch, so a read made after it is no read of the pause,
+        and writes the replay's last lines. forgectrl's controller stop, a
+        failing test's end of the print, clears the client's report and locks
+        the latch."""
         self.in_cloud(pid=1522)
         self.hunted(1522)
         self.append(["2026-08-17T09:41:00.500000+00:00 gfcloud[1522] INFO websocket:_on_open RX-EVENT: ready"])
+        pre, rest = cut(lines, "current state: MachineState.RUNNING")
+        pre, rest = pre + [rest[0]], rest[1:]
+        pausing, rest = cut(rest, "machine:_run_loop paused at")
+        settled, resume = rest[:1], rest[1:]
+        self.paused_before_resume = None
+        self.pending = None
+        self.replay_done = False
+
+        def settle():
+            if latch_while_paused is None:
+                os.remove(self.sysfs + "cnc/interlock_circuit")
+            else:
+                self._attr("cnc/interlock_circuit", latch_while_paused)
+            self.fc.state["cool"]["armed"] = True
+            self.append(settled)
+
+        def press_to_pause():
+            self._attr("cnc/interlock_circuit", LOCKED_ILK)    # locked for the stop and the backward run
+            self.append(pausing)
+            self.pending = settle
+
+        def press_to_resume():
+            with open(self.log, "rb") as f:
+                self.paused_before_resume = b"paused at" in f.read()
+            self._attr("cnc/interlock_circuit", LOCKED_ILK)
+            self.replay_done = True
+            self.append(resume)
+
+        def controller_stop(path, form):
+            if path == "/controller/stop":
+                self.fc.state["cool"]["armed"] = False
+                if not os.path.exists(self.sysfs + "cnc/interlock_circuit"):
+                    self._attr("cnc/interlock_circuit", LOCKED_ILK)     # the stop's lock, read again
+            return None
+        self.fc.on_post = controller_stop
+        return {"Click Done here": lambda: self.append(pre, delay=0.1),
+                "the press pauses the print": press_to_pause,
+                "the press resumes it": press_to_resume}
+
+    def test_pause_resume_fails_when_the_kernel_refuses_the_resume(self):
         lines = [l.replace("machine:_resume_retraced resuming (laser lead 1950 ticks)",
                            "machine:_resume_retraced resume refused ([Errno 22] Invalid argument); canceling")
                  for l in fixture("pause")]
-        pre, rest = cut(lines, "current state: MachineState.RUNNING")
-        pre, rest = pre + [rest[0]], rest[1:]
-        with self.fast_wait_log():
-            hooks = {"Click Done here": lambda: self.append(pre, delay=0.1),
-                     "the press pauses the print": lambda: self.append(rest, delay=0.05)}
-            self.assertFails(cloud.pause_resume, "the resume was refused", hooks=hooks)
+        with self.pause_waits():
+            self.assertFails(cloud.pause_resume, "the resume was refused", hooks=self.pause_hooks(lines))
+        # the latch was read once the pause had settled, and the resume press
+        # was asked for only after that read
+        self.assertIs(self.paused_before_resume, True)
+
+    def test_pause_resume_fails_on_a_latch_locked_or_unreadable_while_paused(self):
+        # The client logs no relock (the fixture's pause is clean), yet the
+        # latch reads locked between the presses: a relock by another writer,
+        # which the log never shows. An unreadable latch is no unlocked one.
+        for latch in (LOCKED_ILK, None):
+            self._attr("cnc/interlock_circuit", LOCKED_ILK)
+            with self.subTest(latch=latch), self.pause_waits():
+                self.assertFails(cloud.pause_resume, "the latch is not unlocked while the print waits paused",
+                                 hooks=self.pause_hooks(fixture("pause"), latch_while_paused=latch))
 
     @contextlib.contextmanager
-    def fast_wait_log(self):
-        """The wait for the pause lines is 90 s: a replay whose line never
-        comes would sit it out. Cap it through the module's wait."""
+    def pause_waits(self):
+        """The module's log wait on the replay's steps: a settle pending
+        from the press lands first, and once the replay has written its last
+        line, one read answers, since a line not in the log by then never
+        comes. A replay that stalls is still bounded, generously."""
         saved = cloud.wait_log
 
-        def fast(ctx, offset, needles, timeout, poll=0.5):
-            return saved(ctx, offset, needles, min(timeout, 1.5), poll=0.1)
-        cloud.wait_log = fast
+        def wait(ctx, offset, needles, timeout, poll=0.5):
+            settle, self.pending = self.pending, None
+            if settle:
+                settle()
+            if self.replay_done:
+                lines = cloud.log_lines_since(cloud.GFCLOUD_LOG, offset)
+                return {n: next((ln for ln in lines if n in ln), None) for n in needles}
+            return saved(ctx, offset, needles, min(timeout, 30), poll=0.05)
+        cloud.wait_log = wait
         press = cloud.PRESS_TIMEOUT_S
-        cloud.PRESS_TIMEOUT_S = 1.5
+        cloud.PRESS_TIMEOUT_S = 30
         try:
             yield
         finally:
@@ -354,6 +428,47 @@ class CloudSuiteTests(unittest.TestCase):
                     if "lid opened mid-run; stopping motion" in l else l for l in lid_tail]
         self.assertFails(cloud.lid_interlock_abort, "not edge-driven",
                          hooks=self.abort_hooks(pre, lid_tail, ilk_stop, ilk_park, []))
+
+    def test_lid_interlock_abort_fails_when_the_edge_has_no_time(self):
+        # a log line whose time does not parse leaves the edge-to-stop time
+        # unjudged: that is a failure, never a skipped check
+        self.in_offline()
+        pre, lid_tail, ilk_stop, ilk_park = self.abort_parts()
+        lid_tail = [l.replace("2026-08-17T09:42:30.832527+00:00", "--:--:--")
+                    if l.endswith("_switch_event lid opened") else l for l in lid_tail]
+        self.assertFails(cloud.lid_interlock_abort, "edge-to-stop time cannot be judged",
+                         hooks=self.abort_hooks(pre, lid_tail, ilk_stop, ilk_park, []))
+
+    def test_the_mode_switch_turns_cloud_mode_on_with_the_phrase_and_puts_it_back(self):
+        # cloud mode off, as a reset machine has it: the switch to the cloud
+        # controller is refused without it. The test fails here on the lid,
+        # and puts the setting back all the same.
+        self.fc.state["settings"]["cloud_enabled"] = ""
+        self.lid(False)
+        self.assertFails(cloud.mode_switch, "close the lid first")
+        writes = [f for p, f in self.fc.posts if p == "/settings"]
+        self.assertEqual(writes, [{"cloud_enabled": "1", "phrase": "I UNDERSTAND"}, {"cloud_enabled": ""}])
+
+    def test_an_absence_is_read_across_a_rotation_and_never_on_a_lost_window(self):
+        # The refused resume was written before the log rotated: the live
+        # file is shorter than the test's mark, and the line is in the
+        # rotated file. A window the rotation took away cannot be judged.
+        ctx = Context(Run("test", "cloud.x", "cloud.x"), None, helpers.make_test("cloud.x", []))
+        got = {n: "line" for n in cloud.PAUSE_LINES + cloud.RESUME_LINES}
+        got["button pressed mid-run; pausing"] = got["paused at"] = "line"
+        mark = b"x" * 4096 + b"\n"
+        with gzip.open(self.log + ".1.gz", "wb") as f:
+            f.write(mark + b"2026-08-17T09:42:34.7 gfcloud[1522] INFO machine:_resume_retraced resume refused "
+                           b"([Errno 22] Invalid argument); canceling\n")
+        with open(self.log, "wb") as f:
+            f.write(b"2026-08-17T09:42:40.0 gfcloud[1522] INFO a line after the rotation\n")
+        with self.assertRaises(Failed) as cm:
+            cloud.check_pause_resume(ctx, got, len(mark))
+        self.assertIn("the resume was refused", str(cm.exception))
+        os.remove(self.log + ".1.gz")
+        with self.assertRaises(Failed) as cm:
+            cloud.check_pause_resume(ctx, got, len(mark))
+        self.assertIn("cannot be read", str(cm.exception))
 
     # -- the dark print exthost.armed-freeze runs: unlocked at the button ------
     def dark_parts(self):
