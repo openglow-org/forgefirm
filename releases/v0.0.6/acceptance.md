@@ -102,4 +102,4 @@
 | `cloud.oversize-stream` | live | PASS | 2026-09-19T21:18:52Z | `c-20260919210959-8780` | yes |
 | `cloud.paused-lid-cancel` | live | PASS | 2026-09-19T22:04:00Z | `c-20260919215024-c402` | yes |
 
-Artifact sha256: `74f10b1e46fb0097199b179607546fb9964252915c74fcb6c09c23d81b421972`
+Artifact sha256: `f19dcdd8a30a6f46e73761e4e2d6f95f4fc32183f9d166819927d1cdbe8b6e52`

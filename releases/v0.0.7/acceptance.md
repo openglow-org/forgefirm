@@ -138,4 +138,4 @@
 | `motion.tray` | auto | PASS | 2026-09-28T18:16:42Z | `c-20260928180313-75fb` | yes |
 | `forgectrl.tls-records` | auto | PASS | 2026-09-28T18:33:03Z | `c-20260928183105-64ee` | yes |
 
-Artifact sha256: `550c90e31d327d69f16407ad7539c09cd34c08711fdb62dd479321db2d5c07da`
+Artifact sha256: `929cc3238eb33e45ffd6ebcb9545ca5d8a9d8a47e482e641224820a301c509ba`

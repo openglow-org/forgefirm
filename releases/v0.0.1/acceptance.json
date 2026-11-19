@@ -2396,7 +2396,7 @@
   }
  },
  "manifest_sha": "d02c25b76481a559c9a67df278a181ed16912bd20c7ce7eb60f93ca140b1a64d",
- "sha256": "2aa22f306e56792a8120de6d3b2b6817162f011544099da0c37540a0dae90b09",
+ "sha256": "3b53c0f08c45e7b378c081c77dcac30a9faf65cd49e38d71fa1e5850e6cac1ac",
  "tests": [
   {
    "always": true,
@@ -2473,8 +2473,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "forgectrl_pids": [
@@ -2558,7 +2558,7 @@
       "K95syslog"
      ],
      "record_accounts": [
-      "scott"
+      "<REDACTED-2>"
      ],
      "sdma_clk_enable_count": "1",
      "userspace_watchdog_pids": [],
@@ -2576,8 +2576,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:54:35 start image.health (auto, api) in campaign c-20260909204732-3fa9",
-     "20:54:35 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:54:35 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:54:35 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:54:35 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:54:35 queued by the unattended queue opened 2026-09-09T20:54:34Z",
      "20:54:35 baseline: pre: clean",
      "20:54:35 forgefirm-version: 20260909193551 (dev) (manifest: 20260909193551 (dev))",
@@ -2659,8 +2659,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "generic_texts": 411,
@@ -2670,8 +2670,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:00:57 start image.license-bundle (auto, api) in campaign c-20260909200054-7947",
-     "20:00:57 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:00:57 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:00:57 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:00:57 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:00:57 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:00:57 baseline: pre: clean",
      "20:00:57 /usr/share/forgefirm/licenses.tar.gz: 697648 bytes",
@@ -2743,8 +2743,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "forgectrl_laser_locked": true,
@@ -2757,8 +2757,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:54:35 start kernel.latch-locked-idle (auto, api) in campaign c-20260909204732-3fa9",
-     "20:54:35 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:54:35 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:54:35 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:54:35 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:54:35 queued by the unattended queue opened 2026-09-09T20:54:34Z",
      "20:54:35 baseline: pre: clean",
      "20:54:35 cnc/state: idle",
@@ -2818,8 +2818,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "k1": {
@@ -2853,8 +2853,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:54:36 start kernel.k1-k2 (auto, takeover) in campaign c-20260909204732-3fa9",
-     "20:54:36 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:54:36 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:54:36 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:54:36 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:54:36 queued by the unattended queue opened 2026-09-09T20:54:34Z",
      "20:54:36 baseline: pre: clean",
      "20:54:36 takeover: waiting for forgectrl to be settled",
@@ -2937,8 +2937,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "head_after": {
@@ -2956,8 +2956,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:54:59 start kernel.deadman-close (auto, takeover) in campaign c-20260909204732-3fa9",
-     "20:54:59 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:54:59 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:54:59 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:54:59 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:54:59 queued by the unattended queue opened 2026-09-09T20:54:34Z",
      "20:54:59 baseline: pre: clean",
      "20:54:59 takeover: waiting for forgectrl to be settled",
@@ -3033,8 +3033,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "max_backtrack": 15064,
@@ -3045,8 +3045,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:55:09 start kernel.backtrack-bounds (auto, takeover) in campaign c-20260909204732-3fa9",
-     "20:55:09 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:55:09 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:55:09 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:55:09 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:55:09 queued by the unattended queue opened 2026-09-09T20:54:34Z",
      "20:55:10 baseline: pre: clean",
      "20:55:10 takeover: waiting for forgectrl to be settled",
@@ -3182,8 +3182,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "hv_release_s": [
@@ -3206,8 +3206,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:55:28 start kernel.fire-line (auto, takeover) in campaign c-20260909204732-3fa9",
-     "20:55:28 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:55:28 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:55:28 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:55:28 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:55:28 queued by the unattended queue opened 2026-09-09T20:54:34Z",
      "20:55:28 baseline: pre: clean",
      "20:55:28 takeover: waiting for forgectrl to be settled",
@@ -3254,7 +3254,7 @@
      "20:55:54 safe state restored: state=disabled latch=LOCKED",
      "20:55:54 takeover: forgectrl start -> rc 0",
      "20:55:55 baseline: /mode controller=stopped motion=unverified",
-     "20:55:59 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:55:59 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:56:10 baseline: /mode controller=stopped motion=verified",
      "20:56:11 baseline: /mode controller=running motion=verified",
      "20:56:12 baseline: post: clean",
@@ -3330,8 +3330,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "hv_release_s": [
@@ -3344,8 +3344,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:02:34 start kernel.resume-lead (auto, takeover) in campaign c-20260909200054-7947",
-     "20:02:34 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:02:34 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:02:34 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:02:34 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:02:34 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:02:34 baseline: pre: clean",
      "20:02:34 takeover: waiting for forgectrl to be settled",
@@ -3446,8 +3446,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "pic_settle_us_after": "500",
@@ -3477,8 +3477,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:02:56 start kernel.pic-soc-load (auto, api) in campaign c-20260909200054-7947",
-     "20:02:56 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:02:56 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:02:56 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:02:56 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:02:56 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:02:56 baseline: pre: clean",
      "20:02:59 control (settle off): after sleep median 649 (iqr 3, 645..666); after spin median 655 (iqr 2, 652..662)",
@@ -3553,7 +3553,7 @@
      },
      "cool_state_from_lan": 403,
      "cool_state_from_lan_http": {
-      "location": "https://172.16.1.97/cool/state",
+      "location": "https://<IP-2>/cool/state",
       "status": 302
      },
      "cool_state_from_loopback": 200,
@@ -3563,14 +3563,14 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "fuse_noauth": 403,
      "fuse_token_no_button": 403,
      "host_name": 403,
-     "lan_ip": "172.16.1.97",
+     "lan_ip": "<IP-2>",
      "noauth /boot": 403,
      "noauth /controller/start": 403,
      "noauth /controller/stop": 403,
@@ -3599,8 +3599,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:03:00 start forgectrl.auth (auto, api) in campaign c-20260909200054-7947",
-     "20:03:00 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:03:00 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:03:00 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:03:00 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:03:00 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:03:00 baseline: pre: clean",
      "20:03:00 GET /status -> 200",
@@ -3628,9 +3628,9 @@
      "20:03:00 GET /fuse-identity (no token) -> 403 {'error': 'authentication required'}",
      "20:03:00 GET /fuse-identity (token, button not held) -> 403 ",
      "20:03:00 POST /cool/state from loopback -> 200 {'ok': True}",
-     "20:03:00 POST http://172.16.1.97/cool/state -> 302 https://172.16.1.97/cool/state",
-     "20:03:00 POST https://172.16.1.97/cool/state -> 403 {'error': 'loopback only'}",
-     "20:03:00 GET https://172.16.1.97/setup?step=laser.focus (no session) -> 302 /login?next=/setup%3Fstep%3Dlaser.focus",
+     "20:03:00 POST http://<IP-2>/cool/state -> 302 https://<IP-2>/cool/state",
+     "20:03:00 POST https://<IP-2>/cool/state -> 403 {'error': 'loopback only'}",
+     "20:03:00 GET https://<IP-2>/setup?step=laser.focus (no session) -> 302 /login?next=/setup%3Fstep%3Dlaser.focus",
      "20:03:01 baseline: post: clean",
      "20:03:01 result PASS"
     ],
@@ -3673,7 +3673,7 @@
     "duration_s": 0,
     "evidence": {
      "accepted": {
-      "key": "ui_units",
+      "key": "<REDACTED-3>",
       "status": 200,
       "value": "imperial"
      },
@@ -3691,8 +3691,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "keys": 81,
@@ -3711,8 +3711,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:03:01 start forgectrl.settings-bounds (auto, api) in campaign c-20260909200054-7947",
-     "20:03:01 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:03:01 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:03:01 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:03:01 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:03:01 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:03:01 baseline: pre: clean",
      "20:03:01 POST /settings gf_serial=<300 chars> -> 400 ",
@@ -3720,7 +3720,7 @@
      "20:03:01 POST /settings pulse_reject_threshold_bytes=2000000000 -> 400",
      "20:03:01 POST /settings no_such_key_forgetest=1 -> 400",
      "20:03:01 settings unchanged after the refused writes",
-     "20:03:01 POST /settings ui_units=imperial -> 200",
+     "20:03:01 POST /settings <REDACTED-3>=imperial -> 200",
      "20:03:01 lid lamp: setting '', pic/lid_led=236 (expected 236)",
      "20:03:01 lid_lamp_idle 256 / -1 / bright refused",
      "20:03:01 lid_lamp_idle=100 -> pic/lid_led=100 after 0.0 s",
@@ -3813,8 +3813,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "grbl": {
@@ -3866,8 +3866,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:00:55 start forgectrl.panel-serves (auto, api) in campaign c-20260909200054-7947",
-     "20:00:55 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:00:55 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:00:55 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:00:55 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:00:55 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:00:55 baseline: pre: clean",
      "20:00:55 GET / -> 200 (463316 bytes)",
@@ -4019,8 +4019,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "gated_mode": {
@@ -4120,8 +4120,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:03:01 start commission.gate-blocks-controllers (auto, takeover) in campaign c-20260909200054-7947",
-     "20:03:01 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:03:01 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:03:01 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:03:01 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:03:01 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:03:02 baseline: pre: clean",
      "20:03:02 mode: test needs grbl - already in grbl mode",
@@ -4214,8 +4214,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -4273,8 +4273,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:03:20 start commission.override-until-reboot (auto, api) in campaign c-20260909200054-7947",
-     "20:03:20 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:03:20 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:03:20 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:03:20 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:03:20 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:03:20 baseline: pre: clean",
      "20:03:20 /run/forgefirm/commissioning-override is on /run (tmpfs)",
@@ -4460,15 +4460,15 @@
       "why": "override active (required: cooling.aa-offset, cooling.flow)"
      },
      "content_type": "text/markdown; charset=utf-8",
-     "etag": "cb0ce8ae5fa98b850785d681957a9142e4ccad6c0c8f17ceddee5a3cd215b99d",
+     "etag": "<HEX-1>",
      "fixture": {
       "channels": [
        "lid",
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "no_phrase": 400,
@@ -4479,11 +4479,11 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:03:20 start commission.advisories-rehash (auto, takeover) in campaign c-20260909200054-7947",
-     "20:03:20 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:03:20 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:03:20 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:03:20 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:03:20 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:03:21 baseline: pre: clean",
-     "20:03:21 GET /advisories/safety-and-risk -> 200, 6868 bytes, ETag cb0ce8ae5fa98b850785d681957a9142e4ccad6c0c8f17ceddee5a3cd215b99d",
+     "20:03:21 GET /advisories/safety-and-risk -> 200, 6868 bytes, ETag <HEX-1>",
      "20:03:21 accept with a stale hash -> 409 {'error': 'the document changed; read it again'}",
      "20:03:21 accept at the current hash with the phrase -> 200",
      "20:03:21 acceptance_done cleared, gate closed: the advisories are not accepted",
@@ -4558,7 +4558,7 @@
     "campaign": "c-20260909200054-7947",
     "duration_s": 49,
     "evidence": {
-     "account_before": "scott",
+     "account_before": "<REDACTED-2>",
      "baseline": {
       "post": [],
       "pre": []
@@ -4580,14 +4580,14 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "login": 200,
      "logout": 200,
      "right_inside_lock": 429,
-     "tls_fingerprint": "62:6A:AD:FA:3D:85:68:A0:EF:B0:9D:75:28:06:41:5C:14:1B:49:22:16:4A:02:A3:E3:95:E1:A2:2E:7C:2F:D8",
+     "tls_fingerprint": "<REDACTED-4>",
      "users_reload_rc": 0,
      "wait": 30,
      "wrong_codes": [
@@ -4604,8 +4604,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:03:30 start commission.account-login (auto, takeover) in campaign c-20260909200054-7947",
-     "20:03:30 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:03:30 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:03:30 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:03:30 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:03:30 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:03:30 baseline: pre: clean",
      "20:03:30 takeover: waiting for forgectrl to be settled",
@@ -4623,7 +4623,7 @@
      "20:03:38 GET https://127.0.0.1/wiz -> 200",
      "20:03:39 wrong password attempts -> [401, 401, 401, 401, 401, 429]",
      "20:03:39 locked for 30 s; the right password is refused inside the lock",
-     "20:04:00 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:04:00 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:04:10 POST /login (right) -> 200, cookie flags ['httponly', 'max-age', 'path', 'samesite', 'secure']",
      "20:04:10 session set by the login, seen by GET /wiz, ended by the logout",
      "20:04:10 takeover: waiting for forgectrl to be settled",
@@ -4637,7 +4637,7 @@
      "20:04:13 baseline: /mode controller=stopped motion=unverified",
      "20:04:18 baseline: /mode controller=running motion=verified",
      "20:04:18 restored under a restart: users",
-     "20:04:18 forgefirm-users reload -> rc 0 forgefirm-users: account scott created\nforgefirm-users: removing account forgetest (not in the record)",
+     "20:04:18 forgefirm-users reload -> rc 0 forgefirm-users: account <REDACTED-2> created\nforgefirm-users: removing account forgetest (not in the record)",
      "20:04:19 baseline: post: clean",
      "20:04:19 result PASS"
     ],
@@ -4701,42 +4701,42 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "lan_http GET /logs": {
-      "location": "https://172.16.1.97/logs",
+      "location": "https://<IP-2>/logs",
       "status": 302
      },
      "lan_http GET /system/ssh": {
-      "location": "https://172.16.1.97/system/ssh",
+      "location": "https://<IP-2>/system/ssh",
       "status": 302
      },
      "lan_http POST /settings": {
-      "location": "https://172.16.1.97/settings",
+      "location": "https://<IP-2>/settings",
       "status": 302
      },
      "lan_http_read": 200,
      "lan_https_read": 200,
      "lan_https_write": 200,
-     "lan_ip": "172.16.1.97",
+     "lan_ip": "<IP-2>",
      "loopback_http_write": 200
     },
     "fingerprint": "d3e00388146e30ad5ed4265766c60f4e30f5dc1621c5dffa20222f48c5c693b8",
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:19 start commission.https-only-writes (auto, api) in campaign c-20260909200054-7947",
-     "20:04:19 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:19 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:19 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:19 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:19 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:19 baseline: pre: clean",
-     "20:04:19 GET https://172.16.1.97/status -> 200",
-     "20:04:19 GET http://172.16.1.97/status -> 200",
-     "20:04:19 POST http://172.16.1.97/settings (token) -> 302 Location https://172.16.1.97/settings",
-     "20:04:19 GET http://172.16.1.97/system/ssh (token) -> 302 Location https://172.16.1.97/system/ssh",
-     "20:04:19 GET http://172.16.1.97/logs (token) -> 302 Location https://172.16.1.97/logs",
-     "20:04:19 POST https://172.16.1.97/settings (token, no session) -> 200 (dev image True, account True)",
+     "20:04:19 GET https://<IP-2>/status -> 200",
+     "20:04:19 GET http://<IP-2>/status -> 200",
+     "20:04:19 POST http://<IP-2>/settings (token) -> 302 Location https://<IP-2>/settings",
+     "20:04:19 GET http://<IP-2>/system/ssh (token) -> 302 Location https://<IP-2>/system/ssh",
+     "20:04:19 GET http://<IP-2>/logs (token) -> 302 Location https://<IP-2>/logs",
+     "20:04:19 POST https://<IP-2>/settings (token, no session) -> 200 (dev image True, account True)",
      "20:04:19 baseline: post: clean",
      "20:04:19 result PASS"
     ],
@@ -4810,8 +4810,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "sshd_policy": {
@@ -4824,8 +4824,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:19 start commission.ssh-until-reboot (auto, api) in campaign c-20260909200054-7947",
-     "20:04:19 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:19 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:19 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:19 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:19 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:20 baseline: pre: clean",
      "20:04:20 GET /system/ssh -> 200 {'enabled': False, 'running': True, 'dev_image': True}",
@@ -4898,8 +4898,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "found": {
@@ -4926,8 +4926,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:20 start commission.cloud-disabled-surface (auto, api) in campaign c-20260909200054-7947",
-     "20:04:21 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:21 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:21 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:21 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:21 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:21 baseline: pre: clean",
      "20:04:21 mode: test needs grbl - already in grbl mode",
@@ -5009,8 +5009,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "no_confirm": {
@@ -5028,8 +5028,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:23 start commission.factory-return (auto, api) in campaign c-20260909200054-7947",
-     "20:04:23 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:23 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:23 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:23 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:23 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:23 baseline: pre: clean",
      "20:04:23 POST /restore/factory-return (no confirm) -> 400 {'error': 'confirm=1 required'}",
@@ -5066,7 +5066,7 @@
     "duration_s": 0,
     "evidence": {
      "answers": [
-      "172.16.1.97"
+      "<IP-2>"
      ],
      "avahi_pids": [
       459,
@@ -5086,11 +5086,11 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
-     "lan_ip": "172.16.1.97",
+     "lan_ip": "<IP-2>",
      "resolve_s": 0.0,
      "service_file_bytes": 461
     },
@@ -5098,11 +5098,11 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:24 start commission.mdns-announce (auto, api) in campaign c-20260909200054-7947",
-     "20:04:24 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:24 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:24 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:24 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:24 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:24 baseline: pre: clean",
-     "20:04:24 forgefirm.local -> ['172.16.1.97'] (0.0 s)",
+     "20:04:24 forgefirm.local -> ['<IP-2>'] (0.0 s)",
      "20:04:24 baseline: post: clean",
      "20:04:24 result PASS"
     ],
@@ -5178,7 +5178,7 @@
       "cookie": true,
       "status": 200
      },
-     "account_before": "scott",
+     "account_before": "<REDACTED-2>",
      "actions": [
       {
        "by": "fixture",
@@ -5319,8 +5319,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "fresh": {
@@ -5386,12 +5386,12 @@
       "why": ""
      },
      "settings_before": {
+      "<REDACTED-3>": "imperial",
       "cloud_enabled": "1",
       "controller_mode": "grbl",
       "cool_tec_present": "0",
       "gfcloud_home_timeout_s": "",
       "homing_mode": "gfcloud",
-      "ui_units": "imperial",
       "wifi_country": "US"
      },
      "users_reload_rc": 0
@@ -5400,8 +5400,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:24 start commission.first-run-flow (operator, takeover) in campaign c-20260909200054-7947",
-     "20:04:24 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:24 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:24 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:24 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:24 fixture: running unattended (no prompt can be answered)",
      "20:04:24 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:24 baseline: pre: clean",
@@ -5419,7 +5419,7 @@
      "20:04:29 ACT button press (fixture)",
      "20:04:29 ACT button press: done after 0.3 s",
      "20:04:29 the press step: teal ({'target': [0, 255, 255], 'pulse_on': [0, 1400, 1400], 'pulse_off': [0, 1400, 1400]}), the press accepted",
-     "20:04:29 account 'bench-94b6' created, the session cookie set",
+     "20:04:29 account '<REDACTED-5>' created, the session cookie set",
      "20:04:30 preferences, machine (basic), cloud (1) written",
      "20:04:30 baseline: /mode controller=stopped motion=unverified",
      "20:04:36 baseline: /mode controller=running motion=verified",
@@ -5440,10 +5440,10 @@
      "20:04:45 restore controller_mode='grbl' -> 200",
      "20:04:45 restore gfcloud_home_timeout_s='' -> 200",
      "20:04:45 restore cool_tec_present='0' -> 200",
-     "20:04:45 restore ui_units='imperial' -> 200",
+     "20:04:45 restore <REDACTED-3>='imperial' -> 200",
      "20:04:46 restore wifi_country='US' -> 200",
-     "20:04:46 forgefirm-users reload -> rc 0 forgefirm-users: account scott created\nforgefirm-users: removing account bench-94b6 (not in the record)",
-     "20:04:46 removed the temporary home directory of 'bench-94b6'",
+     "20:04:46 forgefirm-users reload -> rc 0 forgefirm-users: account <REDACTED-2> created\nforgefirm-users: removing account <REDACTED-5> (not in the record)",
+     "20:04:46 removed the temporary home directory of '<REDACTED-5>'",
      "20:04:46 baseline: post: clean",
      "20:04:46 result PASS"
     ],
@@ -5506,7 +5506,7 @@
     "campaign": "c-20260909204732-3fa9",
     "duration_s": 77,
     "evidence": {
-     "account_before": "scott",
+     "account_before": "<REDACTED-2>",
      "actions": [
       {
        "by": "fixture",
@@ -5635,8 +5635,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "fresh": {
@@ -5703,23 +5703,23 @@
      },
      "root_page": 200,
      "settings_before": {
+      "<REDACTED-3>": "imperial",
       "cloud_enabled": "1",
       "controller_mode": "grbl",
       "cool_tec_present": "0",
       "gfcloud_home_timeout_s": "",
       "homing_mode": "gfcloud",
-      "ui_units": "imperial",
       "wifi_country": "US"
      },
-     "temp_account": "bigbootytits",
+     "temp_account": "<REDACTED-6>",
      "users_reload_rc": 0
     },
     "fingerprint": "d03bb96a289c4d5b21bc4b01fa314948d4aded62ef97177feca3f8447bc2eebd",
     "image": "20260909193551 (dev)",
     "log": [
      "20:57:13 start commission.first-run-page (operator, takeover) in campaign c-20260909204732-3fa9",
-     "20:57:13 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:57:13 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:57:13 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:57:13 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:57:13 baseline: pre: clean",
      "20:57:13 takeover: waiting for forgectrl to be settled",
      "20:57:13 baseline: /mode controller=running motion=verified",
@@ -5731,14 +5731,14 @@
      "20:57:14 takeover: forgectrl start -> rc 0",
      "20:57:16 baseline: /mode controller=gated motion=unverified",
      "20:57:16 installed under a restart: commissioning.json=12658 B, users=removed, commissioning-override=0 B",
-     "20:57:16 NOTICE: Open https://172.16.1.97/ from the workstation, accept the certificate, and click through the setup as the steps describe. The test follows the record.",
+     "20:57:16 NOTICE: Open https://<IP-2>/ from the workstation, accept the certificate, and click through the setup as the steps describe. The test follows the record.",
      "20:57:41 the documents are accepted (25 s)",
      "20:57:42 ACT button press (fixture)",
      "20:57:43 ACT button press: done after 1.1 s",
      "20:57:43 NOTICE: Continue on the page: the account, the preferences, the machine, the cloud step, Finish.",
-     "20:57:43 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:57:59 account 'bigbootytits' created (16 s)",
-     "20:58:15 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:57:43 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:57:59 account '<REDACTED-6>' created (16 s)",
+     "20:58:15 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:58:15 baseline: /mode controller=running motion=verified",
      "20:58:15 PROMPT: Did the control panel open after Finish?",
      "20:58:20 ANSWER: Yes",
@@ -5758,10 +5758,10 @@
      "20:58:29 restore controller_mode='grbl' -> 200",
      "20:58:29 restore gfcloud_home_timeout_s='' -> 200",
      "20:58:29 restore cool_tec_present='0' -> 200",
-     "20:58:29 restore ui_units='imperial' -> 200",
+     "20:58:29 restore <REDACTED-3>='imperial' -> 200",
      "20:58:30 restore wifi_country='US' -> 200",
-     "20:58:30 forgefirm-users reload -> rc 0 forgefirm-users: account scott created\nforgefirm-users: removing account bigbootytits (not in the record)",
-     "20:58:30 removed the temporary home directory of 'bigbootytits'",
+     "20:58:30 forgefirm-users reload -> rc 0 forgefirm-users: account <REDACTED-2> created\nforgefirm-users: removing account <REDACTED-6> (not in the record)",
+     "20:58:30 removed the temporary home directory of '<REDACTED-6>'",
      "20:58:30 baseline: post: clean",
      "20:58:30 result PASS"
     ],
@@ -5819,15 +5819,15 @@
       "group": "unattended",
       "ts": "2026-09-09T20:00:54Z"
      },
-     "fingerprint": "62:6A:AD:FA:3D:85:68:A0:EF:B0:9D:75:28:06:41:5C:14:1B:49:22:16:4A:02:A3:E3:95:E1:A2:2E:7C:2F:D8",
+     "fingerprint": "<REDACTED-4>",
      "fixture": {
       "channels": [
        "lid",
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "pem_bytes": 668
@@ -5836,12 +5836,12 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:46 start commission.cert-page (auto, api) in campaign c-20260909200054-7947",
-     "20:04:46 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:46 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:46 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:46 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:46 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:47 baseline: pre: clean",
-     "20:04:47 GET http://172.16.1.97/cert -> 200",
-     "20:04:47 GET https://172.16.1.97/cert -> 200",
+     "20:04:47 GET http://<IP-2>/cert -> 200",
+     "20:04:47 GET https://<IP-2>/cert -> 200",
      "20:04:47 baseline: post: clean",
      "20:04:47 result PASS"
     ],
@@ -5986,8 +5986,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "gated_after_fan": false,
@@ -6008,8 +6008,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:47 start commission.what-changed (auto, takeover) in campaign c-20260909200054-7947",
-     "20:04:47 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:47 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:47 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:47 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:47 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:47 baseline: pre: clean",
      "20:04:47 POST /wiz/changed what=nothing-like-this -> 400",
@@ -6099,7 +6099,7 @@
       "ts": "2026-09-09T20:00:54Z"
      },
      "bundle_record_bytes": 18511,
-     "download_disposition": "attachment; filename=\"forgefirm-commissioning-PVHHW-32AQ7.json\"",
+     "download_disposition": "attachment; filename=\"forgefirm-commissioning-<REDACTED-7>.json\"",
      "export_s": 39.3,
      "fixture": {
       "channels": [
@@ -6107,13 +6107,13 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "missing_on_page": [],
      "page_bytes": 16157,
-     "sheet_id": "PVHHW-32AQ7",
+     "sheet_id": "<REDACTED-7>",
      "wizards_in_record": [
       "account",
       "advisories",
@@ -6142,13 +6142,13 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:05:37 start commission.record-export (auto, api) in campaign c-20260909200054-7947",
-     "20:05:37 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:05:37 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:05:37 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:05:37 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:05:37 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:05:37 baseline: pre: clean",
      "20:05:37 GET /wiz/record -> 200 (11550 bytes)",
      "20:05:37 GET /wiz/record.html -> 200 (16157 bytes)",
-     "20:06:08 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:06:08 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:06:16 POST /logs/export -> 200 (3403747 bytes, 39.3 s)",
      "20:06:17 record 21 wizards; page 16157 bytes; bundle carries the record",
      "20:06:17 baseline: post: clean",
@@ -6216,7 +6216,7 @@
       "owned": true,
       "running": true
      },
-     "account_before": "scott",
+     "account_before": "<REDACTED-2>",
      "after_takeover": {
       "a": false,
       "b": true
@@ -6245,8 +6245,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "tool_sees": {
@@ -6260,8 +6260,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:06:30 start commission.mirror (auto, takeover) in campaign c-20260909200054-7947",
-     "20:06:30 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:06:30 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:06:30 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:06:30 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:06:30 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:06:30 baseline: pre: clean",
      "20:06:30 takeover: waiting for forgectrl to be settled",
@@ -6391,8 +6391,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "log": [
@@ -6422,8 +6422,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:06:49 start commission.check-switches (operator, api) in campaign c-20260909200054-7947",
-     "20:06:49 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:06:49 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:06:49 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:06:49 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:06:49 fixture: running unattended (no prompt can be answered)",
      "20:06:49 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:06:49 baseline: pre: clean",
@@ -6524,8 +6524,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "log": [
@@ -6562,8 +6562,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:06:17 start commission.check-sensors (auto, api) in campaign c-20260909200054-7947",
-     "20:06:17 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:06:17 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:06:17 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:06:17 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:06:17 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:06:17 baseline: pre: clean",
      "20:06:17 POST /wiz/sensors/start -> 200 {'started': True, 'id': 'sensors'}",
@@ -6658,8 +6658,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "log": [
@@ -6722,14 +6722,14 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:07:48 start commission.check-airflow (auto, takeover) in campaign c-20260909200054-7947",
-     "20:07:49 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:07:49 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:07:49 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:07:49 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:07:49 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:07:49 baseline: pre: clean",
      "20:07:49 POST /wiz/airflow/start -> 200 {'started': True, 'id': 'airflow'}",
      "20:07:49 airflow: stopping the motion controller",
      "20:07:50 airflow: fans to the run profile for 35 s",
-     "20:08:19 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:08:19 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:08:25 airflow: purge off, reading the off current",
      "20:08:28 exhaust: 11644.0 rpm steady, 90 percent at 4.5 s",
      "20:08:28 intake 1: 4167.0 rpm steady, 90 percent at 0.6 s",
@@ -6826,8 +6826,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "log": [
@@ -6862,8 +6862,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:08:44 start commission.check-cameras (operator, api) in campaign c-20260909200054-7947",
-     "20:08:44 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:08:44 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:08:44 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:08:44 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:08:44 fixture: running unattended (no prompt can be answered)",
      "20:08:44 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:08:44 baseline: pre: clean",
@@ -6967,8 +6967,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "log": [
@@ -7071,8 +7071,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:09:15 start commission.check-motion (auto, takeover) in campaign c-20260909200054-7947",
-     "20:09:15 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:09:15 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:09:15 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:09:15 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:09:15 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:09:15 baseline: pre: clean",
      "20:09:15 NOTICE: The head moves 50 mm each way on X and on Y. Keep the bed clear.",
@@ -7167,8 +7167,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "log": [],
@@ -7196,22 +7196,22 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:13:58 start commission.check-flow-verify (auto, takeover) in campaign c-20260909200054-7947",
-     "20:13:58 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:13:58 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:13:58 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:13:58 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:13:58 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:13:58 baseline: pre: clean",
      "20:13:58 POST /wiz/cooling.flow-verify/start -> 200 {'started': True, 'id': 'cooling.flow-verify'}",
      "20:13:58 cooling.flow-verify: the flow check: settling the loop",
      "20:13:59 cooling.flow-verify: settling before trial 1/1 (pump on)",
-     "20:14:29 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:14:29 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:14:41 cooling.flow-verify: trial 1/1: heater 40% for 50 s (pump on)",
-     "20:14:59 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:15:29 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:14:59 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:15:29 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:15:34 cooling.flow-verify: settling before trial 1/1 (pump off)",
-     "20:15:59 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:15:59 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:16:11 cooling.flow-verify: trial 1/1: heater 40% for 50 s (pump off)",
-     "20:16:30 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:17:00 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:16:30 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:17:00 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:17:04 flow check: threshold 14.4, flow 11.2, no-flow 18.7, thin False",
      "20:17:05 baseline: post: clean",
      "20:17:05 result PASS"
@@ -7302,8 +7302,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "kept": [
@@ -7490,8 +7490,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:25:38 start commission.cloud-header-capture (operator, takeover) in campaign c-20260909204732-3fa9",
-     "21:25:39 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:25:39 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:25:39 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:25:39 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:25:39 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:25:39 baseline: pre: clean",
      "21:25:39 baseline: switching to grbl mode (found cloud, controller running)",
@@ -7502,8 +7502,8 @@
      "21:25:42 cloud.header: starting the cloud client",
      "21:25:46 prompt print (continue): The machine is in cloud mode. In the Glowforge app, place any small design on the bed image and press Print. Do not press the machine's button: the wizard takes the print's header and cancels it.",
      "21:25:47 cloud.header: waiting for the print's header from the service",
-     "21:26:09 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:26:41 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:26:09 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:26:41 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:26:44 cloud.header: the cloud client cancels the print",
      "21:26:47 cloud.header: back to GRBL mode",
      "21:26:48 header: 134 tags, 57 kept; job 1583713043",
@@ -8083,8 +8083,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -8114,8 +8114,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:27:32 start commission.sheet (live, takeover) in campaign c-20260909204732-3fa9",
-     "21:27:32 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:27:32 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:27:32 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:27:32 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:27:32 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:27:32 baseline: pre: clean",
      "21:27:32 mode: test needs grbl - already in grbl mode",
@@ -8140,7 +8140,7 @@
      "21:28:01 sheet.frame: stopping the motion controller",
      "21:28:01 ARM press by the fixture, button lit after 0.5 s",
      "21:28:02 sheet.frame: the lens finds its reference on the hall sensor",
-     "21:28:03 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:28:03 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:28:03 sheet.frame: the lens finds its reference on the hall sensor: pass 1 of 2",
      "21:28:04 sheet.frame: the lens finds its reference on the hall sensor: pass 2 of 2",
      "21:28:05 sheet.frame: the cooling engine takes the controller's report: 0 s (20 at most)",
@@ -8169,7 +8169,7 @@
      "21:28:28 sheet.frame: burning: 11 s lit",
      "21:28:29 sheet.frame: burning: 12 s lit",
      "21:28:30 sheet.frame: burning: 0 s lit",
-     "21:28:33 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:28:33 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:28:35 sheet.frame: burning: the tube is between passes",
      "21:28:36 sheet.frame: burning: 0 s lit",
      "21:28:37 sheet.frame: burning: the tube is between passes",
@@ -8182,7 +8182,7 @@
      "21:28:51 sheet.frame: burning: 0 s lit",
      "21:28:54 sheet.frame: burning: the tube is between passes",
      "21:28:56 sheet.frame: burning: 0 s lit",
-     "21:29:03 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:29:03 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:29:08 sheet.frame: burning: the tube is between passes",
      "21:29:09 sheet.frame: burning: 0 s lit",
      "21:29:12 sheet.frame: burning: the tube is between passes",
@@ -8197,7 +8197,7 @@
      "21:29:27 sheet.frame: burning: 0 s lit",
      "21:29:29 sheet.frame: burning: the tube is between passes",
      "21:29:32 sheet.frame: burning: 0 s lit",
-     "21:29:34 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:29:34 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:29:40 sheet.frame: burning: the tube is between passes",
      "21:29:42 sheet.frame: the tube is dark: the pulse engine plays the rest",
      "21:29:42 prompt frame-ok (choice): Is the frame on the sheet, square, and visible? Look, but do not move the sheet: every card after this is placed from the same datum.",
@@ -8223,7 +8223,7 @@
      "21:29:59 laser.focus: finding the bottom stop by the head accelerometer: 10 half-steps below the edge",
      "21:30:00 laser.focus: finding the bottom stop by the head accelerometer: 15 half-steps below the edge",
      "21:30:01 laser.focus: finding the bottom stop by the head accelerometer: 16 half-steps below the edge",
-     "21:30:04 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:30:04 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:30:04 laser.focus: finding the top stop by the head accelerometer: 6 half-steps above the edge",
      "21:30:05 laser.focus: finding the top stop by the head accelerometer: 11 half-steps above the edge",
      "21:30:06 laser.focus: finding the top stop by the head accelerometer: 17 half-steps above the edge",
@@ -8247,7 +8247,7 @@
      "21:30:28 laser.focus: burning: 4 s lit",
      "21:30:29 laser.focus: burning: the tube is between passes",
      "21:30:31 laser.focus: burning: 0 s lit",
-     "21:30:34 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:30:34 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:30:34 laser.focus: burning: the tube is between passes",
      "21:30:36 laser.focus: burning: 0 s lit",
      "21:30:38 laser.focus: burning: the tube is between passes",
@@ -8274,7 +8274,7 @@
      "21:31:02 laser.focus: burning: the tube is between passes",
      "21:31:03 laser.focus: burning: 1 s lit",
      "21:31:04 laser.focus: burning: the tube is between passes",
-     "21:31:04 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:31:04 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:31:05 laser.focus: burning: 0 s lit",
      "21:31:06 laser.focus: burning: 1 s lit",
      "21:31:07 laser.focus: burning: the tube is between passes",
@@ -8306,7 +8306,7 @@
      "21:31:32 laser.floor: the button is lit: press it now (5 s; the job waits 599 at most)",
      "21:31:33 laser.floor: the button is lit: press it now (6 s; the job waits 599 at most)",
      "21:31:34 laser.floor: the button is lit: press it now (7 s; the job waits 599 at most)",
-     "21:31:35 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:31:35 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:31:35 laser.floor: burning: 0 s lit",
      "21:31:36 laser.floor: burning: 2 s lit",
      "21:31:37 laser.floor: burning: 3 s lit",
@@ -8322,7 +8322,7 @@
      "21:31:52 laser.floor: burning: the tube is between passes",
      "21:32:02 laser.floor: burning: 0 s lit",
      "21:32:03 laser.floor: burning: the tube is between passes",
-     "21:32:05 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:32:05 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:32:09 laser.floor: burning: 0 s lit",
      "21:32:11 laser.floor: burning: the tube is between passes",
      "21:32:12 laser.floor: burning: 0 s lit",
@@ -8335,7 +8335,7 @@
      "21:32:32 laser.floor: burning: 0 s lit",
      "21:32:33 laser.floor: burning: the tube is between passes",
      "21:32:34 laser.floor: burning: 0 s lit",
-     "21:32:36 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:32:36 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:32:37 laser.floor: burning: 1 s lit",
      "21:32:38 laser.floor: burning: 2 s lit",
      "21:32:39 laser.floor: burning: 3 s lit",
@@ -8366,7 +8366,7 @@
      "21:33:04 laser.floor: burning: 4 s lit",
      "21:33:05 laser.floor: burning: the tube is between passes",
      "21:33:06 laser.floor: the tube is dark: the samples run on, 1 s more",
-     "21:33:07 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:33:07 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:33:07 laser.floor: the tube is dark: the pulse engine plays the rest",
      "21:33:08 prompt floor-pick (choice): Which is the faintest rung that shows a continuous line? The labels are the percent density; the top rung is 2. Look, but do not move the sheet: every card after this is placed from the same datum.",
      "21:33:09 laser.floor: {'faintest_density': 8.0, 'floor_density': 10.0}, emission {'hv_max': 1023, 'laser_on_samples': 141, 'thermopile_delta': 862, 'lit_s': 90.98896351100029}",
@@ -8395,7 +8395,7 @@
      "21:33:28 laser.dose-curve: burning: 2 s lit",
      "21:33:29 laser.dose-curve: burning: 3 s lit",
      "21:33:30 laser.dose-curve: burning: 0 s lit",
-     "21:33:37 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:33:37 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:33:37 laser.dose-curve: burning: the tube is between passes",
      "21:33:38 laser.dose-curve: burning: 0 s lit",
      "21:33:43 laser.dose-curve: burning: the tube is between passes",
@@ -8412,7 +8412,7 @@
      "21:34:05 laser.dose-curve: burning: 6 s lit",
      "21:34:06 laser.dose-curve: burning: 7 s lit",
      "21:34:07 laser.dose-curve: burning: 8 s lit",
-     "21:34:08 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:34:08 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:34:08 laser.dose-curve: burning: 9 s lit",
      "21:34:09 laser.dose-curve: burning: the tube is between passes",
      "21:34:12 laser.dose-curve: burning: 0 s lit",
@@ -8437,7 +8437,7 @@
      "21:34:34 laser.dose-curve: burning: 8 s lit",
      "21:34:35 laser.dose-curve: burning: 9 s lit",
      "21:34:36 laser.dose-curve: burning: the tube is between passes",
-     "21:34:38 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:34:38 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:34:39 laser.dose-curve: burning: 0 s lit",
      "21:34:40 laser.dose-curve: burning: 1 s lit",
      "21:34:41 laser.dose-curve: burning: 2 s lit",
@@ -8464,7 +8464,7 @@
      "21:35:06 laser.dose-curve: burning: 1 s lit",
      "21:35:07 laser.dose-curve: burning: 2 s lit",
      "21:35:08 laser.dose-curve: burning: 3 s lit",
-     "21:35:09 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:35:09 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:35:09 laser.dose-curve: burning: 4 s lit",
      "21:35:10 laser.dose-curve: burning: 5 s lit",
      "21:35:11 laser.dose-curve: burning: 6 s lit",
@@ -8496,7 +8496,7 @@
      "21:35:39 laser.corner: stopping the motion controller",
      "21:35:39 ARM press by the fixture, button lit after 0.3 s",
      "21:35:40 laser.corner: the lens finds its reference on the hall sensor",
-     "21:35:40 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:35:40 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:35:42 laser.corner: the lens finds its reference on the hall sensor: pass 1 of 2",
      "21:35:43 laser.corner: the lens finds its reference on the hall sensor: pass 2 of 2",
      "21:35:44 laser.corner: the cooling engine takes the controller's report: 0 s (20 at most)",
@@ -8526,7 +8526,7 @@
      "21:36:08 laser.corner: burning: 2 s lit",
      "21:36:09 laser.corner: burning: 3 s lit",
      "21:36:10 laser.corner: burning: the tube is between passes",
-     "21:36:11 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:36:11 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:36:12 laser.corner: burning: 0 s lit",
      "21:36:15 laser.corner: burning: the tube is between passes",
      "21:36:17 laser.corner: burning: 0 s lit",
@@ -8552,7 +8552,7 @@
      "21:36:41 ARM: the fixture presses when the button lights (the bench's arm_press opt-in)",
      "21:36:41 POST /wiz/cooling.flow-load/start -> 200 {'started': True, 'id': 'cooling.flow-load'}",
      "21:36:41 cooling.flow-load: stopping the motion controller",
-     "21:36:42 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:36:42 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:36:42 ARM press by the fixture, button lit after 0.5 s",
      "21:36:42 cooling.flow-load: the lens finds its reference on the hall sensor",
      "21:36:44 cooling.flow-load: the lens finds its reference on the hall sensor: pass 1 of 2",
@@ -8582,7 +8582,7 @@
      "21:37:09 cooling.flow-load: the coolant loop settles before the press: 21 s (60 at least, 240 at most), reading the sensors",
      "21:37:10 cooling.flow-load: the coolant loop settles before the press: 22 s (60 at least, 240 at most), reading the sensors",
      "21:37:11 cooling.flow-load: the coolant loop settles before the press: 23 s (60 at least, 240 at most), reading the sensors",
-     "21:37:12 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:37:12 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:37:12 cooling.flow-load: the coolant loop settles before the press: 24 s (60 at least, 240 at most), reading the sensors",
      "21:37:13 cooling.flow-load: the coolant loop settles before the press: 25 s (60 at least, 240 at most), reading the sensors",
      "21:37:14 cooling.flow-load: the coolant loop settles before the press: 26 s (60 at least, 240 at most), reading the sensors",
@@ -8613,14 +8613,14 @@
      "21:37:40 cooling.flow-load: the coolant loop settles before the press: 51 s (60 at least, 240 at most), drifting -0.023 C p",
      "21:37:41 cooling.flow-load: the coolant loop settles before the press: 52 s (60 at least, 240 at most), drifting -0.022 C p",
      "21:37:42 cooling.flow-load: the coolant loop settles before the press: 53 s (60 at least, 240 at most), drifting -0.022 C p",
-     "21:37:43 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:37:43 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:37:43 cooling.flow-load: the coolant loop settles before the press: 54 s (60 at least, 240 at most), drifting -0.020 C p",
      "21:37:44 cooling.flow-load: the coolant loop settles before the press: 55 s (60 at least, 240 at most), drifting -0.017 C p",
      "21:37:45 cooling.flow-load: the coolant loop settles before the press: 56 s (60 at least, 240 at most), drifting -0.017 C p",
      "21:37:46 cooling.flow-load: the coolant loop settles before the press: 57 s (60 at least, 240 at most), drifting -0.016 C p",
      "21:37:47 cooling.flow-load: the coolant loop settles before the press: 58 s (60 at least, 240 at most), drifting -0.017 C p",
      "21:37:48 cooling.flow-load: the coolant loop settles before the press: 59 s (60 at least, 240 at most), drifting -0.013 C p",
-     "21:37:49 prompt load-arm (continue): The loop is quiet. Now the box, then a 60 x 15 mm patch at 60 percent that keeps the tube lit for about a minute, both coolant sensors read for 100 s after. About four minutes in all. Lid closed. Continue, then press the button when it lights white; this page says when.",
+     "21:37:49 prompt load-arm (continue): The loop is quiet. Now the box, then a 60 x 15 mm patch at 60 percent that keeps the tube lit for about a minute, both coolant sensors read for 100 s after. About four <REDACTED-8> in all. Lid closed. Continue, then press the button when it lights white; this page says when.",
      "21:37:50 cooling.flow-load: the program goes to the controller, the button lights at the arm",
      "21:37:51 cooling.flow-load: the button is lit: press it now (0 s; the job waits 599 at most)",
      "21:37:51 prompt press (wait): The button is lit white. Press it now: the laser fires after your press.",
@@ -8643,7 +8643,7 @@
      "21:38:08 cooling.flow-load: burning: the tube is between passes",
      "21:38:09 cooling.flow-load: burning: 0 s lit",
      "21:38:12 cooling.flow-load: burning: the tube is between passes",
-     "21:38:13 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:38:13 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:38:14 cooling.flow-load: burning: 0 s lit",
      "21:38:15 cooling.flow-load: burning: 1 s lit",
      "21:38:16 cooling.flow-load: burning: 2 s lit",
@@ -8674,7 +8674,7 @@
      "21:38:41 cooling.flow-load: burning: 28 s lit",
      "21:38:42 cooling.flow-load: burning: 29 s lit",
      "21:38:43 cooling.flow-load: burning: 30 s lit",
-     "21:38:44 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:38:44 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:38:44 cooling.flow-load: burning: 31 s lit",
      "21:38:45 cooling.flow-load: burning: 32 s lit",
      "21:38:46 cooling.flow-load: burning: 33 s lit",
@@ -8705,7 +8705,7 @@
      "21:39:11 cooling.flow-load: burning: 58 s lit",
      "21:39:12 cooling.flow-load: burning: 60 s lit",
      "21:39:13 cooling.flow-load: burning: 61 s lit",
-     "21:39:14 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:39:14 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:39:15 cooling.flow-load: burning: 62 s lit",
      "21:39:16 cooling.flow-load: burning: 63 s lit",
      "21:39:17 cooling.flow-load: burning: 64 s lit",
@@ -8733,7 +8733,7 @@
      "21:39:42 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 88 s more",
      "21:39:43 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 87 s more",
      "21:39:44 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 86 s more",
-     "21:39:45 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:39:45 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:39:45 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 85 s more",
      "21:39:46 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 84 s more",
      "21:39:47 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 83 s more",
@@ -8763,7 +8763,7 @@
      "21:40:12 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 58 s more",
      "21:40:13 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 57 s more",
      "21:40:14 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 56 s more",
-     "21:40:15 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:40:15 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:40:15 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 55 s more",
      "21:40:16 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 54 s more",
      "21:40:17 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 53 s more",
@@ -8794,7 +8794,7 @@
      "21:40:42 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 27 s more",
      "21:40:43 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 26 s more",
      "21:40:45 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 25 s more",
-     "21:40:46 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:40:46 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:40:46 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 24 s more",
      "21:40:47 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 23 s more",
      "21:40:48 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 22 s more",
@@ -8820,7 +8820,7 @@
      "21:41:08 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 2 s more",
      "21:41:09 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 1 s more",
      "21:41:10 cooling.flow-load: the tube is dark: the coolant sensors follow the heat, 0 s more",
-     "21:41:17 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:41:17 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:41:22 cooling.flow-load: {'lit_s': 66.16, 'dose_raw_s': 36718.15999999994, 'peak_c': 2.0195294117647045, 'k_density': 5.500083369549857e-05, 'k_cw': 7.142965414999814e-05}, emission {'hv_max': 1023, 'laser_on_samples': 221, 'thermopile_delta': 1149, 'lit_s': 90.52963792199989}",
      "21:41:22 restore lens_hall_edge_z_mm='3.48' -> 200",
      "21:41:22 restore lens_stop_below_steps='14' -> 200",
@@ -8898,8 +8898,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "loggers": [
@@ -8917,14 +8917,14 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:56 start logs.tree-tail-export (auto, api) in campaign c-20260909200054-7947",
-     "20:04:56 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:56 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:56 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:56 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:56 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:56 baseline: pre: clean",
      "20:04:56 GET /logs -> 200",
      "20:04:56 loggers: ['forgectrl', 'grblhal', 'gfcloud', 'gfhome', 'kernel', 'system']",
      "20:04:56 GET /logs/tail?name=forgectrl -> 200",
-     "20:05:26 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:05:26 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:05:36 POST /logs/export -> 200 (3403785 bytes, 40.0 s)",
      "20:05:36 bundle: 38 members, e.g. ['forgefirm-logs', 'forgefirm-logs/README.txt', 'forgefirm-logs/logs', 'forgefirm-logs/logs/grblhal', 'forgefirm-logs/logs/grblhal/grblhal.log']",
      "20:05:36 baseline: post: clean",
@@ -9035,8 +9035,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "kernel_lines": 50,
@@ -9055,8 +9055,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:17:05 start logs.routing (auto, api) in campaign c-20260909200054-7947",
-     "20:17:05 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:17:05 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:17:05 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:17:05 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:17:05 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:17:05 baseline: pre: clean",
      "20:17:05 rsyslogd [449]; no syslogd/klogd",
@@ -9123,8 +9123,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "pending_before": false,
@@ -9139,8 +9139,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:17:09 start logs.level-settings (auto, api) in campaign c-20260909200054-7947",
-     "20:17:09 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:17:09 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:17:09 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:17:09 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:17:09 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:17:09 baseline: pre: clean",
      "20:17:09 POST /settings log_grblhal_disk=verbose -> 400",
@@ -9215,8 +9215,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "held_state": "Hold:0",
@@ -9236,8 +9236,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:08:59 start motion.pacing (auto, api) in campaign c-20260909200054-7947",
-     "20:08:59 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:08:59 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:08:59 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:08:59 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:08:59 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:08:59 baseline: pre: clean",
      "20:08:59 mode: test needs grbl - already in grbl mode",
@@ -9328,8 +9328,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "held_state": "Hold:0",
@@ -9481,8 +9481,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:17:10 start motion.jog-roundtrip (auto, api) in campaign c-20260909200054-7947",
-     "20:17:10 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:17:10 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:17:10 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:17:10 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:17:10 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:17:10 baseline: pre: clean",
      "20:17:10 mode: test needs grbl - already in grbl mode",
@@ -9569,8 +9569,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -9649,8 +9649,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:17:23 start motion.microstep-modes (auto, api) in campaign c-20260909200054-7947",
-     "20:17:23 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:17:23 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:17:23 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:17:23 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:17:23 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:17:24 baseline: pre: clean",
      "20:17:24 mode: test needs grbl - already in grbl mode",
@@ -9729,8 +9729,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "masked_restart": {
@@ -9771,8 +9771,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:17:48 start motion.liveness-probe (auto, api) in campaign c-20260909200054-7947",
-     "20:17:48 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:17:48 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:17:48 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:17:48 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:17:48 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:17:48 baseline: pre: clean",
      "20:17:48 mode: {'mode': 'grbl', 'controller': 'running', 'pid': 4449, 'motion': 'verified', 'gated': False, 'local': False, 'why': ''}",
@@ -9868,8 +9868,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "led_running": [
@@ -9899,8 +9899,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:17:56 start motion.gate-waits-for-lid (operator, api) in campaign c-20260909200054-7947",
-     "20:17:56 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:17:56 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:17:56 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:17:56 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:17:56 fixture: running unattended (no prompt can be answered)",
      "20:17:56 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:17:57 baseline: pre: clean",
@@ -9977,8 +9977,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -9993,8 +9993,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:18:12 start motion.cancel-abort (auto, api) in campaign c-20260909200054-7947",
-     "20:18:12 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:18:12 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:18:12 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:18:12 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:18:12 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:18:12 baseline: pre: clean",
      "20:18:12 mode: test needs grbl - already in grbl mode",
@@ -10073,8 +10073,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -10149,8 +10149,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:18:19 start motion.deadman (auto, api) in campaign c-20260909200054-7947",
-     "20:18:19 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:18:19 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:18:19 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:18:19 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:18:19 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:18:19 baseline: pre: clean",
      "20:18:19 mode: test needs grbl - already in grbl mode",
@@ -10262,8 +10262,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "held_at_mm": 3.694,
@@ -10284,8 +10284,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:18:49 start motion.button-hold-resume (operator, api) in campaign c-20260909200054-7947",
-     "20:18:49 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:18:49 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:18:49 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:18:49 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:18:49 fixture: running unattended (no prompt can be answered)",
      "20:18:49 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:18:49 baseline: pre: clean",
@@ -10425,8 +10425,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "hold_drift_mm": 0.037,
@@ -10477,8 +10477,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:19:00 start motion.lid-cancel-home (operator, api) in campaign c-20260909200054-7947",
-     "20:19:00 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:19:00 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:19:00 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:19:00 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:19:00 fixture: running unattended (no prompt can be answered)",
      "20:19:00 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:19:00 baseline: pre: clean",
@@ -10610,8 +10610,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "interlock_drift_mm": 0.038,
@@ -10654,8 +10654,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:19:16 start motion.interlock-cancel-home (operator, api) in campaign c-20260909200054-7947",
-     "20:19:16 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:19:16 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:19:16 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:19:16 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:19:16 fixture: running unattended (no prompt can be answered)",
      "20:19:16 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:19:16 baseline: pre: clean",
@@ -10773,8 +10773,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "lid_policy_before": "cancel",
@@ -10805,8 +10805,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:19:25 start motion.lid-policy-hold (operator, api) in campaign c-20260909200054-7947",
-     "20:19:25 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:19:25 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:19:25 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:19:25 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:19:25 fixture: running unattended (no prompt can be answered)",
      "20:19:25 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:19:25 baseline: pre: clean",
@@ -10885,8 +10885,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "hog_nice": 5,
@@ -10909,8 +10909,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:19:39 start motion.step-timing-under-load (auto, api) in campaign c-20260909200054-7947",
-     "20:19:39 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:19:39 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:19:39 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:19:39 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:19:39 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:19:39 baseline: pre: clean",
      "20:19:39 mode: test needs grbl - already in grbl mode",
@@ -11014,8 +11014,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "result": {
@@ -11054,8 +11054,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:09:40 start cooling.aa-offset-calibrate (auto, api) in campaign c-20260909200054-7947",
-     "20:09:40 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:09:40 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:09:40 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:09:40 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:09:40 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:09:40 baseline: pre: clean",
      "20:09:40 POST /diag/aa-offset-calibrate -> 202 {'started': True}",
@@ -11063,13 +11063,13 @@
      "20:09:42 phase: settling with the fans idle",
      "20:09:57 phase: cycle 1/3: air assist to run",
      "20:10:09 phase: cycle 1/3: air assist to idle",
-     "20:10:11 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:10:11 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:10:21 phase: cycle 2/3: air assist to run",
      "20:10:35 phase: cycle 2/3: air assist to idle",
-     "20:10:41 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:10:41 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:10:47 phase: cycle 3/3: air assist to run",
      "20:10:59 phase: cycle 3/3: air assist to idle",
-     "20:11:12 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:11:12 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:11:13 phase: done",
      "20:11:13   diag:   0:00  start: air assist 204 <-> 1023, 3 cycles",
      "20:11:13   diag:   0:27  edge 1 (to run): down +16.0, up +15.3 counts",
@@ -11174,8 +11174,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "result": {
@@ -11194,21 +11194,21 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:11:13 start cooling.flow-verify (auto, api) in campaign c-20260909200054-7947",
-     "20:11:13 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:11:13 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:11:13 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:11:13 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:11:13 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:11:13 baseline: pre: clean",
      "20:11:13 POST /diag/flow-verify -> 202 {'started': True}",
      "20:11:13 phase: stopping the motion controller (down 25.1 C, up 25.1 C)",
      "20:11:15 phase: settling before trial 1/1 (pump on) (down 25.2 C, up 25.2 C)",
      "20:11:29 phase: trial 1/1: heater 40% for 50 s (pump on) (down 25.3 C, up 25.0 C)",
-     "20:11:44 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:12:15 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:11:44 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:12:15 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:12:22 phase: settling before trial 1/1 (pump off) (down 37.1 C, up 26.2 C)",
-     "20:12:45 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:12:45 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:13:06 phase: trial 1/1: heater 40% for 50 s (pump off) (down 24.6 C, up 24.4 C)",
-     "20:13:15 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:13:45 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:13:15 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:13:45 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:13:58 phase: done (down 43.4 C, up 30.1 C)",
      "20:13:58   diag:   0:00  start: duty 40%, window 50 s, threshold 14.4 C",
      "20:13:58   diag:   1:08  trial 1/1 flow: rise 12.1 C, dT 10.5 C",
@@ -11343,8 +11343,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "idle_ref_s": 15.2,
@@ -11363,8 +11363,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:20:09 start cooling.fans-quiet-after-motion (auto, api) in campaign c-20260909200054-7947",
-     "20:20:09 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:20:09 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:20:09 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:20:09 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:20:09 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:20:09 baseline: pre: clean",
      "20:20:09 mode: test needs grbl - already in grbl mode",
@@ -11375,7 +11375,7 @@
      "20:20:29 fans during M8: {'air_assist': 11061, 'exhaust': 7327, 'intake_1': 1257, 'intake_2': 1253} (duty {'thermal/exhaust_pwm': 65535, 'thermal/intake_pwm': 43278})",
      "20:20:34   cooldown +  5 s: phase idle duty {'thermal/exhaust_pwm': 0, 'thermal/intake_pwm': 0} fans {'air_assist': 2342, 'exhaust': 2066, 'intake_1': 936, 'intake_2': 926}",
      "20:20:39   cooldown + 10 s: phase idle duty {'thermal/exhaust_pwm': 0, 'thermal/intake_pwm': 0} fans {'air_assist': 2188, 'exhaust': 573, 'intake_1': 739, 'intake_2': 729}",
-     "20:20:39 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:20:39 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:20:44   cooldown + 15 s: phase idle duty {'thermal/exhaust_pwm': 0, 'thermal/intake_pwm': 0} fans {'air_assist': 2216, 'exhaust': 0, 'intake_1': 734, 'intake_2': 733}",
      "20:20:44 fans after: {'air_assist': 2216, 'exhaust': 0, 'intake_1': 731, 'intake_2': 728} duty {'thermal/exhaust_pwm': 0, 'thermal/intake_pwm': 0} (settled in 15.1 s)",
      "20:20:44 forgectrl stop -> rc 0",
@@ -11477,8 +11477,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -11666,8 +11666,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:06:55 start cooling.gate-off (auto, api) in campaign c-20260909200054-7947",
-     "20:06:55 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:06:55 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:06:55 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:06:55 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:06:55 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:06:55 baseline: pre: clean",
      "20:06:55 mode: test needs grbl - already in grbl mode",
@@ -11825,8 +11825,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "floor": {
@@ -12070,15 +12070,15 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:21:05 start cooling.floor-and-warm-up (auto, api) in campaign c-20260909200054-7947",
-     "20:21:05 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:21:05 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:21:05 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:21:05 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:21:05 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:21:05 baseline: pre: clean",
      "20:21:05 mode: test needs grbl - already in grbl mode",
      "20:21:05 original: {'cool_temp_min': '', 'cool_temp_start': '16'}",
      "20:21:06 warm-up hold: verdict WARMUP phase warm-up fire_ok False hold True (after 1 s)",
-     "20:21:35 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:22:06 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:21:35 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:22:06 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:22:21 warm-up release after 75 s: verdict OK phase run up 26.96 (gate 24.9)",
      "20:22:26 floor: verdict COLD fire_ok False hold True gates_off ['warm_up'] (after 1 s)",
      "20:22:28 both off: verdict OK fire_ok True hold False gates_off ['coolant_min', 'warm_up'] (after 1 s)",
@@ -12177,8 +12177,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -12254,8 +12254,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:22:31 start cooling.tec-drive (auto, api) in campaign c-20260909200054-7947",
-     "20:22:31 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:22:31 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:22:31 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:22:31 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:22:31 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:22:31 baseline: pre: clean",
      "20:22:31 mode: test needs grbl - already in grbl mode",
@@ -12463,8 +12463,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "interlock_circuit": 45,
@@ -12603,8 +12603,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:22:39 start cooling.fire-watch-tiers (auto, api) in campaign c-20260909200054-7947",
-     "20:22:40 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:22:40 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:22:40 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:22:40 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:22:40 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:22:40 baseline: pre: clean",
      "20:22:40 mode: test needs grbl - already in grbl mode",
@@ -12707,8 +12707,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -12891,8 +12891,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:22:55 start cooling.crash-watch-plumbing (auto, api) in campaign c-20260909200054-7947",
-     "20:22:55 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:22:55 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:22:55 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:22:55 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:22:55 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:22:55 baseline: pre: clean",
      "20:22:55 mode: test needs grbl - already in grbl mode",
@@ -13163,8 +13163,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -13237,8 +13237,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:23:02 start cooling.critical-tier (auto, api) in campaign c-20260909200054-7947",
-     "20:23:02 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:23:02 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:23:02 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:23:02 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:23:02 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:23:02 baseline: pre: clean",
      "20:23:02 mode: test needs grbl - already in grbl mode",
@@ -13518,8 +13518,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -13626,8 +13626,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:07:02 start cooling.fan-gate-trips (auto, api) in campaign c-20260909200054-7947",
-     "20:07:02 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:07:02 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:07:02 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:07:02 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:07:02 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:07:02 baseline: pre: clean",
      "20:07:02 mode: test needs grbl - already in grbl mode",
@@ -13635,7 +13635,7 @@
      "20:07:15 exhaust trip leg: verdict AIRFLOW fire_ok False hold True gates_off [] (after 12 s)",
      "20:07:28 purge trip leg: verdict AIRFLOW fire_ok False hold True gates_off [] (after 11 s)",
      "20:07:30 exhaust off leg: verdict OK fire_ok True hold False gates_off ['exhaust'] (after 1 s)",
-     "20:07:32 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:07:32 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:07:47 restored: verdict OK fire_ok True hold False gates_off [] (after 16 s)",
      "20:07:48 fans at run duty: {'exhaust': '11629/6400', 'intake_1': '4177/2290', 'intake_2': '4185/2290', 'air_assist': '11046/6000', 'purge': '630/300'}",
      "20:07:48 baseline: post: clean",
@@ -13762,8 +13762,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "heater_seen": true,
@@ -13791,8 +13791,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:41:23 start cooling.flow-under-load (live, api) in campaign c-20260909204732-3fa9",
-     "21:41:23 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:41:23 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:41:23 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:41:23 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:41:23 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:41:23 baseline: pre: clean",
      "21:41:23 mode: test needs grbl - already in grbl mode",
@@ -13802,9 +13802,9 @@
      "21:41:51 READY: operator present (press after 27.1 s); the bench takes the presses",
      "21:41:51 ARM: the fixture presses when the button lights (the bench's arm_press opt-in)",
      "21:41:51 ARM press by the fixture, button lit after 0.3 s",
-     "21:41:54 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:42:24 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:42:55 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:41:54 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:42:24 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:42:55 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:43:07 M2: ['ok']",
      "21:43:07 engine: coolant flow verified (heater rise 13.3 C, dT 9.5 C; laser 0.7 off 14.0)",
      "21:43:07 PASS: lit through the window, raw rise 14.0 C, laser 0.7 C off, judged 13.3 C against 14.4 (dT 9.5), window closed 0.1 s after M2",
@@ -13863,8 +13863,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -13887,8 +13887,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:23:11 start laser.power-floor (auto, api) in campaign c-20260909200054-7947",
-     "20:23:11 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:23:11 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:23:11 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:23:11 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:23:11 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:23:11 baseline: pre: clean",
      "20:23:11 mode: test needs grbl - already in grbl mode",
@@ -14000,8 +14000,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "hv_enable_back_lit": true,
@@ -15664,8 +15664,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:26:49 start laser.emission-witness (live, api) in campaign c-20260909204732-3fa9",
-     "21:26:49 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:26:49 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:26:49 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:26:49 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:26:49 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:26:49 baseline: pre: clean",
      "21:26:49 mode: test needs grbl - already in grbl mode",
@@ -15683,7 +15683,7 @@
      "21:27:16 time-to-disarm after Idle: 0.0 s",
      "21:27:16 button dark after 0.0 s",
      "21:27:16 PROMPT: Did the laser mark a 20 mm square outline on the scrap, all four sides?",
-     "21:27:19 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:27:19 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:27:32 ANSWER: Yes",
      "21:27:32 PASS: emission peak 153 -> 0, HV 0..1023, beam +959, disarmed 0.0 s after Idle, button dark, mark confirmed",
      "21:27:32 baseline: post: clean",
@@ -15795,8 +15795,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "hv_tail_max": 0,
@@ -15820,8 +15820,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:43:23 start laser.m5-rapid-dark (live, api) in campaign c-20260909204732-3fa9",
-     "21:43:23 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:43:23 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:43:23 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:43:23 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:43:23 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:43:24 baseline: pre: clean",
      "21:43:24 mode: test needs grbl - already in grbl mode",
@@ -15833,7 +15833,7 @@
      "21:43:33 ARM press by the fixture, button lit after 0.3 s",
      "21:43:51 emission peak 153; dark from +10.0 s; 35 samples after it spanning 8.1 s, 0 with emission, HV max after dark 0",
      "21:43:51 PASS: emission peak 153 on the G1, 0 through both rapids, HV 0 after the M5",
-     "21:43:54 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:43:54 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:44:10 baseline: head jogged back -20.006/-0.000 mm to its start",
      "21:44:10 baseline: post: 2 leftover(s): cool=run/armed=False/hold=False (expected idle/unarmed/no hold) -> waited; position=[1067, 0, 0] (expected [0, 0, 0]) -> restored (jogged back -20.0/-0.0 mm)",
      "21:44:10 result PASS"
@@ -15943,8 +15943,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "held_state": "Hold:1",
@@ -15965,8 +15965,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:44:10 start laser.disarm-in-hold (live, api) in campaign c-20260909204732-3fa9",
-     "21:44:10 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:44:10 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:44:10 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:44:10 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:44:10 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:44:10 baseline: pre: clean",
      "21:44:10 mode: test needs grbl - already in grbl mode",
@@ -15979,8 +15979,8 @@
      "21:44:17 ACT button press: done after 3.6 s",
      "21:44:17 moving under laser: Run; feed-hold in 2 s",
      "21:44:19 feed-held mid-move: Hold:1; watching the disarm grace count down IN HOLD",
-     "21:44:41 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:45:11 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:44:41 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:45:11 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:45:22 button dark after 0.0 s",
      "21:45:22 PASS: disarmed in Hold after 60.6 s, button dark",
      "21:45:37 baseline: head jogged back -11.944/-0.000 mm to its start",
@@ -16360,8 +16360,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "mode": {
@@ -16653,8 +16653,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:45:37 start laser.armed-kill (live, api) in campaign c-20260909204732-3fa9",
-     "21:45:37 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:45:37 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:45:37 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:45:37 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:45:37 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:45:38 baseline: pre: clean",
      "21:45:38 mode: test needs grbl - already in grbl mode",
@@ -16718,7 +16718,7 @@
      "21:46:02 ARM: the fixture presses when the button lights (the bench's arm_press opt-in)",
      "21:46:02 ARM press by the fixture, button lit after 0.3 s",
      "21:46:07 emission live (86) - SIGKILL controller pid 16499 NOW",
-     "21:46:08 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:46:08 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:46:14   post-kill (0.05, 86, 'running', True)",
      "21:46:14   post-kill (0.25, 86, 'running', True)",
      "21:46:14   post-kill (0.45, 86, 'underrun', True)",
@@ -16874,8 +16874,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "latch_locked": true,
@@ -16896,8 +16896,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:23:12 start laser.arm-wait-lid (operator, api) in campaign c-20260909200054-7947",
-     "20:23:12 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:23:12 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:23:12 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:23:12 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:23:12 fixture: running unattended (no prompt can be answered)",
      "20:23:12 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:23:12 baseline: pre: clean",
@@ -17069,8 +17069,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "hold_state": "Hold:0",
@@ -17211,8 +17211,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:46:25 start laser.pause-resume-lid-cancel (live, api) in campaign c-20260909204732-3fa9",
-     "21:46:25 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:46:25 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:46:25 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:46:25 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:46:25 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:46:25 baseline: pre: clean",
      "21:46:25 mode: test needs grbl - already in grbl mode",
@@ -17293,7 +17293,7 @@
      "21:46:49 ACT lid close (fixture)",
      "21:46:49 ACT lid close: done after 0.3 s",
      "21:46:50 PASS: button paused the burn (emission 0, armed kept, latch unlocked) and resumed it; the lid then canceled it - emission 0 at +1.81 s, reset without alarm, returned (drift 0.019 mm), button latch SET",
-     "21:46:56 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:46:56 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:46:57 baseline: post: 2 leftover(s): cool=smoke/armed=False/hold=False (expected idle/unarmed/no hold) -> waited; position=[1, 0, 0] (expected [0, 0, 0]) -> restored",
      "21:46:57 result PASS"
     ],
@@ -17449,8 +17449,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "lid_lamp": "132",
@@ -17463,8 +17463,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:08:28 start camera.snapshot (auto, api) in campaign c-20260909200054-7947",
-     "20:08:28 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:08:28 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:08:28 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:08:28 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:08:28 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:08:29 baseline: pre: clean",
      "20:08:29 cam status: {'running': False, 'cam': 'lid', 'clients': 0, 'frames': 0, 'fps': 0.0, 'fps_cap': 0.0, 'hw_fps_skip': False, 'encoder': 'software', 'convert': 'cpu', 'buffers': 'uncached', 'sensor': 'OV5648', 'stream': {'width': 1296, 'height': 972}, 'snapshot': {'width': 2592, 'height': 1944}, 'h264': {'active': False, 'clients': 0}, 'health': {'captured': 0, 'corrupt': 0, 'restarts': 0}, 'capture_allowed': True, 'stopped_by_lid': False}",
@@ -17563,8 +17563,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "geometry": {
@@ -17591,8 +17591,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:23:31 start camera.sensor-profile (auto, api) in campaign c-20260909200054-7947",
-     "20:23:31 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:23:31 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:23:31 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:23:31 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:23:31 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:23:31 baseline: pre: clean",
      "20:23:31 sensor: OV5648",
@@ -17723,8 +17723,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      }
     },
@@ -17732,8 +17732,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:23:44 start camera.h264-stream (auto, api) in campaign c-20260909200054-7947",
-     "20:23:44 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:23:44 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:23:44 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:23:44 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:23:44 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:23:44 baseline: pre: clean",
      "20:23:46 codec avc1.424020, content-type video/mp4",
@@ -17829,8 +17829,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "health_after": {
@@ -17849,8 +17849,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:23:57 start camera.frame-health (auto, api) in campaign c-20260909200054-7947",
-     "20:23:57 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:23:57 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:23:57 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:23:57 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:23:57 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:23:57 baseline: pre: clean",
      "20:23:57 before: {'captured': 317, 'corrupt': 0, 'restarts': 0}",
@@ -17981,8 +17981,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "snapshot_lid_open": [
@@ -18027,8 +18027,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:24:10 start camera.lid-privacy (operator, api) in campaign c-20260909200054-7947",
-     "20:24:10 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:24:10 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:24:10 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:24:10 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:24:10 fixture: running unattended (no prompt can be answered)",
      "20:24:10 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:24:10 baseline: pre: clean",
@@ -18113,8 +18113,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "key_len": 32,
@@ -18124,14 +18124,14 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:24:25 start camera.key-read (auto, api) in campaign c-20260909200054-7947",
-     "20:24:25 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:24:25 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:24:25 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:24:25 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:24:25 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:24:25 baseline: pre: clean",
-     "20:24:25 GET http://172.16.1.97/cam/status (no key) -> 403",
-     "20:24:25 GET http://172.16.1.97/cam/status?key=... -> 200",
-     "20:24:25 GET https://172.16.1.97/cam/status (no key) -> 403",
-     "20:24:25 GET https://172.16.1.97/cam/status?key=... -> 200",
+     "20:24:25 GET http://<IP-2>/cam/status (no key) -> 403",
+     "20:24:25 GET http://<IP-2>/cam/status?key=... -> 200",
+     "20:24:25 GET https://<IP-2>/cam/status (no key) -> 403",
+     "20:24:25 GET https://<IP-2>/cam/status?key=... -> 200",
      "20:24:25 POST /settings with the camera key -> 403",
      "20:24:26 baseline: post: clean",
      "20:24:26 result PASS"
@@ -18201,8 +18201,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "fwup_foreign": {
@@ -18283,8 +18283,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:04:21 start update.slots-and-signature (auto, api) in campaign c-20260909200054-7947",
-     "20:04:21 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:04:21 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:04:21 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:04:21 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:04:21 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:04:21 baseline: pre: clean",
      "20:04:21 GET /slots -> 200 {'booted': '/dev/mmcblk1p1', 'env': {'mmcdev': '0', 'mmchwpart': '0', 'mmcpart': '1', 'mmcroot': '/dev/mmcblk1p1'}, 'slots': {'sd': {'device': '/dev/mmcblk1p1', 'present': 'yes', 'state': 'ok', 'type': 'forgefirm', 'version': '20260909193551 (dev)', 'kernel': 'yes', 'booted': True, 'next': True}, 'a': {'device': '/dev/mmcblk2p1', 'present': 'yes', 'state': 'ok', 'type': 'factory', 'version': 'v2.6.0-2228', 'kernel': 'yes', 'booted': False, 'next': False}, 'b': {'device': '/dev/mmcblk2p2', 'present': 'yes', 'state': 'ok', 'type': 'forgefirm', 'version': 'v0.0.1', 'kernel': 'yes', 'booted': False, 'next': False}}, 'archives': [{'file': 'factory-rootfs-20240612194245.img.gz', 'bytes': 37039693, 'version': '2.6.0-2228', 'date': '2024-06-12'}, {'file': 'factory-rootfs-20220810204015.img.gz', 'bytes': 26349275, 'version': '2.5.1-2192', 'date': '2022-08-10'}], 'staged': {'download': {'present': False, 'bytes': 0, 'version': ''}, 'upload': {'present': False, 'bytes': 0, 'version': ''}}}",
@@ -18555,8 +18555,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "gf_probe": {
@@ -19736,8 +19736,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:24:26 start cloud.mode-switch (operator, api) in campaign c-20260909200054-7947",
-     "20:24:26 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:24:26 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:24:26 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:24:26 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:24:26 fixture: running unattended (no prompt can be answered)",
      "20:24:26 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:24:26 baseline: pre: clean",
@@ -19754,7 +19754,7 @@
      "20:24:43 hunt with the lid open: INFO basemachine:_finish_action hunt [1583687284]: finished with event \":completed\" (lens homed)",
      "20:24:43 ACT lid close (fixture)",
      "20:24:43 ACT lid close: done after 0.3 s",
-     "20:24:56 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:24:56 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:25:17 cloud mode stays up; the machine is quiet",
      "20:25:17 4 service motion(s) completed after the lid closed",
      "20:25:18 POST /mode controller=grbl -> 200 {'mode': 'grbl', 'controller': 'running', 'pid': 6206, 'motion': 'verified', 'gated': False, 'local': False, 'why': ''}",
@@ -19762,8 +19762,8 @@
      "20:25:22 grbl state after: Idle",
      "20:25:22 position counters re-zeroed at the starting position; the baseline expects (0,0,0) at the end",
      "20:25:22 head displacement since the switch: X 0.000 Y 0.000 mm",
-     "20:25:28 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:25:58 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:25:28 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:25:58 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:26:08 homing: homed=True after 46.2 s (kernel idle, grbl Idle)",
      "20:26:08 gfhome: 2026-09-09T20:26:01.189803+00:00 gfhome[6219] INFO gfhome:home homing complete (service quiet 10s, 4 motion windows)",
      "20:26:08 position counters re-zeroed at the starting position; the baseline expects (0,0,0) at the end",
@@ -19915,8 +19915,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "header_stfr": 10000,
@@ -19930,15 +19930,15 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:46:57 start cloud.service-protocol (operator, api) in campaign c-20260909204732-3fa9",
-     "21:46:57 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:46:57 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:46:57 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:46:57 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:46:57 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:46:57 baseline: pre: clean",
      "21:46:57 grbl mode: switching to cloud as the emulator",
      "21:47:00 controller mode changed to cloud for the operator; the baseline keeps it",
      "21:47:03 emulator session established: gfcloud[16956] INFO authentication:authenticate_machine SUCCESS; gfcloud[16956] INFO websocket:ws_connect ESTABLISHED",
      "21:47:06 NOTICE: In the app the machine shows Ready (its bed image is the emulator's canned frame). Set up any small job and press Print. Nothing moves here; the test watches the service's print reach the emulator and complete.",
-     "21:47:28 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:47:28 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:47:30 print: INFO basemachine:_finish_action print [1583720922]: finished with event \":completed\"; 3 images uploaded; INFO websocket:fetch_motion pulse data is gzip-compressed, 405 byte body",
      "21:47:30 the job's header: 134 tags, STfr 10000",
      "21:47:30 PROMPT: Does the app show the print complete?",
@@ -20196,8 +20196,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "interlock_armed_after": false,
@@ -20259,8 +20259,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:59:19 start cloud.lid-interlock-abort (live, api) in campaign c-20260909204732-3fa9",
-     "20:59:19 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:59:19 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:59:19 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:59:19 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:59:19 prerequisites overridden by the operator - not satisfied: laser.emission-witness",
      "20:59:20 baseline: pre: clean",
      "20:59:20 grbl mode: switching to cloud offline",
@@ -20271,7 +20271,7 @@
      "20:59:40 ACT button press: done after 6.8 s",
      "20:59:40 ACT lid open (fixture)",
      "20:59:40 ACT lid open: done after 0.0 s",
-     "20:59:50 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:59:50 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:59:52   [lid] lid opened: seen",
      "20:59:52   [lid] lid opened mid-run; stopping motion: seen",
      "20:59:52   [lid] start return home: seen",
@@ -20297,7 +20297,7 @@
      "21:00:20 ACT lid close: done after 0.3 s",
      "21:00:20 ACT interlock close (fixture)",
      "21:00:20 ACT interlock close: done after 0.3 s",
-     "21:00:20 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:00:20 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:00:28 cloud mode stays up; the machine is quiet",
      "21:00:28 PASS: lid open -> stop in 8.3 ms and park with the lid open; interlock open -> the same tail with the park running through a lid edge; both prints ':cancelled'",
      "21:00:28 offline jobs removed from /tmp/forgetest",
@@ -20488,8 +20488,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "jobs": {
@@ -20515,8 +20515,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:26:09 start cloud.lid-during-button-wait (operator, api) in campaign c-20260909200054-7947",
-     "20:26:09 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:26:09 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:26:09 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:26:09 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:26:09 fixture: running unattended (no prompt can be answered)",
      "20:26:09 queued by the unattended queue opened 2026-09-09T20:00:54Z",
      "20:26:09 baseline: pre: clean",
@@ -20528,7 +20528,7 @@
      "20:26:26 ACT lid open: done after 0.0 s",
      "20:26:39 ACT lid close (fixture)",
      "20:26:39 ACT lid close: done after 0.3 s",
-     "20:26:40 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:26:40 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:26:47 cloud mode stays up; the machine is quiet",
      "20:26:47 PASS: lid open at the button prompt canceled the print; latch locked, armed=false, button dark, ring empty with the feed stopped",
      "20:26:47 offline jobs removed from /tmp/forgetest",
@@ -20726,8 +20726,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "gate": 24.9,
@@ -20806,20 +20806,20 @@
     "image": "20260909193551 (dev)",
     "log": [
      "20:47:32 start cloud.verdict-hold (operator, api) in campaign c-20260909204732-3fa9",
-     "20:47:32 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:47:32 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "20:47:32 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:47:32 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "20:47:32 baseline: pre: clean",
      "20:47:32 cloud mode: restarting the client offline (was pid 7480)",
      "20:47:37 offline service up: INFO offline:open OFFLINE service: no web session; listening on /run/gfcloud-offline.sock",
      "20:47:46 job hold.puls: 324236 payload bytes, 32 s at STfr 10000",
      "20:47:47 ACT button press (fixture)",
      "20:47:51 ACT button press: done after 4.3 s",
-     "20:47:53 NOTICE: Warm-up: the loop heater brings the coolant to the gate; a few minutes. Do nothing.",
-     "20:48:03 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:48:34 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:49:05 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:49:37 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "20:50:09 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "20:47:53 NOTICE: Warm-up: the loop heater brings the coolant to the gate; a few <REDACTED-8>. Do nothing.",
+     "20:48:03 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:48:34 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:49:05 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:49:37 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "20:50:09 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:50:34 PASS: the armed print waited 118 s on the warm-up, then ran and completed",
      "20:50:34 restore: POST /settings {'cool_temp_min': '', 'cool_temp_start': '16'} -> 200",
      "20:50:34 offline jobs removed from /tmp/forgetest",
@@ -20921,8 +20921,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "header_limits": "air_assist_min_rpm=116 coolant_max_c=33.0 coolant_min_c=5.0",
@@ -20952,18 +20952,18 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:47:53 start cloud.pause-resume (live, api) in campaign c-20260909204732-3fa9",
-     "21:47:53 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:47:53 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:47:53 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:47:53 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:47:53 queued by the attended queue opened 2026-09-09T21:25:38Z",
      "21:47:53 baseline: pre: clean",
      "21:47:53 the running client (pid 17022) never hunted the machine under the service: restarting it with the hunt",
      "21:47:53 cloud mode: restarting the cloud client for a fresh connect (was pid 17022)",
      "21:47:59 cloud session established (pid 17082)",
      "21:48:09 connect-time hunt: INFO basemachine:_finish_action hunt [1583721121]: finished with event \":completed\"",
-     "21:48:23 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:48:23 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:48:37 PROMPT: In the Glowforge app: scrap on the bed, lid closed, a SMALL engrave or score job (about 30 s) set up. Click Done here, then press Print in the app and press the physical button when it lights white.",
      "21:48:41 ANSWER: Done",
-     "21:48:54 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:48:54 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:48:58 ACT button press (fixture)",
      "21:49:00 ACT button press: done after 1.3 s",
      "21:49:00 ACT button press (fixture)",
@@ -20976,7 +20976,7 @@
      "21:49:17 ANSWER: Yes",
      "21:49:17 job limits from the header (the print's): air_assist_min_rpm=116 coolant_max_c=33.0 coolant_min_c=5.0",
      "21:49:17 engine effective limits: 2026-09-09T21:48:44.457589+00:00 forgectrl[10700] INFO cool: effective limits: coolant ceiling 33.0 C (local 33.0, header 50.0) resume 31.0 C; floors coolant 10.0 C (the job's), exhaust 6400 rpm, inta",
-     "21:49:25 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:49:25 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:49:34 cloud mode stays up; the machine is quiet",
      "21:49:34 PASS: button pause/resume mid-print, warm-up and rest observed, progress reported, the job's limits passed through, job completed and parked",
      "21:49:34 baseline: post: clean",
@@ -21184,8 +21184,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "jobs": {
@@ -21233,8 +21233,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:00:51 start cloud.oversize-stream (live, api) in campaign c-20260909204732-3fa9",
-     "21:00:51 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:00:51 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:00:51 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:00:51 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:00:51 prerequisites overridden by the operator - not satisfied: cloud.pause-resume",
      "21:00:51 baseline: pre: clean",
      "21:00:52 the offline service is already up (pid 10870) - reusing it",
@@ -21242,12 +21242,12 @@
      "21:00:56 ACT button press (fixture)",
      "21:01:02 ACT button press: done after 5.3 s",
      "21:01:02 program total at the start of the run: 33292288 bytes",
-     "21:01:02 NOTICE: Cutting: the test watches the ring being topped up for two minutes. Do nothing yet.",
-     "21:01:22 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:01:52 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:02:23 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:02:53 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:03:02 program total two minutes in: 34603008 bytes (+1310720)",
+     "21:01:02 NOTICE: Cutting: the test watches the ring being topped up for two <REDACTED-8>. Do nothing yet.",
+     "21:01:22 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:01:52 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:02:23 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:02:53 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:03:02 program total two <REDACTED-8> in: 34603008 bytes (+1310720)",
      "21:03:02 progress reported against 35015348 bytes, kernel program total 34603008",
      "21:03:02 max_backtrack while the feed runs: 161827 steps",
      "21:03:02 ACT button press (fixture)",
@@ -21259,7 +21259,7 @@
      "21:03:16   [cancel] start return home: seen",
      "21:03:16   [cancel] return home complete: seen",
      "21:03:16 [app] kernel counters after the park: [0, 0, 0]",
-     "21:03:24 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
+     "21:03:24 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:03:24 cloud mode stays up; the machine is quiet",
      "21:03:24 PASS: a job longer than the ring ran live-fed, total grew, no underrun; the app's cancel stopped it, parked, relocked and reported ':cancelled'",
      "21:03:24 offline jobs removed from /tmp/forgetest",
@@ -21473,8 +21473,8 @@
        "interlock",
        "button"
       ],
-      "hostname": "forgefixture",
-      "ip": "172.16.1.135",
+      "hostname": "<REDACTED-1>",
+      "ip": "<IP-1>",
       "released": []
      },
      "jobs": {
@@ -21511,8 +21511,8 @@
     "image": "20260909193551 (dev)",
     "log": [
      "21:03:39 start cloud.paused-lid-cancel (live, api) in campaign c-20260909204732-3fa9",
-     "21:03:39 fixture up: forgefixture at 172.16.1.135, v1.0.0, covers lid, interlock, button",
-     "21:03:39 fixture: forgefixture at 172.16.1.135 covers lid, interlock, button",
+     "21:03:39 fixture up: forgefixture at <IP-1>, v1.0.0, covers lid, interlock, button",
+     "21:03:39 fixture: forgefixture at <IP-1> covers lid, interlock, button",
      "21:03:39 prerequisites overridden by the operator - not satisfied: cloud.pause-resume",
      "21:03:39 baseline: pre: clean",
      "21:03:39 the offline service is already up (pid 10870) - reusing it",

@@ -54,4 +54,4 @@
 | `exthost.armed-freeze` | operator, takeover | PASS | 2026-10-21T21:17:17Z | `c-20261021210943-36d1` | yes |
 | `forgectrl.tls-records` | auto | PASS | 2026-10-21T21:17:21Z | `c-20261021210943-36d1` | yes |
 
-Artifact sha256: `f6ff2b17fcf347014b7191dab5b30d2f74365ae1b03dcc52da7590ddb215c901`
+Artifact sha256: `5d6f436a33f30c623d2bcd08de44c2b4342249dfbe848ea9d19f99de03813644`

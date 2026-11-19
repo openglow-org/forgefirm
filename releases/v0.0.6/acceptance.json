@@ -2516,7 +2516,7 @@
   }
  },
  "manifest_sha": "58495afe066c6964484fb07d5664895a4e742e65509c81c10056d9303570f182",
- "sha256": "74f10b1e46fb0097199b179607546fb9964252915c74fcb6c09c23d81b421972",
+ "sha256": "f19dcdd8a30a6f46e73761e4e2d6f95f4fc32183f9d166819927d1cdbe8b6e52",
  "tests": [
   {
    "always": true,
@@ -2693,7 +2693,7 @@
       "K95syslog"
      ],
      "record_accounts": [
-      "scott"
+      "<REDACTED-4>"
      ],
      "sdma_clk_enable_count": "1",
      "userspace_watchdog_pids": [],
@@ -2876,7 +2876,7 @@
       "<HEX-1>"
      ],
      "udhcpc": [
-      "udhcpc -R -b -p /var/run/udhcpc.wlan0.pid -i wlan0 -x hostname:forgefirm-b00a"
+      "udhcpc -R -b -p /var/run/udhcpc.wlan0.pid -i wlan0 -x hostname:<REDACTED-5>"
      ]
     },
     "fingerprint": "e57e9f3d605290af1d1c816d985bca3a42bd49a197cbbf01db504507a9cfccde",
@@ -3837,8 +3837,8 @@
      "20:31:42 POST /settings (no token, 4 MiB body) -> 403",
      "20:31:42 GET /status after the oversized body -> 200",
      "20:31:42 GET /status Host=evil.example.net -> 403",
-     "20:31:42 GET /status Host=forgefirm-b00a -> 200",
-     "20:31:42 GET /status Host=forgefirm-b00a.example.net -> 403",
+     "20:31:42 GET /status Host=<REDACTED-5> -> 200",
+     "20:31:42 GET /status Host=<REDACTED-5>.example.net -> 403",
      "20:31:42 GET /status Origin=http://evil.example.net -> 403",
      "20:31:42 GET /status Sec-Fetch-Site=cross-site -> 403",
      "20:31:42 GET /fuse-identity (no token) -> 403 {'error': 'authentication required'}",
@@ -4755,7 +4755,7 @@
     "campaign": "c-20260919202934-3d3a",
     "duration_s": 49,
     "evidence": {
-     "account_before": "scott",
+     "account_before": "<REDACTED-4>",
      "baseline": {
       "post": [],
       "pre": []
@@ -4784,7 +4784,7 @@
      "login": 200,
      "logout": 200,
      "right_inside_lock": 429,
-     "tls_fingerprint": "<MAC-1>:<MAC-2>:<MAC-3>:<MAC-4>:<MAC-5>:1C:2D",
+     "tls_fingerprint": "<REDACTED-6>",
      "users_reload_rc": 0,
      "wait": 30,
      "wrong_codes": [
@@ -4834,7 +4834,7 @@
      "20:32:55 baseline: /mode controller=stopped motion=unverified",
      "20:33:00 baseline: /mode controller=running motion=verified",
      "20:33:00 restored under a restart: users",
-     "20:33:00 forgefirm-users reload -> rc 0 forgefirm-users: account scott created\nforgefirm-users: removing account forgetest (not in the record)",
+     "20:33:00 forgefirm-users reload -> rc 0 forgefirm-users: account <REDACTED-4> created\nforgefirm-users: removing account forgetest (not in the record)",
      "20:33:00 baseline: post: clean",
      "20:33:00 result PASS"
     ],
@@ -5366,7 +5366,7 @@
       "cookie": true,
       "status": 200
      },
-     "account_before": "scott",
+     "account_before": "<REDACTED-4>",
      "actions": [
       {
        "by": "fixture",
@@ -5601,7 +5601,7 @@
      "20:33:11 ACT button press (fixture)",
      "20:33:11 ACT button press: done after 0.3 s",
      "20:33:11 the press step: teal ({'target': [0, 255, 255], 'pulse_on': [0, 1400, 1400], 'pulse_off': [0, 1400, 1400]}), the press accepted",
-     "20:33:12 account 'bench-ac5d' created, the session cookie set",
+     "20:33:12 account '<REDACTED-7>' created, the session cookie set",
      "20:33:12 preferences, machine (basic), cloud (1) written",
      "20:33:12 baseline: /mode controller=stopped motion=unverified",
      "20:33:18 baseline: /mode controller=running motion=verified",
@@ -5624,8 +5624,8 @@
      "20:33:27 restore cool_tec_present='0' -> 200",
      "20:33:27 restore ui_units='imperial' -> 200",
      "20:33:28 restore wifi_country='US' -> 200",
-     "20:33:28 forgefirm-users reload -> rc 0 forgefirm-users: account scott created\nforgefirm-users: removing account bench-ac5d (not in the record)",
-     "20:33:28 removed the temporary home directory of 'bench-ac5d'",
+     "20:33:28 forgefirm-users reload -> rc 0 forgefirm-users: account <REDACTED-4> created\nforgefirm-users: removing account <REDACTED-7> (not in the record)",
+     "20:33:28 removed the temporary home directory of '<REDACTED-7>'",
      "20:33:28 baseline: post: clean",
      "20:33:28 result PASS"
     ],
@@ -5688,7 +5688,7 @@
     "campaign": "c-20260919210959-8780",
     "duration_s": 98,
     "evidence": {
-     "account_before": "scott",
+     "account_before": "<REDACTED-4>",
      "actions": [
       {
        "by": "fixture",
@@ -5891,7 +5891,7 @@
       "ui_units": "imperial",
       "wifi_country": "US"
      },
-     "temp_account": "bigcockswallow",
+     "temp_account": "<REDACTED-8>",
      "users_reload_rc": 0
     },
     "fingerprint": "6f4a7262cc0f8ae5a19079a7f2aec21d8c1643e69c65baaaee42302c05477725",
@@ -5918,7 +5918,7 @@
      "21:21:41 ACT button press (fixture)",
      "21:21:43 ACT button press: done after 1.1 s",
      "21:21:43 NOTICE: Continue on the page: the account, the preferences, the machine, the cloud step, Finish.",
-     "21:22:02 account 'bigcockswallow' created (20 s)",
+     "21:22:02 account '<REDACTED-8>' created (20 s)",
      "21:22:06 fixture up: <REDACTED-1> at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:22:24 baseline: /mode controller=running motion=verified",
      "21:22:24 PROMPT: Did the control panel open after Finish?",
@@ -5942,8 +5942,8 @@
      "21:22:39 restore cool_tec_present='0' -> 200",
      "21:22:39 restore ui_units='imperial' -> 200",
      "21:22:40 restore wifi_country='US' -> 200",
-     "21:22:40 forgefirm-users reload -> rc 0 forgefirm-users: account scott created\nforgefirm-users: removing account bigcockswallow (not in the record)",
-     "21:22:40 removed the temporary home directory of 'bigcockswallow'",
+     "21:22:40 forgefirm-users reload -> rc 0 forgefirm-users: account <REDACTED-4> created\nforgefirm-users: removing account <REDACTED-8> (not in the record)",
+     "21:22:40 removed the temporary home directory of '<REDACTED-8>'",
      "21:22:41 baseline: post: clean",
      "21:22:41 result PASS"
     ],
@@ -6001,7 +6001,7 @@
       "group": "unattended",
       "ts": "2026-09-19T20:29:34Z"
      },
-     "fingerprint": "41:15:34:89:0E:D3:9F:C8:04:7D:D9:5E:71:85:6B:E6:8E:2B:87:A2:CE:C2:9C:1E:BD:82:AD:14:8A:77:1C:2D",
+     "fingerprint": "<REDACTED-9>",
      "fixture": {
       "channels": [
        "lid",
@@ -6275,7 +6275,7 @@
       "ts": "2026-09-19T20:29:34Z"
      },
      "bundle_record_bytes": 19615,
-     "download_disposition": "attachment; filename=\"forgefirm-setup-KZZ77-UF6XM.json\"",
+     "download_disposition": "attachment; filename=\"forgefirm-setup-<REDACTED-10>.json\"",
      "export_s": 42.5,
      "fixture": {
       "channels": [
@@ -6289,7 +6289,7 @@
      },
      "missing_on_page": [],
      "page_bytes": 17660,
-     "sheet_id": "KZZ77-UF6XM",
+     "sheet_id": "<REDACTED-10>",
      "wizards_in_record": [
       "account",
       "advisories",
@@ -6392,7 +6392,7 @@
       "owned": true,
       "running": true
      },
-     "account_before": "scott",
+     "account_before": "<REDACTED-4>",
      "after_takeover": {
       "a": false,
       "b": true
@@ -7093,7 +7093,7 @@
       "syslog_port": "",
       "syslog_proto": "",
       "syslog_server": "",
-      "tls_fingerprint": "<MAC-1>:<MAC-2>:<MAC-3>:<MAC-4>:<MAC-5>:1C:2D",
+      "tls_fingerprint": "<REDACTED-6>",
       "ui_units": "imperial",
       "version": "20260919202327 (dev)",
       "wifi_country": "US",
@@ -9339,7 +9339,7 @@
      "21:33:58 cooling.flow-load: the coolant loop settles before the press: 57 s (60 at least, 240 at most), drifting -0.017 C p",
      "21:33:59 cooling.flow-load: the coolant loop settles before the press: 58 s (60 at least, 240 at most), drifting -0.015 C p",
      "21:34:00 cooling.flow-load: the coolant loop settles before the press: 59 s (60 at least, 240 at most), drifting -0.016 C p",
-     "21:34:01 prompt load-arm (continue): The loop is quiet. Now the box, then a 60 x 15 mm patch at 60 percent that keeps the tube lit for about a minute, both coolant sensors read for 100 s after. About four minutes in all. Lid closed. Continue, then press the button when it lights white; this page says when.",
+     "21:34:01 prompt load-arm (continue): The loop is quiet. Now the box, then a 60 x 15 mm patch at 60 percent that keeps the tube lit for about a minute, both coolant sensors read for 100 s after. About four <REDACTED-11> in all. Lid closed. Continue, then press the button when it lights white; this page says when.",
      "21:34:02 cooling.flow-load: the program goes to the controller, the button lights at the arm",
      "21:34:03 cooling.flow-load: the button is lit: press it now (0 s; the job waits 599 at most)",
      "21:34:03 prompt press (wait): The button is lit white. Press it now: the laser fires after your press.",
@@ -23189,12 +23189,12 @@
      "21:16:22 ACT button press (fixture)",
      "21:16:28 ACT button press: done after 5.3 s",
      "21:16:28 program total at the start of the run: 33292288 bytes",
-     "21:16:28 NOTICE: Cutting: the test watches the ring being topped up for two minutes. Do nothing yet.",
+     "21:16:28 NOTICE: Cutting: the test watches the ring being topped up for two <REDACTED-11>. Do nothing yet.",
      "21:16:49 fixture up: <REDACTED-1> at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:17:19 fixture up: <REDACTED-1> at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:17:50 fixture up: <REDACTED-1> at <IP-1>, v1.0.0, covers lid, interlock, button",
      "21:18:21 fixture up: <REDACTED-1> at <IP-1>, v1.0.0, covers lid, interlock, button",
-     "21:18:28 program total two minutes in: 34603008 bytes (+1310720)",
+     "21:18:28 program total two <REDACTED-11> in: 34603008 bytes (+1310720)",
      "21:18:28 progress reported against 35015348 bytes, kernel program total 34603008",
      "21:18:28 max_backtrack while the feed runs: 155600 steps",
      "21:18:28 ACT button press (fixture)",

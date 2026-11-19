@@ -3367,7 +3367,7 @@
   }
  },
  "manifest_sha": "66e88a51ec745b068a7ac7257ee23b9e6659516ac3a1f5aac13de36fd3d4f819",
- "sha256": "8fa0dc590a9334a10f5d651c2c74a2e039d8383a48a345b452927fc5ed8136a8",
+ "sha256": "beb5b0c3584e112f0225528110fe155af51fca63ffe025c18264aca028b94edf",
  "tests": [
   {
    "always": true,
@@ -3557,7 +3557,7 @@
       508
      ],
      "record_accounts": [
-      "forgefirm"
+      "<REDACTED-2>"
      ],
      "sdma_clk_enable_count": "1",
      "temps": {
@@ -3567,7 +3567,7 @@
       "supply_raw": 573
      },
      "udhcpc": [
-      "udhcpc -R -b -p /var/run/udhcpc.wlan0.pid -i wlan0 -x hostname:forgefirm-b00a"
+      "udhcpc -R -b -p /var/run/udhcpc.wlan0.pid -i wlan0 -x hostname:<REDACTED-3>"
      ],
      "userspace_watchdog_pids": [],
      "watchdog": {
@@ -4580,8 +4580,8 @@
      "00:40:21 POST /settings (no token, 4 MiB body) -> 403",
      "00:40:21 GET /status after the oversized body -> 200",
      "00:40:21 GET /status Host=evil.example.net -> 403",
-     "00:40:21 GET /status Host=forgefirm-b00a -> 200",
-     "00:40:21 GET /status Host=forgefirm-b00a.example.net -> 403",
+     "00:40:21 GET /status Host=<REDACTED-3> -> 200",
+     "00:40:21 GET /status Host=<REDACTED-3>.example.net -> 403",
      "00:40:21 GET /status Origin=http://evil.example.net -> 403",
      "00:40:21 GET /status Sec-Fetch-Site=cross-site -> 403",
      "00:40:21 GET /fuse-identity (no token) -> 403 {'error': 'authentication required'}",
@@ -16642,12 +16642,12 @@
      "20:32:47 ACT button press (fixture)",
      "20:32:53 ACT button press: done after 6.0 s",
      "20:32:53 program total at the start of the run: 33292288 bytes",
-     "20:32:53 NOTICE: Cutting: the test watches the ring being topped up for two minutes. Do nothing yet.",
+     "20:32:53 NOTICE: Cutting: the test watches the ring being topped up for two <REDACTED-4>. Do nothing yet.",
      "20:33:06 fixture up: <REDACTED-1> at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:33:38 fixture up: <REDACTED-1> at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:34:10 fixture up: <REDACTED-1> at <IP-1>, v1.0.0, covers lid, interlock, button",
      "20:34:42 fixture up: <REDACTED-1> at <IP-1>, v1.0.0, covers lid, interlock, button",
-     "20:34:53 program total two minutes in: 34603008 bytes (+1310720)",
+     "20:34:53 program total two <REDACTED-4> in: 34603008 bytes (+1310720)",
      "20:34:53 progress reported against 35015348 bytes, kernel program total 34603008",
      "20:34:53 max_backtrack while the feed runs: 167957 steps",
      "20:34:53 ACT button press (fixture)",
