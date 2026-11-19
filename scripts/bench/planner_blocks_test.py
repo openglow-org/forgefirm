@@ -90,8 +90,8 @@ class Session:
         self.read(1.0)                  # banner and any boot messages
 
     def connect(self):
-        end = time.time() + CONNECT_S
-        while time.time() < end:
+        end = time.monotonic() + CONNECT_S
+        while time.monotonic() < end:
             try:
                 return socket.create_connection(("127.0.0.1", PORT), timeout=1)
             except OSError:
@@ -104,9 +104,9 @@ class Session:
 
     def read(self, timeout=0.8):
         out = b""
-        end = time.time() + timeout
-        while time.time() < end:
-            self.sock.settimeout(max(0.05, end - time.time()))
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.sock.settimeout(max(0.05, end - time.monotonic()))
             try:
                 data = self.sock.recv(4096)
             except (socket.timeout, OSError):
@@ -151,8 +151,8 @@ class Session:
         return int(m.group(1))
 
     def wait_idle(self, timeout=5.0):
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             if self.state() == "Idle":
                 return True
             time.sleep(0.1)

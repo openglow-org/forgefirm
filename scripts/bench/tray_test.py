@@ -161,10 +161,10 @@ class Session:
         """How many [MSG:<text>] lines the sender has had. With `want`, wait
         up to a second for that many: the port answers at once, and the
         sender's lines go out on the controller's next pass."""
-        end = time.time() + (1.0 if want is not None else 0)
+        end = time.monotonic() + (1.0 if want is not None else 0)
         while True:
             n = self.sender.saw("[MSG:%s]" % text)
-            if want is None or n >= want or time.time() > end:
+            if want is None or n >= want or time.monotonic() > end:
                 return n
             time.sleep(0.02)
 
@@ -294,8 +294,8 @@ def test_barrier(s):
     n = s.sender.count()
     s.sender.sock.sendall(b"M103 P1\n")
     seen_run = False
-    end = time.time() + 10
-    while time.time() < end:
+    end = time.monotonic() + 10
+    while time.monotonic() < end:
         st = s.port.state()
         if st["state"] == "Run":
             seen_run = True

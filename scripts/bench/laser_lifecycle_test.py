@@ -241,11 +241,11 @@ class StderrWatch:
         self.armed_check = False
         # The run's summary line, with the worst lag, follows the fault
         # once the stream has ramped down.
-        end = time.time() + 2.0
+        end = time.monotonic() + 2.0
         while True:
             text = self.text()
             m = re.search(r"max behind ([\d.]+) ms", text[text.index(CLAMP_LINE):])
-            if m or time.time() >= end:
+            if m or time.monotonic() >= end:
                 break
             time.sleep(0.05)
         raise HostStarved("[%s] host starved the producer (max behind %s ms): the stream faulted "
@@ -271,12 +271,12 @@ def run_case(case):
 
 
 def read_avail(sock, log, timeout, until=None):
-    end = time.time() + timeout
+    end = time.monotonic() + timeout
     buf = b""
-    while time.time() < end:
+    while time.monotonic() < end:
         if WATCH is not None:
             WATCH.check()
-        sock.settimeout(max(0.05, end - time.time()))
+        sock.settimeout(max(0.05, end - time.monotonic()))
         try:
             data = sock.recv(4096)
         except socket.timeout:
@@ -309,8 +309,8 @@ def send_line(sock, line, log, tolerate_error=False):
 def wait_for(log, needle, timeout, sock=None):
     """Wait until needle appears in the accumulated log (draining the
     socket while waiting when one is given)."""
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if needle in "".join(log):
             return True
         if sock is not None:
@@ -331,8 +331,8 @@ def poll_reply(sock, log, timeout=0.5):
     read_avail(sock, log, 0.02)
     n = len(log)
     sock.sendall(b"?")
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         read_avail(sock, log, 0.05)
         m = re.search(r"<[^>]*>", "".join(log[n:]))
         if m:
@@ -393,8 +393,8 @@ def publish_verdicts(path, stop, verdict):
 def wait_for_new(log, needle, n_before, timeout, sock=None):
     """Wait until needle appears in the log more times than n_before: a
     fresh occurrence, never a stale match from an earlier job."""
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if "".join(log).count(needle) > n_before:
             return True
         if sock is not None:
@@ -511,10 +511,10 @@ class Session:
         in two answers in a row (wait_idle): a block planned and not yet
         started answers Idle once, and so does a run the planner ran dry
         in the middle of a move, until the protocol starts it again."""
-        end = time.time() + timeout
+        end = time.monotonic() + timeout
         need = 2 if prefix == "Idle" else 1
         seen = 0
-        while time.time() < end:
+        while time.monotonic() < end:
             st = self.state()
             seen = seen + 1 if st.startswith(prefix) else 0
             if seen == need:
@@ -604,9 +604,9 @@ def read_state(sess, key=None, timeout=8.0):
     """The published grbl.state as text, polled until `key` appears (the
     publisher runs on the protocol thread's pace; a '?' keeps it ticking)."""
     path = os.path.join(sess.workdir, "grbl.state")
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     text = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         sess.sock.sendall(b"?")
         read_avail(sess.sock, sess.log, 0.2)
         try:
@@ -726,8 +726,8 @@ def test_sender_change_holds_and_rearms():
         if s.wait_state("Hold", 2) is None:
             fail("[sender-change-rearm] the job left Hold before the press")
         s.press_button()
-        end = time.time() + 10
-        while time.time() < end and s.armed_count() != before + 1:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and s.armed_count() != before + 1:
             read_avail(s.sock, s.log, 0.2)
         if s.armed_count() != before + 1:
             fail("[sender-change-rearm] the press did not re-arm the held job")
@@ -768,8 +768,8 @@ def test_resume_after_grace():
         if s.wait_state("Hold", 2) is None:
             fail("[resume-after-grace] the job left Hold before the press")
         s.press_button()
-        end = time.time() + 10
-        while time.time() < end and s.armed_count() != before + 1:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and s.armed_count() != before + 1:
             read_avail(s.sock, s.log, 0.2)
         if s.armed_count() != before + 1:
             fail("[resume-after-grace] the press did not re-arm the held job")
@@ -811,8 +811,8 @@ def test_rx_overrun_aborts():
         before = s.armed_count()
         send_line(s.sock, "M4 S100", s.log)
         send_line(s.sock, "G1 X0 F600", s.log)
-        end = time.time() + 5
-        while time.time() < end and s.armed_count() != before + 1:
+        end = time.monotonic() + 5
+        while time.monotonic() < end and s.armed_count() != before + 1:
             read_avail(s.sock, s.log, 0.2)
         if s.armed_count() != before + 1:
             fail("[rx-overrun] a clean job after the overrun did not arm")
@@ -837,24 +837,24 @@ def test_sigterm_mid_job():
         if not wait_for(s.log, ARMED, 5, s.sock):
             fail("[sigterm-mid-job] the job did not arm")
         # Let the run get under way.
-        deadline = time.time() + 5
+        deadline = time.monotonic() + 5
         running = False
-        while time.time() < deadline and not running:
+        while time.monotonic() < deadline and not running:
             s.sock.sendall(b"?")
             read_avail(s.sock, s.log, 0.3)
             running = "<Run" in "".join(s.log[-5:])
         if not running:
             fail("[sigterm-mid-job] the job never reported Run")
-        t0 = time.time()
+        t0 = time.monotonic()
         s.proc.send_signal(signal.SIGTERM)
         # Keep draining the sender socket so the disarm report is captured.
         exited = False
-        while time.time() - t0 < 10:
+        while time.monotonic() - t0 < 10:
             read_avail(s.sock, s.log, 0.2)
             if s.proc.poll() is not None:
                 exited = True
                 break
-        dt = time.time() - t0
+        dt = time.monotonic() - t0
         if not exited:
             fail("[sigterm-mid-job] the controller did not exit within 10 s of "
                  "SIGTERM during a job (it must stop, not finish the job)")
@@ -1259,8 +1259,8 @@ def test_homing_abort_keeps_z_hold():
         read_avail(s.sock, s.log, 0.5)
         if "ALARM:6" not in "".join(s.log[mark:]):
             fail("[home-reset] the reset during homing did not raise ALARM:6")
-        end = time.time() + 3
-        while home_sessions() and time.time() < end:
+        end = time.monotonic() + 3
+        while home_sessions() and time.monotonic() < end:
             time.sleep(0.1)
         if home_sessions():
             fail("[home-reset] the homing session's command outlived the reset")
@@ -1292,8 +1292,8 @@ def test_homing_abort_keeps_z_hold():
             fail("[home-reset] no status report from the soft-limit alarm (state %s)" % s.state())
         banners = s.count("GrblHAL")
         s.sock.sendall(b"\x18")
-        end = time.time() + 5
-        while s.count("GrblHAL") <= banners and time.time() < end:
+        end = time.monotonic() + 5
+        while s.count("GrblHAL") <= banners and time.monotonic() < end:
             s.state()
         if s.count("GrblHAL") <= banners:
             fail("[home-reset] no reset banner after the ^X that clears the soft limit")
@@ -1421,8 +1421,8 @@ def test_sender_change_during_rearm_cancels():
         if not wait_for_new(s.log, RESUME_PROMPT, prompts, 3, s.sock):
             fail("[rearm-sender-change] the press after the cancel did not open a fresh re-arm prompt")
         s.press_button()
-        end = time.time() + 10
-        while time.time() < end and s.armed_count() != before + 1:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and s.armed_count() != before + 1:
             read_avail(s.sock, s.log, 0.2)
         if s.armed_count() != before + 1:
             fail("[rearm-sender-change] the second press did not re-arm the held job")
@@ -1515,8 +1515,8 @@ def test_rearm_waits_for_the_engine():
             fail("[rearm-late-ack] armed or resumed before the engine took the job "
                  "(armed %d -> %d, state %s)" % (before, s.armed_count(), s.state()))
         s.verdict["armed_ack"] = True               # the engine takes it
-        end = time.time() + 4
-        while time.time() < end and s.armed_count() != before + 1:
+        end = time.monotonic() + 4
+        while time.monotonic() < end and s.armed_count() != before + 1:
             read_avail(s.sock, s.log, 0.2)
         if s.armed_count() != before + 1:
             fail("[rearm-late-ack] the acknowledgment did not arm the held job (armed %d -> %d)"
@@ -1559,8 +1559,8 @@ def test_resume_under_a_pause_verdict_stays_held():
         if not wait_for_new(s.log, RESUME_PROMPT, prompts, 5, s.sock):
             fail("[held-under-verdict] the resume did not prompt once the verdict had cleared")
         s.press_button()
-        end = time.time() + 10
-        while time.time() < end and s.armed_count() != before + 1:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and s.armed_count() != before + 1:
             read_avail(s.sock, s.log, 0.2)
         if s.armed_count() != before + 1:
             fail("[held-under-verdict] the press did not re-arm the held job")
@@ -1583,8 +1583,8 @@ def held_in_time(s, tag, timeout=6.0):
     rule), and a second miss fails the harness. The miss names the states
     seen on the way."""
     seen = []
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         st = s.state()
         if not seen or seen[-1] != st:
             seen.append(st)

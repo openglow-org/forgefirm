@@ -90,8 +90,8 @@ def edge(s, axis, inside, outside, what):
 
 
 def port_idle(s, timeout=20.0):
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         st = s.port.state()
         if st["state"] == "Idle" and not st["port_jog"]:
             return st
@@ -127,8 +127,8 @@ def open_envelope(s, what):
 
 
 def saw_within(s, needle, seconds=2.0):
-    end = time.time() + seconds
-    while not s.sender.saw(needle) and time.time() < end:
+    end = time.monotonic() + seconds
+    while not s.sender.saw(needle) and time.monotonic() < end:
         time.sleep(0.05)
     return s.sender.saw(needle)
 
@@ -278,8 +278,8 @@ def lens_moves_on(s, z0, up, reset):
     not judged, why."""
     spm = float(next(o for o in s.sender.other if o.startswith("$102=")).split("=")[1])
     end_z = round(round((z0 + up) * spm) / spm, 3)
-    end = time.time() + 10.0
-    while not s.sender.saw(DROP_Z_MSG) and time.time() < end:
+    end = time.monotonic() + 10.0
+    while not s.sender.saw(DROP_Z_MSG) and time.monotonic() < end:
         time.sleep(0.01)
     state, pos = status(s)
     if state != "Jog" or pos is None:
@@ -332,8 +332,8 @@ def late_steps(stall_ms, jog, what, mode=32, mid=None, pre=(), up=0.0):
         if mid:
             r["mid"] = lens_moves_on(s, z0, up, mid == "reset")
         s.sender.wait_state("Idle", timeout=30.0)
-        end = time.time() + 3.0
-        while not re.search(r"run: \d+ late events clamped", s.watch.text()) and time.time() < end:
+        end = time.monotonic() + 3.0
+        while not re.search(r"run: \d+ late events clamped", s.watch.text()) and time.monotonic() < end:
             time.sleep(0.05)
         m = re.search(r"run: (\d+) late events clamped", s.watch.text())
         if not m:
@@ -436,8 +436,8 @@ def late_fault():
         home(s)
         for line in ("G91", "M3 S500", "G1 X20 Z3.4 F600"):
             s.sender.send(line, timeout=10.0)
-        end = time.time() + 15.0
-        while s.sender.state() != "Alarm" and time.time() < end:
+        end = time.monotonic() + 15.0
+        while s.sender.state() != "Alarm" and time.monotonic() < end:
             time.sleep(0.1)
         if "stream fault" not in s.watch.text():
             fail("[late-fault] the stall in the lit move faulted nothing: the case proves nothing")

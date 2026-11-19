@@ -169,7 +169,7 @@ class Session:
         """True once the last move's run currents have been followed by the
         hold currents (or no move has run): the drop the controller owes once
         a move has played out."""
-        end = time.time() + timeout
+        end = time.monotonic() + timeout
         while True:
             raw = self.raw_attr_writes()
             if RUN not in raw:
@@ -177,7 +177,7 @@ class Session:
             last = len(raw) - 1 - raw[::-1].index(RUN)
             if raw[last + 1:last + 2] == [HOLD]:
                 return True
-            if time.time() >= end:
+            if time.monotonic() >= end:
                 return False
             time.sleep(0.05)
 
@@ -517,8 +517,8 @@ def test_origin_jog_cancel(s):
     s.sender.sock.sendall(("$H" + s.sender.eol).encode())
     time.sleep(0.4)                             # into a move of about 1.6 s
     s.sender.realtime(b"\x85")
-    end = time.time() + 5.0
-    while time.time() < end and s.sender.count() == n:
+    end = time.monotonic() + 5.0
+    while time.monotonic() < end and s.sender.count() == n:
         time.sleep(0.01)
     with s.sender.lock:
         r = s.sender.responses[n] if len(s.sender.responses) > n else None

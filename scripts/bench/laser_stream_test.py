@@ -548,11 +548,11 @@ class StderrWatch:
         self.armed_check = False
         # The run's summary line, with the worst lag, follows the fault
         # once the stream has ramped down.
-        end = time.time() + 2.0
+        end = time.monotonic() + 2.0
         while True:
             text = self.text()
             m = re.search(r"max behind ([\d.]+) ms", text[text.index(CLAMP_LINE):])
-            if m or time.time() >= end:
+            if m or time.monotonic() >= end:
                 break
             time.sleep(0.05)
         raise HostStarved("[%s] host starved the producer (max behind %s ms): the stream faulted "
@@ -576,12 +576,12 @@ def send_line(sock, line, log):
 
 
 def read_avail(sock, log, timeout, until=None):
-    end = time.time() + timeout
+    end = time.monotonic() + timeout
     buf = b""
-    while time.time() < end:
+    while time.monotonic() < end:
         if WATCH is not None:
             WATCH.check()
-        sock.settimeout(max(0.05, end - time.time()))
+        sock.settimeout(max(0.05, end - time.monotonic()))
         try:
             data = sock.recv(4096)
         except socket.timeout:
@@ -609,8 +609,8 @@ def status_text(sock, log, timeout=0.5):
     read_avail(sock, log, 0.02)
     n = len(log)
     sock.sendall(b"?")
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         read_avail(sock, log, 0.05)
         m = re.search(r"<[^>]*>", "".join(log[n:]))
         if m:
@@ -644,8 +644,8 @@ def wait_idle(sock, log):
 def wait_state(sock, log, prefix, timeout=5.0):
     """Poll '?' until the answer's state word starts with prefix (e.g.
     'Hold:0')."""
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         st = status_reply(sock, log)
         if st is not None and st.startswith(prefix):
             return
@@ -858,8 +858,8 @@ def run_session_once(name, steps, conf, workdir, keep, arm_required, env_extra, 
 
 def wait_text(sock, log, needle, timeout):
     """Drain the socket until needle appears in the accumulated log."""
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if needle in "".join(log):
             return True
         read_avail(sock, log, 0.2)

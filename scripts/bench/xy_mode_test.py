@@ -93,9 +93,9 @@ class Session:
 
     def read(self, timeout=0.8):
         out = b""
-        end = time.time() + timeout
-        while time.time() < end:
-            self.sock.settimeout(max(0.05, end - time.time()))
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.sock.settimeout(max(0.05, end - time.monotonic()))
             try:
                 data = self.sock.recv(4096)
             except (socket.timeout, OSError):

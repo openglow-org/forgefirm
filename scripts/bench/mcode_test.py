@@ -54,8 +54,8 @@ def send_nowait(s, line):
 
 
 def wait_pending(s, timeout=5.0):
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         st = s.port.state()
         if st.get("mcode"):
             return st
@@ -82,8 +82,8 @@ def test_table(s):
     if m.get("code") != 165:
         fail("[table] a refused list changed the table: %r" % m)
     s.port.request("mcode_result %d ok" % m["seq"])
-    end = time.time() + 3
-    while s.sender.count() == n and time.time() < end:
+    end = time.monotonic() + 3
+    while s.sender.count() == n and time.monotonic() < end:
         time.sleep(0.02)
     if s.sender.responses[n:n + 1] != ["ok"]:
         fail("[table] M165 got %r" % s.sender.responses[n:])
@@ -141,8 +141,8 @@ def test_answered(s):
     r = s.port.request("mcode_result %d ok all set" % m["seq"])
     if r != "ok":
         fail("[answered] the answer -> %r" % r)
-    end = time.time() + 3
-    while s.sender.count() == n and time.time() < end:
+    end = time.monotonic() + 3
+    while s.sender.count() == n and time.monotonic() < end:
         time.sleep(0.02)
     if s.sender.responses[n:n + 1] != ["ok"]:
         fail("[answered] the M-code line got %r after the answer" % s.sender.responses[n:])
@@ -163,8 +163,8 @@ def test_fail_holds(s):
     n = send_nowait(s, "M161")
     m = wait_pending(s)["mcode"]
     s.port.request("mcode_result %d fail the exhaust did not start" % m["seq"])
-    end = time.time() + 3
-    while s.sender.count() == n and time.time() < end:
+    end = time.monotonic() + 3
+    while s.sender.count() == n and time.monotonic() < end:
         time.sleep(0.02)
     s.sender.wait_state("Hold", timeout=5)
     if not s.sender.saw("M161: the exhaust did not start: the job is held"):
@@ -181,12 +181,12 @@ def test_reset_ends_wait(s):
     s.sender.wait_state("Idle")
     send_nowait(s, "M160")
     wait_pending(s)
-    t0 = time.time()
+    t0 = time.monotonic()
     s.sender.realtime(b"\x18")
-    end = time.time() + 3
-    while time.time() < end and s.port.state().get("mcode") is not None:
+    end = time.monotonic() + 3
+    while time.monotonic() < end and s.port.state().get("mcode") is not None:
         time.sleep(0.02)
-    dt = time.time() - t0
+    dt = time.monotonic() - t0
     if s.port.state().get("mcode") is not None:
         fail("[reset] the wait outlived a soft reset")
     time.sleep(0.5)
@@ -199,11 +199,11 @@ def test_reset_ends_wait(s):
 def test_timeout_holds(s):
     s.port.request("mcodes 160")
     s.sender.wait_state("Idle")
-    t0 = time.time()
+    t0 = time.monotonic()
     send_nowait(s, "M160")
     wait_pending(s)
     s.sender.wait_state("Hold", timeout=WAIT_S + 5)
-    dt = time.time() - t0
+    dt = time.monotonic() - t0
     if dt < WAIT_S - 0.1:
         fail("[timeout] the job was held after %.1f s, not after the wait" % dt)
     if not s.sender.saw("M160 had no answer from its extension"):

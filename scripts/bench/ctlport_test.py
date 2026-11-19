@@ -79,6 +79,11 @@ import time
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build-native/grblHAL_glowforge")
 
+# Every wait and every interval here is timed on time.monotonic(), the
+# clock the controller runs on (CLOCK_MONOTONIC). A host's wall clock can
+# step by seconds when its time is synced, and a deadline on it can end a
+# wait before the controller has had its time to answer.
+
 
 def free_port():
     """A TCP port nothing on this host holds: two harness runs on one host
@@ -171,11 +176,11 @@ class StderrWatch:
         self.armed_check = False
         # The run's summary line, with the worst lag, follows the fault
         # once the stream has ramped down.
-        end = time.time() + 2.0
+        end = time.monotonic() + 2.0
         while True:
             text = self.text()
             m = re.search(r"max behind ([\d.]+) ms", text[text.index(CLAMP_LINE):])
-            if m or time.time() >= end:
+            if m or time.monotonic() >= end:
                 break
             time.sleep(0.05)
         raise HostStarved("[%s] host starved the producer (max behind %s ms): the stream faulted "
@@ -268,8 +273,8 @@ class Sender:
         arrives for it."""
         n = self.count()
         self.sock.sendall((line + self.eol).encode())
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             watch_check()
             if self.count() > n:
                 with self.lock:
@@ -284,8 +289,8 @@ class Sender:
         with self.lock:
             n = len(self.other)
         self.sock.sendall(b"?")
-        end = time.time() + 2.0
-        while time.time() < end:
+        end = time.monotonic() + 2.0
+        while time.monotonic() < end:
             watch_check()
             with self.lock:
                 for line in self.other[n:]:
@@ -299,10 +304,10 @@ class Sender:
         """The state in the answers to fresh polls. Idle counts in two
         answers in a row: a block planned and not yet started answers Idle
         once, and is running by the next."""
-        end = time.time() + timeout
+        end = time.monotonic() + timeout
         need = 2 if want == "Idle" else 1
         seen = 0
-        while time.time() < end:
+        while time.monotonic() < end:
             seen = seen + 1 if self.state() == want else 0
             if seen == need:
                 return
@@ -417,8 +422,8 @@ class Session:
         """The port's own jog is over: Idle, and no port jog in hand. A
         jog is judged by its own end, never by an Idle that may come
         before it starts."""
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             watch_check()
             st = self.port.state()
             if st["state"] == "Idle" and not st["port_jog"]:
@@ -516,9 +521,9 @@ def test_sender_wins(s):
     st = s.port.state()
     if st["state"] != "Jog" or not st["port_jog"]:
         fail("[sender-wins] not jogging for the port: %r" % st)
-    t0 = time.time()
+    t0 = time.monotonic()
     r = s.sender.send("G0 X1", timeout=10.0)
-    dt = time.time() - t0
+    dt = time.monotonic() - t0
     if r != "ok":
         fail("[sender-wins] the sender's line during a port jog got %r, not ok" % r)
     s.sender.wait_state("Idle")
@@ -547,8 +552,8 @@ def test_sender_wins_queued(s):
     s.port.sock.sendall(b"jog G91 X300 F6000\n")                  # queued behind the dwell
     time.sleep(0.2)
     s.sender.sock.sendall(("G0 X1" + s.sender.eol).encode())      # streamed behind the port's line
-    end = time.time() + 10.0
-    while time.time() < end and s.sender.count() < n + 2:
+    end = time.monotonic() + 10.0
+    while time.monotonic() < end and s.sender.count() < n + 2:
         time.sleep(0.02)
     got = s.sender.responses[n:n + 2]
     port_reply = s.port.reply()
@@ -610,8 +615,8 @@ def poll_case(tag, eol):
         x0 = s.port.state()["mpos"][0]
         if s.port.request("jog G91 X60 F3000") != "ok":     # 1.2 s and more: several polls long
             fail("[%s] the long port jog was refused under a status poll" % tag)
-        t0 = time.time()
-        while time.time() - t0 < 10:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 10:
             st = s.port.state()
             if st["state"] == "Idle" and not st["port_jog"]:
                 break
@@ -629,8 +634,8 @@ def poll_case(tag, eol):
         time.sleep(0.3)
         n = s.sender.count()
         s.sender.sock.sendall(("G4 P0" + eol).encode())
-        end = time.time() + 10
-        while time.time() < end and s.sender.count() <= n:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and s.sender.count() <= n:
             time.sleep(0.01)
         if s.sender.count() != n + 1 or s.sender.responses[n] != "ok":
             fail("[%s] the sender's real line under a port jog got %r" % (tag, s.sender.responses[n:]))
@@ -868,10 +873,10 @@ def test_dead_man(s):
         fail("[dead-man] the long port jog was refused")
     time.sleep(0.5)
     s.port.close()
-    t0 = time.time()
+    t0 = time.monotonic()
     s.sender.wait_state("Idle", timeout=6.0)
     print("PASS [dead-man]: closing the port's client canceled its jog (idle after %.2f s)"
-          % (time.time() - t0))
+          % (time.monotonic() - t0))
     s.port = PortClient(s.path)
     if s.port.state()["port_jog"]:
         fail("[dead-man] a new client inherited the old jog")
@@ -894,8 +899,8 @@ def own_address():
 
 
 def wait_closed(sender, what, timeout=3.0):
-    end = time.time() + timeout
-    while time.time() < end and not sender.closed:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and not sender.closed:
         time.sleep(0.05)
     if not sender.closed:
         fail("[sender-out] %s was not closed" % what)
@@ -916,8 +921,8 @@ def test_sender_out():
         got = s.port.request("sender out")
         if got != "busy:sender":
             fail("[sender-out] during the sender's dwell: %r, wanted busy:sender" % got)
-        end = time.time() + 5
-        while net.count() < 1 and time.time() < end:
+        end = time.monotonic() + 5
+        while net.count() < 1 and time.monotonic() < end:
             time.sleep(0.05)
         # A sender that just finished a line is not done with the machine.
         if net.send("G21") != "ok":

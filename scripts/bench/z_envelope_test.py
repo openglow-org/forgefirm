@@ -169,9 +169,9 @@ class Session:
     def read(self, timeout=0.8):
         ct.watch_check()
         out = b""
-        end = time.time() + timeout
-        while time.time() < end:
-            self.sock.settimeout(max(0.05, end - time.time()))
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.sock.settimeout(max(0.05, end - time.monotonic()))
             try:
                 data = self.sock.recv(4096)
             except (socket.timeout, OSError):
@@ -189,8 +189,8 @@ class Session:
         """send(), returning once the answer is whole: an ok, an error, or,
         for '?', the status report."""
         self.sock.sendall(b"?" if line == "?" else (line + "\n").encode())
-        out, end = "", time.time() + timeout
-        while time.time() < end:
+        out, end = "", time.monotonic() + timeout
+        while time.monotonic() < end:
             out += self.read(0.05)
             if (">" in out if line == "?" else re.search(r"^(ok|error:\d+)\r?$", out, re.M)):
                 break
@@ -232,8 +232,8 @@ class Session:
     def wait_idle(self, timeout=15.0):
         """A move that ran plays out before the next line is judged: the
         soft limit on a moving machine holds first and alarms after."""
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             if self.state() == "Idle":
                 return
             time.sleep(0.1)

@@ -83,8 +83,8 @@ class Listener:
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
     def wait(self, n, timeout=8.0):
-        end = time.time() + timeout
-        while time.time() < end and len(self.seen) < n:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and len(self.seen) < n:
             time.sleep(0.05)
         return list(self.seen)
 
@@ -153,8 +153,8 @@ def run(name, secret, check, runner=False, handed=None):
             time.sleep(0.5)
             sent = time.clock_gettime(time.CLOCK_MONOTONIC)
             s.sendall(b"$H\n")
-            end = time.time() + 10
-            while time.time() < end and not os.path.exists(env_file):
+            end = time.monotonic() + 10
+            while time.monotonic() < end and not os.path.exists(env_file):
                 time.sleep(0.1)
             if not os.path.exists(env_file):
                 fail("[%s] the stand-in homing runner never ran" % name)
