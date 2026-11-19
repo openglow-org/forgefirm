@@ -1320,9 +1320,10 @@ def check_runs(name, data, marks, what):
     FIRE tick, 'l' is lit over at least half its ticks (a cut at S500 and
     up under the floored density model renders more), and '-' is not
     judged; '*' and a mark judge every move before the last by that mark,
-    one at least. The last mark is the witness cut: lit, and the only arm
-    of the session, so the window was open through every move judged dark
-    and their darkness is the stream's, never a closed window's. The idle
+    one at least. The last mark is the witness cut: lit, in a session that
+    arms once, and again only right after an M5 closed a window that fired
+    nothing, so the window was open through every move judged dark and
+    their darkness is the stream's, never a closed window's. The idle
     gaps between the moves are judged too: no FIRE tick away from every
     step (rule 8), and the stream ends dark (rule 7)."""
     ticks = tick_bytes(data)
@@ -1339,9 +1340,23 @@ def check_runs(name, data, marks, what):
     if len(runs) != len(marks):
         fail("[%s] %d moves in the stream, expected %d (%s): %s"
              % (name, len(runs), len(marks), marks, runs))
-    if run_session.text.count("laser armed") != 1:
-        fail("[%s] armed %d times: the window closed under the session, so its dark moves "
-             "prove nothing" % (name, run_session.text.count("laser armed")))
+    # An M5 that ends a window which fired nothing closes it, and the next
+    # laser-on arms afresh (the driver says so). Every arm past the first
+    # must follow such a close of its own, in order, so every move is still
+    # judged inside an open window.
+    arms = closes = 0
+    for said in re.findall(r"laser armed|the laser fired nothing since its press", run_session.text):
+        if said != "laser armed":
+            closes += 1
+            continue
+        arms += 1
+        if arms > 1 and closes == 0:
+            fail("[%s] arm %d follows no window an M5 closed unlit: a window closed under the "
+                 "session otherwise, so its dark moves prove nothing" % (name, arms))
+        if arms > 1:
+            closes -= 1
+    if arms == 0:
+        fail("[%s] the session never armed" % name)
     out = []
     for i, (run, mark) in enumerate(zip(runs, marks)):
         lit = fire_on_run(ticks, run)

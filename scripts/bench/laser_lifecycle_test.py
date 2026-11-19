@@ -115,6 +115,11 @@ reported messages:
      written, M8 on and the flood toggled off in the hold (so the resume
      restores it), a ~ inside the grace resumes the held job lit, with no
      disarm and no press
+ 27. a hold is no M5: a job whose window has fired nothing yet (a move at
+     S0), held by the button and held by a pause-tier verdict, keeps its
+     window through the hold (no unlit close, no disarm), and the
+     button's resume and the cleared verdict's resume run it on with no
+     press
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -127,8 +132,8 @@ on purpose and the case did not run). It runs once more from new
 controllers, and a second starve fails the harness. The cases that send a
 byte inside the grace of a hold (rules 24 and 26) treat a hold not reached
 within 6 s, or a window the grace closed before their byte, the same way:
-a host too slow for the case, never a pass. No other failure runs a case
-again.
+a host too slow for the case, never a pass; so does rule 27, for its hold.
+No other failure runs a case again.
 
 Usage: laser_lifecycle_test.py [path-to-binary]
        (default ./build-native/grblHAL_glowforge)
@@ -166,6 +171,7 @@ PROMPT = "press the button to start the laser job"
 RESUME_PROMPT = "press the button to resume the laser job"
 MODAL_OFF = "the next M3 or M4 asks for the button"
 STAYS_HELD = "the job stays held"
+UNLIT = "the laser fired nothing since its press"
 STALLED = "the laser window closed while the job waited"
 LID_CANCEL = "lid opened during arm - job canceled"
 LOOP_CANCEL = "interlock open during arm - job canceled"
@@ -1845,10 +1851,53 @@ def test_stalled_job_does_not_run_on_dark():
         s.close()
 
 
+def test_an_unfired_window_survives_its_hold():
+    """Rule 27: the core turns the laser off at every feed hold, and back on
+    at its resume, with the job's M4 still modal; that is no M5. A job
+    whose window has fired nothing yet (a move at S0), held by the button
+    and held by a pause-tier verdict, keeps its window through the hold:
+    no unlit close, no disarm. The button's resume, and the cleared
+    verdict's, run it on with no press."""
+    for tag, by_verdict in (("unfired-button-hold", False), ("unfired-verdict-hold", True)):
+        s = Session(tag, disarm_s=60, switches=SW_CLOSED)
+        try:
+            start_armed_move(s, tag, "G1 X8 F60 S0")
+            time.sleep(1.0)
+            prompts = s.count(PROMPT) + s.count(RESUME_PROMPT)
+            armed = s.armed_count()
+            if by_verdict:
+                s.set_verdict("BUTTON", fire_ok=False, hold=True, resume_ok=False)
+            else:
+                s.press_button()
+            held_in_time(s, tag)
+            time.sleep(1.5)
+            read_avail(s.sock, s.log, 0.3)
+            check(s.count(UNLIT) == 0 and s.disarmed_count() == 0,
+                  "[%s] the hold closed a window that had not fired (unlit closes %d, disarms %d)"
+                  % (tag, s.count(UNLIT), s.disarmed_count()))
+            if by_verdict:
+                s.set_verdict()                     # the verdict clears
+            else:
+                s.press_button()
+            check(s.wait_state("Run", 5) is not None,
+                  "[%s] the held job did not run on (state %s)" % (tag, s.state()))
+            check(s.count(PROMPT) + s.count(RESUME_PROMPT) == prompts and s.armed_count() == armed,
+                  "[%s] the resume asked for the button again" % tag)
+            check(s.count(UNLIT) == 0 and s.disarmed_count() == 0,
+                  "[%s] the resume closed the window" % tag)
+            wait_idle(s.sock, s.log)
+            send_line(s.sock, "M5", s.log)
+        finally:
+            s.close()
+    print("PASS [unfired-hold]: a window that had fired nothing kept itself through a button "
+          "hold and a verdict hold, and each resume ran on with no press")
+
+
 def main():
     if not os.path.isfile(BIN):
         fail("controller binary not found at %s" % BIN)
-    for case in (test_stalled_job_does_not_run_on_dark,
+    for case in (test_an_unfired_window_survives_its_hold,
+                 test_stalled_job_does_not_run_on_dark,
                  test_manual_home_closes_the_window,
                  test_window_does_not_outlive_its_job,
                  test_rearm_waits_for_the_engine,
