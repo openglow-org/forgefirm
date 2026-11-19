@@ -20,10 +20,16 @@ image carries no mDNS resolver; the fixture answers the query itself);
 one policy switch: whether the fixture may press the button to arm the
 laser for a live test (a person's press by default).
 
+The key never travels: every request carries a nonce the fixture issued
+for it (GET /nonce) and an HMAC-SHA256 of the request under the key
+(request_mac), and the fixture takes each nonce once.
+
 The fixture does not read the machine: every action the runner asks of
 it is verified through the machine's own readings afterward, exactly as
 an operator's hand is (Context.act). Contract: fixture/README.md.
 """
+import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -41,6 +47,41 @@ MDNS_PORT = 5353
 RESOLVE_TTL_S = 300.0           # a resolved address is trusted this long
 BUTTON_GAP_S = 0.3              # the release between two presses: long enough for the controller to see it
 PULSE_WAIT_S = 1.5              # a pulse in progress ends within the firmware's 500 ms clamp
+PULSE_MAX_S = 0.5               # the firmware's clamp: the longest a press the box made can still be held
+NONCE_LIFE_S = 10.0             # the firmware's AUTH_NONCE_LIFE_US: how long the box takes a request after its nonce
+# The requests the box takes the same way twice: a resend of one whose
+# answer was lost changes nothing. A press is never among them.
+TAKES_TWICE = (("GET", "/"), ("POST", "/lid"), ("POST", "/interlock"), ("POST", "/release"))
+# The answers the firmware gives a press before it calls the relay
+# (fixture/main/api.c): a body it will not take, a request it does not
+# authorize, the enable jumper out or a pulse in progress. Any other answer
+# but 200 comes after the relay call (a reply it could not build), so the
+# press may have been made.
+PRESS_REFUSED = (400, 401, 409, 413)
+# The requests that set or let go a loop.
+LOOP_PATHS = ("/lid", "/interlock", "/release")
+# A request that went out and got no answer may still be served by the box
+# until its nonce's life is over (a press: and held for the longest pulse
+# after): until when, on the monotonic clock, for the presses and for the
+# loop requests. Kept for the process, not for a client: the runner makes a
+# new client at every probe, and the box is the same one.
+_unanswered = {"press": 0.0, "loop": 0.0}
+
+
+def unanswered_left(kind=None):
+    """Seconds until the box can no longer act on a request this process
+    sent and got no answer to: a press ("press"), a loop request ("loop"),
+    or either; 0 when there is none."""
+    until = _unanswered[kind] if kind else max(_unanswered.values())
+    return max(0.0, until - time.monotonic())
+
+
+def request_mac(key, method, uri, nonce, body):
+    """The MAC a request carries (fixture/main/auth.h): HMAC-SHA256 under
+    the key over the method, the URI as sent, the nonce and the body's
+    bytes, the first three each ended by a newline."""
+    msg = b"\n".join((method.encode("ascii"), uri.encode("ascii"), nonce.encode("ascii"))) + b"\n" + (body or b"")
+    return hmac.new(key.encode("utf-8"), msg, hashlib.sha256).hexdigest()
 
 
 class FixtureError(Exception):
@@ -52,6 +93,18 @@ class FixtureError(Exception):
     def __init__(self, *args, sent=False):
         super().__init__(*args)
         self.sent = sent
+
+
+class PressWithheld(FixtureError):
+    """A press the caller's judgment refused right before its request went
+    out (Fixture.act's judge): nothing was sent. `why` is the judgment, in
+    words an operator can be shown; `error` is the exception a judgment that
+    failed ended with, for the log."""
+
+    def __init__(self, why, error=None):
+        super().__init__("the press was withheld at its request: %s" % why)
+        self.why = why
+        self.error = error
 
 
 # ---------------------------------------------------------------- mDNS
@@ -174,9 +227,9 @@ def resolve_mdns(hostname, timeout=2.0, tries=3):
                     continue
             if not sent:
                 return None
-            deadline = time.time() + timeout
+            deadline = time.monotonic() + timeout
             while True:
-                left = deadline - time.time()
+                left = deadline - time.monotonic()
                 if left <= 0:
                     break
                 sock.settimeout(left)
@@ -224,9 +277,11 @@ def load_config(path=None):
 
 class Fixture:
     """The actuator as the runner sees it: which channels it covers, an
-    action per channel, a release, its state. Every request carries the
-    key; the address comes from the config's ip or the mDNS lookup,
-    re-resolved when a request fails to connect."""
+    action per channel, a release, its state. Every request carries a
+    fresh nonce and its MAC under the key; the address comes from the
+    config's ip or the mDNS lookup, re-resolved when a request fails to
+    connect. Times are on the monotonic clock: a step of the board's wall
+    clock (its first time sync after a boot) moves no spacing or age."""
 
     def __init__(self, cfg, timeout=3.0, resolver=resolve_mdns):
         self.hostname = cfg["hostname"]
@@ -238,40 +293,98 @@ class Fixture:
         self.timeout = timeout
         self._resolver = resolver
         self._ip = self.ip_override
-        self._resolved_at = time.time() if self.ip_override else 0.0
+        self._resolved_at = time.monotonic() if self.ip_override else None
         self._lock = threading.Lock()
         self.last_state = None
         self._pulse_end = 0.0       # when this client's last press ends (its pulse_ms)
+        self._nonce_at = 0.0        # when the last request's nonce was in hand: the box issued it before
 
     # -- address -------------------------------------------------------
     def address(self, refresh=False):
         with self._lock:
             if self.ip_override:
                 return self.ip_override
-            stale = time.time() - self._resolved_at > RESOLVE_TTL_S
+            stale = self._resolved_at is None or time.monotonic() - self._resolved_at > RESOLVE_TTL_S
             if self._ip is None or refresh or stale:
                 ip = self._resolver(self.hostname)
                 if ip is None:
                     raise FixtureError("%s.local did not answer the mDNS lookup (set ip in the config "
                                        "to skip it)" % self.hostname)
                 self._ip = ip
-                self._resolved_at = time.time()
+                self._resolved_at = time.monotonic()
             return self._ip
 
     def where(self):
         return "%s (%s)" % (self.hostname, self._ip or "unresolved")
 
     # -- requests ------------------------------------------------------
-    def _request(self, method, path, body=None, retry=True):
+    def _nonce(self, host):
+        """A nonce for one request, from the box. Asking for one acts on
+        nothing, so any way this fails leaves the request unsent: a
+        transport failure comes out as a URLError (the request may be tried
+        again at a fresh address), anything else as a FixtureError. The box
+        says how long its nonce lives (expires_s): one that lives longer
+        than NONCE_LIFE_S is refused, since every wait for a request the
+        box may still serve counts that life."""
+        req = urllib.request.Request("http://%s/nonce" % host, method="GET", headers={"Host": host})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as e:
+            raise FixtureError("fixture %s: no nonce (%s)" % (self.where(), e.code))
+        except (http.client.HTTPException, socket.timeout, OSError) as e:
+            raise urllib.error.URLError(e)
+        try:
+            answer = json.loads(raw.decode("utf-8", "replace") or "{}")
+            nonce, life = answer.get("nonce"), answer.get("expires_s")
+        except (ValueError, AttributeError):
+            nonce, life = None, None
+        if not isinstance(nonce, str) or not nonce:
+            raise FixtureError("fixture %s: no nonce in its answer" % self.where())
+        if isinstance(life, (int, float)) and life > NONCE_LIFE_S:
+            raise FixtureError("fixture %s: its nonce lives %s s, and this client counts on %g s at most"
+                               % (self.where(), life, NONCE_LIFE_S))
+        return nonce
+
+    def _request(self, method, path, body=None, retry=True, judge=None):
+        """One signed request. judge, when given, is asked right before the
+        request goes out, after its nonce (a press's policy, judged on the
+        machine): an answer other than None withholds it (PressWithheld),
+        and so does a judgment that fails. A retry at a fresh address asks
+        it again. A loop request that went out and got no whole answer is
+        timed as the box can still serve it (_unanswered)."""
         ip = self.address()
         data = json.dumps(body).encode() if body is not None else None
         host = ip if self.port == 80 else "%s:%d" % (ip, self.port)
-        req = urllib.request.Request("http://%s%s" % (host, path), data=data, method=method,
-                                     headers={"X-Fixture-Key": self.key, "Host": host,
-                                              "Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                status, raw = resp.status, resp.read()
+            nonce = self._nonce(host)
+            self._nonce_at = time.monotonic()
+            if judge is not None:
+                error = None
+                try:
+                    why = judge()
+                except Exception as e:  # noqa: BLE001 - a judgment that fails withholds the press
+                    why = "the press could not be judged (the machine could not be read)"
+                    error = "%s: %s" % (type(e).__name__, e)
+                if why is not None:
+                    raise PressWithheld(why, error)
+            req = urllib.request.Request("http://%s%s" % (host, path), data=data, method=method,
+                                         headers={"X-Fixture-Nonce": nonce,
+                                                  "X-Fixture-Mac": request_mac(self.key, method, path, nonce, data),
+                                                  "Host": host, "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    status, raw = resp.status, resp.read()
+            except urllib.error.URLError:
+                raise               # an error status, or a request that never went out
+            except (http.client.HTTPException, OSError):
+                # It went out and no whole answer came back. A loop request
+                # the box has not served yet (held up behind another
+                # connection, or on its way) is taken until its nonce's life
+                # is over, whatever a resend of it is answered.
+                if path in LOOP_PATHS:
+                    _unanswered["loop"] = max(_unanswered["loop"], self._nonce_at + NONCE_LIFE_S)
+                raise
         except urllib.error.HTTPError as e:
             try:
                 body = json.loads(e.read().decode("utf-8", "replace") or "{}")
@@ -288,13 +401,16 @@ class Fixture:
             # timeout or a reset after the request went out comes bare, and
             # the box may have acted on the request
             sent = not isinstance(e, urllib.error.URLError)
-            if retry and not self.ip_override:
-                # the address may have moved: one fresh lookup, one retry,
-                # and a failure of either still says the first one went out
+            # The address may have moved: one fresh lookup, one retry. A
+            # request that may have gone out is sent again only where the
+            # box takes it the same way twice: a press whose answer was lost
+            # is reported, never made again.
+            if retry and not self.ip_override and (not sent or (method, path) in TAKES_TWICE):
                 try:
                     self.address(refresh=True)
-                    return self._request(method, path, body, retry=False)
+                    return self._request(method, path, body, retry=False, judge=judge)
                 except FixtureError as again:
+                    # a failure of either still says the first one went out
                     again.sent = again.sent or sent
                     raise
             raise FixtureError("fixture %s: %s %s: %s" % (self.where(), method, path, e), sent=sent)
@@ -329,14 +445,17 @@ class Fixture:
             return bool(st and st.get("button_enabled"))
         return True
 
-    def act(self, channel, state, ms=None):
+    def act(self, channel, state, ms=None, judge=None):
+        """One action. judge (a press only): asked right before each request
+        that would press, as _request asks it."""
         if channel == "button":
             if state != "press":
                 raise FixtureError("the button is only ever pressed")
-            st, body = self._press(ms)
+            st, body = self._press(ms, judge)
         else:
             if state not in ("open", "close"):
                 raise FixtureError("%s: unknown state %r" % (channel, state))
+            self._loop_clear()
             st, body = self._request("POST", "/" + channel, {"state": state})
         if st != 200:
             raise FixtureError("fixture %s: %s %s -> %s %s" % (self.where(), channel, state, st,
@@ -344,7 +463,7 @@ class Fixture:
         self.last_state = body
         return body
 
-    def _press(self, ms=None):
+    def _press(self, ms=None, judge=None):
         """One press, spaced from the last one. `ms` is how long the box
         holds it: the box's own 200 ms when it is not said, and the box
         clamps a request into 20 to 500, so no press is ever held. Every
@@ -354,25 +473,72 @@ class Fixture:
         it has seen: the next press waits for the last pulse to end (the
         fixture's own pulse_ms) plus BUTTON_GAP_S. A 409 for a pulse in
         progress (a press this client did not time) is waited out once
-        against the fixture's state, then retried."""
-        wait = self._pulse_end + BUTTON_GAP_S - time.time()
+        against the fixture's state, then retried. judge is asked right
+        before each request that would press, after the spacing, the nonce
+        and any fresh lookup (_request). An answer that is neither 200 nor
+        one of the refusals the box makes before it presses
+        (PRESS_REFUSED) is a press that may have been made (sent). Such a
+        press, and one whose answer was lost, is timed as the box can still
+        make it: until its nonce's life is over (NONCE_LIFE_S from the
+        nonce in hand: a request held up on its way is taken that long),
+        and the longest pulse after that. A poll of the state in the 409
+        wait presses nothing: one that fails is only a poll that told
+        nothing."""
+        # after this client's last pulse, and after a press of any client of
+        # this process that the box may still make (its answer was lost)
+        wait = max(self._pulse_end, _unanswered["press"]) + BUTTON_GAP_S - time.monotonic()
         if wait > 0:
             time.sleep(wait)
-        st, body = self._request("POST", "/button", {"ms": int(ms)} if ms else {})
-        if st == 409 and "in progress" in str(body.get("error", "")):
-            deadline = time.time() + PULSE_WAIT_S
-            while time.time() < deadline:
-                time.sleep(0.1)
-                s, b = self._request("GET", "/")
-                if s == 200 and not b.get("button_pulsing"):
-                    break
-            time.sleep(BUTTON_GAP_S)
-            st, body = self._request("POST", "/button", {"ms": int(ms)} if ms else {})
+        try:
+            st, body = self._request("POST", "/button", {"ms": int(ms)} if ms else {}, judge=judge)
+            if st == 409 and "in progress" in str(body.get("error", "")):
+                deadline = time.monotonic() + PULSE_WAIT_S
+                while time.monotonic() < deadline:
+                    time.sleep(0.1)
+                    try:
+                        s, b = self._request("GET", "/")
+                    except FixtureError:
+                        continue
+                    if s == 200 and not b.get("button_pulsing"):
+                        break
+                time.sleep(BUTTON_GAP_S)
+                st, body = self._request("POST", "/button", {"ms": int(ms)} if ms else {}, judge=judge)
+            if st != 200 and st not in PRESS_REFUSED:
+                raise FixtureError("fixture %s: button press -> %s %s: the press may have been made"
+                                   % (self.where(), st, body.get("error") or body), sent=True)
+        except PressWithheld:
+            raise
+        except FixtureError as e:
+            if e.sent:
+                self._pulse_end = self._nonce_at + NONCE_LIFE_S + PULSE_MAX_S
+                _unanswered["press"] = max(_unanswered["press"], self._pulse_end)
+            raise
         if st == 200:
-            self._pulse_end = time.time() + float(body.get("pulse_ms") or 500) / 1000.0
+            self._pulse_end = time.monotonic() + float(body.get("pulse_ms") or 500) / 1000.0
         return st, body
 
+    def pulse_left(self):
+        """Seconds until the last press this client made is let go by the
+        box, or until a press whose answer was lost can no longer be made
+        and held by it; 0 when there is none."""
+        return max(0.0, self._pulse_end - time.monotonic())
+
+    def nonce_age(self):
+        """Seconds since the nonce of this client's last request was in
+        hand. The box issued it before that, so the request is taken no
+        later than NONCE_LIFE_S after."""
+        return time.monotonic() - self._nonce_at
+
+    def _loop_clear(self):
+        """Before a loop request: wait until no earlier one that got no
+        answer can still be served. Served after this one, a close or a
+        release that was held up would close a loop this one opened."""
+        wait = unanswered_left("loop")
+        if wait > 0:
+            time.sleep(wait)
+
     def release(self):
+        self._loop_clear()
         st, body = self._request("POST", "/release", {})
         if st != 200:
             raise FixtureError("fixture %s: release -> %s %s" % (self.where(), st, body.get("error") or body))
@@ -424,5 +590,5 @@ def probe(log, path=None, resolver=resolve_mdns):
     return fx
 
 
-__all__ = ["Fixture", "FixtureError", "CHANNELS", "FIXTURE_CONFIG", "load_config", "probe",
-           "resolve_mdns", "mdns_query", "mdns_answers"]
+__all__ = ["Fixture", "FixtureError", "PressWithheld", "CHANNELS", "FIXTURE_CONFIG", "load_config", "probe",
+           "resolve_mdns", "mdns_query", "mdns_answers", "request_mac", "unanswered_left"]

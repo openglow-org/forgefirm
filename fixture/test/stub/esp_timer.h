@@ -1,7 +1,7 @@
 /*
  * Host stand-in for ESP-IDF's esp_timer.h: the one-shot timer relays.c
  * ends a button pulse with, defined by the host test, which records the
- * calls in order and fires the callback itself.
+ * calls in order and fires the callback itself; and the clock api.c reads.
  *
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
@@ -25,3 +25,4 @@ typedef struct {
 esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *out);
 esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us);
 esp_err_t esp_timer_stop(esp_timer_handle_t timer);
+int64_t esp_timer_get_time(void);       /* api.c's clock: defined by api_test.c */

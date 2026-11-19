@@ -431,8 +431,8 @@ def focus(ctx):
         too; a burn still ending starts its own controller after the
         restore, which reads them already."""
         try:
-            t_end = time.time() + 120
-            while time.time() < t_end and dark(fc).get("running"):
+            t_end = time.monotonic() + 120
+            while time.monotonic() < t_end and dark(fc).get("running"):
                 time.sleep(1)
             if dark(fc).get("running"):
                 restart["skipped"] = "the burn is still ending"

@@ -79,8 +79,8 @@ def grbl_setting(g, key):
     g.s.sendall((key + "\n").encode())
     g.s.settimeout(1.0)
     buf = ""
-    end = time.time() + 1.5
-    while time.time() < end and "ok" not in buf:
+    end = time.monotonic() + 1.5
+    while time.monotonic() < end and "ok" not in buf:
         try:
             buf += g.s.recv(4096).decode(errors="replace")
         except OSError:
@@ -103,13 +103,13 @@ def run_circle(g, pid):
     g.s.sendall((CIRCLE + "\n").encode())
     t_run = t_idle = None
     feeds, bfs = [], []
-    end = time.time() + 120
-    while time.time() < end:
+    end = time.monotonic() + 120
+    while time.monotonic() < end:
         g.s.sendall(b"?")
         g.s.settimeout(1.0)
         buf = ""
-        t_end = time.time() + 1.0
-        while time.time() < t_end and ">" not in buf:
+        t_end = time.monotonic() + 1.0
+        while time.monotonic() < t_end and ">" not in buf:
             try:
                 buf += g.s.recv(4096).decode(errors="replace")
             except OSError:

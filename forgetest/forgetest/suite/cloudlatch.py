@@ -76,6 +76,14 @@ def button_latch_print(ctx):
 
 
 def button_latch_body(ctx, ev, off, job, offset):
+    """The print and its judgment, with the kernel's LASER_ON count read
+    from before the print to its end (cloud.EmissionWatch)."""
+    with cloud.EmissionWatch(ctx, "print") as watch:
+        _button_latch(ctx, ev, off, job, offset)
+    watch.check()
+
+
+def _button_latch(ctx, ev, off, job, offset):
     ev["before"] = {"button_latch": button_latch(), "lock": cloud.latch_locked()}
     ctx.check(ev["before"]["button_latch"] is not None, "cnc/button_latch cannot be read")
     ctx.check(ev["before"]["lock"] and ev["before"]["button_latch"] == 1,
@@ -99,11 +107,11 @@ def button_latch_body(ctx, ev, off, job, offset):
     # While the kernel plays the job: the latch cleared and the lock
     # released in every sample, and nobody at the button.
     samples = []
-    t0 = time.time()
-    while time.time() - t0 < 120:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 120:
         ctx.checkpoint()
         if kernel_running():
-            samples.append((round(time.time() - t0, 2), button_latch(), cloud.latch_locked()))
+            samples.append((round(time.monotonic() - t0, 2), button_latch(), cloud.latch_locked()))
         elif samples:
             break
         time.sleep(SAMPLE_S)

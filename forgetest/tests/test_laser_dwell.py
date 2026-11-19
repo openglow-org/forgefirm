@@ -155,12 +155,15 @@ class RapidReadTests(unittest.TestCase):
 
 
 class Clock:
-    """time.time and time.sleep on a clock the test moves."""
+    """time.time, time.monotonic and time.sleep on a clock the test moves."""
 
     def __init__(self, now=1000.0):
         self.now = now
 
     def time(self):
+        return self.now
+
+    def monotonic(self):
         return self.now
 
     def sleep(self, s):

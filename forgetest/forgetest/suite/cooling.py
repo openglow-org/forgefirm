@@ -52,9 +52,9 @@ def aa_offset_calibrate(ctx):
               "could not start aa-offset-calibrate (%s %s)", st, body)
     result = None
     last_phase = None
-    t0 = time.time()
+    t0 = time.monotonic()
     try:
-        while time.time() - t0 < AA_CAL_TIMEOUT_S:
+        while time.monotonic() - t0 < AA_CAL_TIMEOUT_S:
             ctx.checkpoint()
             st, d = fc.get("/diag/status")
             if st == 200 and isinstance(d, dict):
@@ -103,7 +103,7 @@ CRASH_KEYS = ("cool_accel_x_alert", "cool_accel_y_alert", "cool_accel_abort")
 
 @test("cooling.fail-tier-stop", title="A fail-tier verdict ends the controller: CRASH stops motion, "
                                       "locks the laser, and the supervisor restarts the controller",
-      subsystem="cooling", kind="operator", mode="grbl", est_min=4,
+      subsystem="cooling", kind="live", mode="grbl", est_min=4,
       covers=_COOL_COVERS + [("forgectrl", "src/super.*")],
       requires=["motion.deadman"], actions=["button"],
       steps=["Bed clear, lid closed, 40 mm of free +X travel. Nothing fires: the job is dark (S0).",
@@ -154,15 +154,15 @@ def fail_tier_stop(ctx):
                                      or bool(_log_lines(FORGECTRL_LOG, off, "crash watch armed")), 240)
                 ctx.clear_notice()
                 ctx.check(t_arm is not None, "the window never opened (arm refused, or no press)")
-                t0 = time.time()
+                t0 = time.monotonic()
                 tripped = ctx.wait_for(lambda: _cool(fc).get("verdict") == "CRASH"
                                        or (fc.get("/mode")[1] or {}).get("pid") not in (None, pid0), 30)
                 ctx.log("the crash tier tripped after %s s", tripped)
         except (hw.HwError, OSError) as e:
             ctx.log("the Grbl connection ended with the restart: %s", e)
-        t_kill = time.time()
+        t_kill = time.monotonic()
         m1 = None
-        while time.time() - t_kill < 60:
+        while time.monotonic() - t_kill < 60:
             st, m1 = fc.get("/mode")
             if isinstance(m1, dict) and m1.get("controller") == "running" and m1.get("pid") != pid0:
                 break

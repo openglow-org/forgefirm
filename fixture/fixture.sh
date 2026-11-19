@@ -9,7 +9,8 @@
 #   ./fixture.sh build            build (native idf.py if installed, else the IDF container)
 #   ./fixture.sh flash [PORT]     write the build to the board over USB (esptool)
 #   ./fixture.sh monitor [PORT]   the board's log (idf.py monitor, or pyserial's miniterm)
-#   ./fixture.sh test             the host tests of the policy and the relays (needs a C compiler)
+#   ./fixture.sh test             the host tests of the policy, the request authentication,
+#                                 the relays and the API handlers (needs a C compiler)
 #
 # The container build needs docker or podman and pulls espressif/idf once
 # (IDF_IMAGE below); flashing never runs in the container: esptool is a
@@ -104,5 +105,5 @@ case "${1:-}" in
     flash) cmd_flash "${2:-}" ;;
     monitor) cmd_monitor "${2:-}" ;;
     test) cmd_test ;;
-    *) sed -n '2,12p' "$0"; exit 1 ;;
+    *) sed -n '2,13p' "$0"; exit 1 ;;
 esac

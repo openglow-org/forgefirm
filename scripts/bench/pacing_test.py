@@ -99,8 +99,8 @@ class Grbl:
         return None
 
     def wait(self, want, timeout):
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             if self.state().startswith(want):
                 return True
             time.sleep(0.1)

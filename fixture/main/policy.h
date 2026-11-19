@@ -30,10 +30,6 @@ typedef enum {
 /* The channel's name on the API and in the log. */
 const char *policy_channel_name(channel_t ch);
 
-/* The channel named by an API path ("/lid", "/interlock", "/button"), or
- * -1. */
-int policy_channel_from_path(const char *path);
-
 /* The level a lid or interlock request asks for: "open" energizes the
  * channel (the loop opens), "close" or "closed" releases it. Returns
  * false for any other word. */
@@ -48,6 +44,7 @@ int policy_button_ms(int requested);
  * "open" or "closed", the button "pressed" or "idle". */
 const char *policy_state_name(channel_t ch, bool energized);
 
-/* Constant-time equality of two keys, so a wrong key costs the same
- * whichever byte is wrong. */
+/* Constant-time equality of two secrets (a presented MAC and the one the
+ * fixture computes), so a wrong one costs the same whichever byte is
+ * wrong. */
 bool policy_key_matches(const char *presented, const char *expected);

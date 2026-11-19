@@ -70,9 +70,9 @@ def phase():
 
 def sample(seconds, label):
     rows = []
-    t0 = time.time()
-    while time.time() - t0 < seconds:
-        t = round(time.time() - t0, 1)
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < seconds:
+        t = round(time.monotonic() - t0, 1)
         f = fans_now()
         row = {"t": t, "purge": purge_current()}
         row.update({k: f.get(k, 0) for k in FANS})
@@ -81,7 +81,7 @@ def sample(seconds, label):
             print("  %s +%5.1f s  exhaust %5d  intake %5d/%5d  air %5d  purge %s"
                   % (label, t, row["exhaust"], row["intake_1"], row["intake_2"],
                      row["air_assist"], row["purge"]))
-        time.sleep(max(0.0, 1.0 - ((time.time() - t0) % 1.0)))
+        time.sleep(max(0.0, 1.0 - ((time.monotonic() - t0) % 1.0)))
     return rows
 
 
@@ -168,8 +168,8 @@ def main(argv):
             rows = sample(seconds, "run")
         finally:
             print("M9:", g.cmd("M9"))
-            t0 = time.time()
-            while time.time() - t0 < 20 and phase() == "run":
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 20 and phase() == "run":
                 time.sleep(1)
             g.close()
         result["rows"] = rows

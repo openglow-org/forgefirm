@@ -261,7 +261,7 @@ def main():
                       "half-steps up" % (r + 1, d * mult, u * mult))
             below = []
             for r in range(args.rounds):
-                t0 = time.time()
+                t0 = time.monotonic()
                 c, left, err = count_below(drive)
                 if c is None:
                     print("  round %d: FAILED: %s" % (r + 1, err))
@@ -269,11 +269,11 @@ def main():
                     continue
                 below.append(c * mult)
                 print("  round %d: the edge %d half-steps above the bottom stop (%d %s; left home "
-                      "after %d; %.1f s)" % (r + 1, c * mult, c, unit, left * mult, time.time() - t0))
+                      "after %d; %.1f s)" % (r + 1, c * mult, c, unit, left * mult, time.monotonic() - t0))
             above = None
             if not args.no_above:
                 for r in range(2):
-                    t0 = time.time()
+                    t0 = time.monotonic()
                     a, b, err = count_above(TRAVEL_HALF // mult)
                     if a is None or b is None:
                         print("  top %d: FAILED: %s (a=%s b=%s)" % (r + 1, err, a, b))
@@ -281,7 +281,7 @@ def main():
                     above = (a - b) * mult
                     print("  top %d: down %d half-steps to leave home, %d back up to the edge: the top "
                           "stop %d half-steps above the rising edge (%.1f s)"
-                          % (r + 1, a * mult, b * mult, above, time.time() - t0))
+                          % (r + 1, a * mult, b * mult, above, time.monotonic() - t0))
             results.append((key, bands, below, above))
         wr("head/z_mode", "1")
         wr("head/z_current", "0")

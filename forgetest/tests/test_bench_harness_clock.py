@@ -15,9 +15,11 @@ a stand-in that answers 0.1 s after it is asked, with the harness's wall
 clock stepped 2.4 s forward right after the wait's first read of it: where
 a 2 to 3 s step lands when it falls inside a 2 s wait. The wait must still
 return the answer. The harnesses' own waits are copies of the same loops,
-and no harness names a source of the wall clock: time.time or
+and no bench tool names a source of the wall clock: time.time or
 time.time_ns, a name imported from time or the module under another name,
-datetime, or CLOCK_REALTIME.
+datetime, or CLOCK_REALTIME. That holds for the tools that run on the
+board as well, where ntpd's first sync after a boot can step the clock: a
+date a tool records comes from time.strftime.
 
 The sender's wait for Idle after a jog it sent waits for the jog: a loaded
 host can leave a jog planned and not yet started for several polls, each
@@ -280,14 +282,16 @@ class JogWaits(unittest.TestCase):
 
 
 class NoWallClock(unittest.TestCase):
-    def test_no_harness_names_the_wall_clock(self):
+    def test_no_bench_tool_names_the_wall_clock(self):
         hits = {}
-        for name in HARNESSES:
+        names = sorted(set(HARNESSES) | {os.path.basename(p)[:-3] for p in os.listdir(BENCH)
+                                          if p.endswith(".py")})
+        for name in names:
             with open(os.path.join(BENCH, name + ".py")) as f:
                 lines = [n for n, line in enumerate(f, 1) if WALL_CLOCK.search(line)]
             if lines:
                 hits[name + ".py"] = lines
-        self.assertEqual(hits, {}, "harnesses that name the wall clock, by line")
+        self.assertEqual(hits, {}, "bench tools that name the wall clock, by line")
 
 
 if __name__ == "__main__":

@@ -35,6 +35,8 @@ import types
 import unittest
 from unittest import mock
 
+from forgetest import hw
+
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BENCH = os.path.join(REPO, "scripts", "bench")
 HEATER_FULL = 65535
@@ -109,6 +111,14 @@ def deliver(sig):
     handler = signal.getsignal(sig)
     if not callable(handler):
         raise AssertionError("%s is left at %r" % (signal.Signals(sig).name, handler))
+    signal.raise_signal(sig)
+
+
+def send(sig):
+    """sig to this process at a moment the tool may have set it to ignore:
+    nothing happens then. Left at its default, it fails the case."""
+    if signal.getsignal(sig) == signal.SIG_DFL:
+        raise AssertionError("%s is left at its default" % signal.Signals(sig).name)
     signal.raise_signal(sig)
 
 
@@ -274,7 +284,7 @@ class ToolCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="forgetest-bench-safety.")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        for sig in (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", None), getattr(signal, "SIGTSTP", None)):
             if sig is not None:
                 self.addCleanup(signal.signal, sig, signal.getsignal(sig))
 
@@ -286,7 +296,7 @@ class ToolCase(unittest.TestCase):
                 return fn(*args), None
             except AssertionError:
                 raise
-            except (Exception, SystemExit) as e:
+            except (Exception, SystemExit, KeyboardInterrupt) as e:
                 return None, e
 
 
@@ -740,6 +750,7 @@ class DebugKernelDrillTests(ToolCase):
         put(root, "state", "idle")
         os.makedirs(os.path.join(root, "drv", "cnc"))
         mod.STATE, mod.CNC_DRV, mod.time = os.path.join(root, "state"), os.path.join(root, "drv"), Clock()
+        mod.SYSFS = root + "/"
         mod.require_debug_kernel = lambda: None
         mod.arming_processes = lambda: list(owners)
         mod.regulator_provider = lambda: (None, None)   # drill B finds no regulator here and skips
@@ -764,6 +775,471 @@ class DebugKernelDrillTests(ToolCase):
         self.assertEqual(getattr(err, "code", None), 0)
         self.assertTrue([c for c in calls if "rmmod" in c], "drill A never ran")
         self.assertEqual([c for c in calls if "forgectrl" in c], [])
+
+
+class FakeFireKernel:
+    """The pulse engine and the safety chain as fire_test.py and the K3
+    drill read them, on a fake clock. A run plays its bytes at 10 kHz; FIRE
+    follows the stream's two windows (1-3 s and 4-6 s) while the latch is
+    unlocked and fire_follows is set. The lock sets the button latch; a
+    press (press_at seconds into the run, or at the unlock with
+    press_at="unlock") clears it only with the lock released. The
+    remote-interlock loop reads open (interlock_circuit bit 4) until
+    close_at (seconds into the run; "open": when the pulse device is opened;
+    "unlock": with the unlock), and the switches read it the same way
+    (EV_SW 5), with the interlock latch itself (EV_SW 6) set while the loop
+    is open unless interlock_latch is False. LASER_ON is FIRE with both
+    latches clear, or a fault from emit_at on. interlock_circuit carries the
+    kernel's bits 0 to 5. From fail_at seconds into a run, a read of the
+    LASER_ON count fails. pump_alive: something else feeds the charge-pump
+    watchdog. read_s: what a sysfs read costs on the clock (a drill whose
+    watch never sleeps). abort: (seconds into the run, a signal) delivered
+    once, at the drill's next read or write (seconds "underrun": at the
+    read that finds the underrun state); then: a signal sent once at the
+    first lock write after that abort. fail_attr: the attribute whose read
+    fails from fail_at on. A halt is refused in the underrun state, and
+    always with halt_refused (a fault). at_relock: a signal sent once
+    as the latch is locked again after an unlock, before that write takes.
+    A halt ends a run; closed counts the closes of the pulse device, and
+    closed_unlocked those that found the latch unlocked; stop_at_unlock is
+    what SIGTSTP was set to at the unlock."""
+
+    TICK = 10000
+
+    def __init__(self, clock, loop_open=True, press_at=None, close_at=None, fire_follows=True,
+                 emit_at=None, fail_at=None, interlock_latch=True, pump_alive=False, read_s=0.0, abort=None,
+                 at_relock=None, fail_attr="cnc/laser_on_sampled", halt_refused=False, then=None):
+        self.clock = clock
+        self.abort = abort
+        self.at_relock, self.closed, self.stop_at_unlock = at_relock, 0, None
+        self.fail_attr, self.halt_refused, self.then, self.aborted = fail_attr, halt_refused, then, False
+        self.interlock_latch = interlock_latch
+        self.loop_open, self.press_at, self.close_at = loop_open, press_at, close_at
+        self.fire_follows, self.emit_at, self.fail_at = fire_follows, emit_at, fail_at
+        self.pump_alive, self.read_s = pump_alive, read_s
+        self.locked, self.button, self.streaming, self.underruns = True, 1, 0, 0
+        self.run_t0, self.length, self.idle_state = None, 0, "idle"
+        self.writes, self.times, self.opened, self.closed_unlocked = [], [], 0, 0
+        self.unlocked_samples = []          # seconds into the run of each interlock_circuit read, latch unlocked
+        self.last_read, self.read_before = None, []     # the attribute read last before each write
+
+    def t(self):
+        return None if self.run_t0 is None else self.clock.t - self.run_t0
+
+    def state(self):
+        if self.run_t0 is not None and self.t() >= self.length / self.TICK:
+            self.run_t0 = None
+            self.idle_state = "underrun" if self.streaming else "idle"
+            self.underruns += 1 if self.streaming else 0
+        return "running" if self.run_t0 is not None else self.idle_state
+
+    def tick(self):
+        t = self.t()
+        if t is None:
+            return
+        if self.press_at not in (None, "unlock") and t >= self.press_at and not self.locked:
+            self.button = 0
+        if self.close_at not in (None, "open", "unlock") and t >= self.close_at:
+            self.loop_open = False
+        if self.abort is not None and self.abort[0] != "underrun" and t >= self.abort[0]:
+            self.send_abort()
+
+    def send_abort(self):
+        sig, self.abort, self.aborted = self.abort[1], None, True
+        deliver(sig)
+
+    def fire(self):
+        t = self.t()
+        return (self.state() == "running" and not self.locked and self.fire_follows
+                and (1.0 <= t < 3.0 or 4.0 <= t < 6.0))
+
+    def laser_on(self):
+        t = self.t()
+        if self.emit_at is not None and t is not None and t >= self.emit_at:
+            return True
+        return self.fire() and self.button == 0 and not self.loop_open
+
+    def rd(self, attr):
+        self.clock.t += self.read_s
+        self.last_read = attr
+        self.tick()
+        if attr == self.fail_attr and self.fail_at is not None and (self.t() or 0) >= self.fail_at:
+            raise OSError(errno.EIO, "read failed")
+        if self.abort is not None and self.abort[0] == "underrun" and self.state() == "underrun":
+            self.send_abort()
+        running = self.state() == "running"
+        on = self.laser_on()
+        if attr == "cnc/interlock_circuit":
+            if running and not self.locked:
+                self.unlocked_samples.append(self.t())
+            return str((0 if on else 1) | (2 if self.fire() else 0) | (4 if self.button else 0)
+                       | (8 if self.locked else 0) | (16 if self.loop_open else 0) | (0 if running else 32))
+        return {"cnc/state": self.state(),
+                "cnc/charge_pump_alive": "1" if running or self.pump_alive else "0",
+                "cnc/laser_enable": "1" if self.fire() else "0", "cnc/laser_on": "1" if on else "0",
+                "cnc/laser_on_sampled": "1" if on else "0", "cnc/button_latch": str(self.button),
+                "cnc/underruns": str(self.underruns), "cnc/faults": "0"}[attr]
+
+    def wr(self, attr, val):
+        self.tick()
+        if (attr, str(val)) == ("cnc/laser_latch", "1") and not self.locked and self.at_relock is not None:
+            sig, self.at_relock = self.at_relock, None
+            send(sig)
+        if (attr, str(val)) == ("cnc/laser_latch", "1") and self.aborted and self.then is not None:
+            sig, self.then = self.then, None
+            send(sig)
+        self.writes.append((attr, str(val)))
+        self.times.append(self.clock.t)
+        self.read_before.append(self.last_read)
+        if attr == "cnc/laser_latch":
+            self.locked = str(val) == "1"
+            if self.locked:
+                self.button = 1                     # the lock sets the button latch
+            else:
+                self.stop_at_unlock = signal.getsignal(signal.SIGTSTP)
+            if not self.locked and self.press_at == "unlock":
+                self.button = 0
+            if not self.locked and self.close_at == "unlock":
+                self.loop_open = False
+        elif attr == "cnc/streaming":
+            self.streaming = int(val)
+        elif attr == "cnc/halt":
+            if self.halt_refused or self.state() == "underrun":     # as the kernel: a fault, the underrun
+                raise OSError(errno.EPERM, "not permitted in this state")
+            self.run_t0 = None
+        elif attr == "cnc/run":
+            self.run_t0 = self.clock.t
+        elif attr == "cnc/stop" and self.state() == "underrun":
+            self.idle_state = "idle"
+
+    def latch_writes(self):
+        return [v for a, v in self.writes if a == "cnc/laser_latch"]
+
+    def switch_bits(self):
+        self.tick()
+        return (1 << hw.SW_INTERLOCK if self.loop_open else 0) | (
+            1 << hw.SW_INTERLOCK_LATCH if self.loop_open and self.interlock_latch else 0)
+
+    def behind_the_catalog(self, case):
+        """The catalog's own reads (forgetest.hw) on this kernel too, for the
+        case: its sysfs and its switches."""
+        for name, fake in (("sysfs_read", lambda attr, default=None: self.rd(attr)),
+                           ("switch_bits", self.switch_bits)):
+            patch = mock.patch.object(hw, name, fake)
+            patch.start()
+            case.addCleanup(patch.stop)
+
+    def install(self, mod):
+        """The kernel behind a drill module: sysfs, the pulse device, the
+        position counters and the clock."""
+        kernel = self
+
+        class Dev:
+            def __getattr__(self, name):
+                return getattr(os, name)
+
+            def open(self, path, flags, *a):
+                kernel.opened += 1
+                if kernel.close_at == "open":
+                    kernel.loop_open = False
+                return 99
+
+            def write(self, fd, data):
+                kernel.length = len(data)
+                return len(data)
+
+            def lseek(self, fd, pos, how):
+                return pos
+
+            def close(self, fd):
+                kernel.closed += 1
+                kernel.closed_unlocked += not kernel.locked
+        mod.rd, mod.wr, mod.os = self.rd, self.wr, Dev()
+        mod.fcntl = types.SimpleNamespace(flock=lambda fd, op: None, LOCK_EX=2, LOCK_UN=8)
+        mod.rd_pos = lambda: (0, 0, 0, 0, 0)
+        mod.time = self.clock
+        return mod
+
+
+class KernelDrillTests(ToolCase):
+    """The takeover drills that unlock the latch (fire_test.py's B and U,
+    gate_a_kernel_drills.py's K3) on a fake kernel: each is refused unless
+    nothing else feeds the charge pump and the chain reads open by the
+    catalog's guard, read before the device is opened and again at the
+    unlock; the button latch and the loop are read right after the unlock;
+    every sample of the unlocked run is judged as the catalog judges one,
+    and a reason relocks the latch at once; the latch is locked before the
+    pulse device is let go on every way out, the page's Abort, a lost
+    terminal and a Ctrl-C among them, and a drill cut short halts its run
+    right after that lock; no signal cuts the way out short, whether a
+    signal began it or the drill ended by itself; a Ctrl-Z does not stop a
+    drill that unlocks; a drill's verdict is the catalog's; and no takeover
+    drill on the page takes the 40 V rail down."""
+
+    def drill(self, tool, mode, expect_exit=None, hook=None, **kernel):
+        """One run of a drill's main on a fake kernel: (exit status, the
+        kernel). The K drills' watches never sleep, so their reads move the
+        clock, and their kernel keeps FIRE an input over a mid-run unlock
+        unless the case says otherwise. hook(mod): the module made ready
+        further, before it runs."""
+        if mode.startswith("K"):
+            kernel = dict({"read_s": 0.0005, "fire_follows": False}, **kernel)
+        mod = load(tool)
+        k = FakeFireKernel(Clock(), **kernel)
+        k.install(mod)
+        k.behind_the_catalog(self)
+        if hook is not None:
+            hook(mod)
+        set_argv(self, [tool, mode])
+        # every signal the drills set is at its default again: what a run
+        # before this one left set says nothing of this one
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGTSTP):
+            signal.signal(sig, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        rc, err = self.quiet(mod.main)
+        if expect_exit is None:
+            self.assertIsNone(err)
+        else:
+            self.assertIsInstance(err, expect_exit)
+            rc = getattr(err, "code", None)
+        self.assertEqual(k.closed_unlocked, 0, "the pulse device was let go with the latch unlocked")
+        if "0" in k.latch_writes():
+            self.assertEqual(k.stop_at_unlock, signal.SIG_IGN, "a Ctrl-Z would stop the drill with the latch unlocked")
+        return rc, k
+
+    def assertWholeWayOut(self, k, cut):
+        """The drill's way out ran to its end: the latch locked last, the
+        pulse device let go, streaming off; and, for a drill cut short, its
+        run halted by the write right after that lock."""
+        self.assertEqual((k.latch_writes()[-1], k.closed, k.streaming), ("1", 1, 0))
+        if cut:
+            self.assertIn(("cnc/halt", "1"), k.writes, "the run of a drill cut short was left playing")
+            self.assertEqual(k.writes[k.writes.index(("cnc/halt", "1")) - 1], ("cnc/laser_latch", "1"))
+            self.assertNotEqual(k.state(), "running")
+
+    def fire(self, mode, **kernel):
+        return self.drill("fire_test.py", mode, **kernel)
+
+    def k3(self, **kernel):
+        return self.drill("gate_a_kernel_drills.py", "K3", **kernel)
+
+    def test_an_unlocked_phase_runs_only_behind_the_open_interlock_loop(self):
+        # The interlock_latch row: the kernel drives the latch's SET and the
+        # loop reads open, yet the interlock latch itself (EV_SW 6) does not
+        # read set. The pump_alive rows: something else feeds the watchdog.
+        for tool, mode, kernel in (("fire_test.py", "B", {"loop_open": False}),
+                                   ("fire_test.py", "U", {"loop_open": False}),
+                                   ("fire_test.py", "B", {"interlock_latch": False}),
+                                   ("fire_test.py", "B", {"pump_alive": True}),
+                                   ("gate_a_kernel_drills.py", "K3", {"loop_open": False}),
+                                   ("gate_a_kernel_drills.py", "K3", {"pump_alive": True})):
+            with self.subTest(mode=mode, **kernel):
+                rc, k = self.drill(tool, mode, **kernel)
+                self.assertEqual(rc, 2)
+                self.assertNotIn("0", k.latch_writes(), "the latch was unlocked with the loop closed")
+                self.assertEqual(k.opened, 0)
+
+    def test_the_guard_is_read_again_at_the_unlock(self):
+        # The loop closes after the first read of the guard, while the drill
+        # sets its run up: no unlock.
+        for tool, mode in (("fire_test.py", "B"), ("gate_a_kernel_drills.py", "K3")):
+            with self.subTest(mode=mode):
+                rc, k = self.drill(tool, mode, close_at="open")
+                self.assertEqual((rc, k.opened), (2, 1))
+                self.assertNotIn("0", k.latch_writes())
+                # K3's run was in flight, locked: it is not left playing
+                self.assertEqual(k.state(), "idle")
+
+    def test_a_bad_reading_right_after_the_unlock_relocks_before_the_run(self):
+        for name, kernel in (("the button latch clear", {"press_at": "unlock"}),
+                             ("the loop closed", {"close_at": "unlock"})):
+            with self.subTest(name):
+                rc, k = self.fire("B", **kernel)
+                self.assertEqual(rc, 1)
+                self.assertNotIn(("cnc/run", "1"), k.writes)
+                self.assertEqual(k.latch_writes()[-1], "1")
+
+    def test_a_sample_that_is_not_dark_behind_both_latches_relocks_at_once(self):
+        # A press, the loop closing, LASER_ON active; and, for K3, the FIRE
+        # drive restored by the unlock (FIRE plays from 1.0 s on). The last
+        # element: the reads that can find it, the chain's sample first.
+        chain = ("cnc/interlock_circuit",)
+        for tool, mode, name, kernel, at, found_by in (
+                ("fire_test.py", "B", "a press", {"press_at": 2.0}, 2.0, chain),
+                ("fire_test.py", "B", "the loop closed", {"close_at": 2.0}, 2.0, chain),
+                ("fire_test.py", "B", "LASER_ON active", {"emit_at": 2.0}, 2.0, chain),
+                ("gate_a_kernel_drills.py", "K3", "a press", {"press_at": 1.5}, 1.5, chain),
+                ("gate_a_kernel_drills.py", "K3", "the loop closed", {"close_at": 1.5}, 1.5, chain),
+                ("gate_a_kernel_drills.py", "K3", "LASER_ON active", {"emit_at": 1.5}, 1.5,
+                 chain + ("cnc/laser_on",)),
+                ("gate_a_kernel_drills.py", "K3", "FIRE driven", {"fire_follows": True}, 1.0,
+                 ("cnc/laser_on",))):
+            with self.subTest(mode=mode, case=name):
+                rc, k = self.drill(tool, mode, **kernel)
+                self.assertEqual(rc, 1)
+                run = k.writes.index(("cnc/run", "1"))
+                unlock = k.writes.index(("cnc/laser_latch", "0"))
+                relock = k.writes.index(("cnc/laser_latch", "1"), max(run, unlock))
+                # Locked within a sample of the event, `at` seconds into the
+                # run, and by the sample that read it: the run is not read
+                # unlocked again, and nothing is read between the read that
+                # found it and the lock.
+                self.assertLess(k.times[relock] - k.times[run] - at, 0.01)
+                self.assertLessEqual(len([t for t in k.unlocked_samples if t >= at]), 1)
+                self.assertIn(k.read_before[relock], found_by)
+
+    def test_an_abort_mid_run_relocks_and_ends_streaming(self):
+        # The bench page's Abort is a SIGTERM, a lost terminal a SIGHUP, a
+        # Ctrl-C a SIGINT: the drill ends through its own way out, and its
+        # run ends with it (K2's Abort lands 0.2 s in, inside its pads).
+        fire, gate = "fire_test.py", "gate_a_kernel_drills.py"
+        for tool, mode, sig, at in ((fire, "A", signal.SIGTERM, 2.0), (fire, "B", signal.SIGTERM, 2.0),
+                                    (fire, "U", signal.SIGTERM, 2.0), (fire, "U", signal.SIGHUP, 2.0),
+                                    (fire, "U", signal.SIGINT, 2.0), (gate, "K1", signal.SIGTERM, 1.0),
+                                    (gate, "K2", signal.SIGTERM, 0.2), (gate, "K3", signal.SIGTERM, 2.0),
+                                    (gate, "K3", signal.SIGHUP, 2.0), (gate, "K3", signal.SIGINT, 2.0)):
+            with self.subTest(mode=mode, sig=sig):
+                rc, k = self.drill(tool, mode, expect_exit=SystemExit, abort=(at, sig))
+                self.assertEqual(rc, 128 + sig)
+                self.assertIsNone(k.abort, "the abort never came")
+                if mode in ("B", "U", "K3"):
+                    self.assertIn("0", k.latch_writes(), "the abort came before the unlock")
+                self.assertWholeWayOut(k, cut=True)
+        # An error ends a drill the same way: a read that fails mid-run.
+        for tool, mode, kernel in ((fire, "B", {"fail_at": 2.0}),
+                                   (gate, "K1", {"fail_at": 1.0, "fail_attr": "cnc/state"}),
+                                   (gate, "K2", {"fail_at": 0.2, "fail_attr": "cnc/state"})):
+            with self.subTest(mode=mode, case="a read fails mid-run"):
+                rc, k = self.drill(tool, mode, expect_exit=OSError, **kernel)
+                self.assertWholeWayOut(k, cut=True)
+        # A halt the kernel refuses is passed over, and the way out goes on:
+        # U aborted in its underrun state, before its acknowledgment, and K3
+        # aborted on a kernel in a fault.
+        for tool, mode, kernel in ((fire, "U", {"abort": ("underrun", signal.SIGTERM)}),
+                                   (gate, "K3", {"abort": (2.0, signal.SIGTERM), "halt_refused": True})):
+            with self.subTest(mode=mode, case="the halt refused"):
+                rc, k = self.drill(tool, mode, expect_exit=SystemExit, **kernel)
+                self.assertIsNone(k.abort, "the abort never came")
+                self.assertIn(("cnc/halt", "1"), k.writes)
+                self.assertWholeWayOut(k, cut=False)
+
+    def test_no_signal_cuts_the_way_out_short(self):
+        # A second signal at the worst moment, as the first is being set to
+        # ignore: the way out the first began still runs whole.
+        # The same for another signal once the handler has returned, as the
+        # way out begins (its own first call, SIGTERM already ignored): the
+        # handler set all three to ignore, not only the one that came.
+        fire, gate = "fire_test.py", "gate_a_kernel_drills.py"
+        for tool, mode, first, second, begun in ((fire, "U", signal.SIGTERM, signal.SIGHUP, False),
+                                                 (fire, "U", signal.SIGINT, signal.SIGINT, False),
+                                                 (gate, "K3", signal.SIGTERM, signal.SIGHUP, False),
+                                                 (fire, "U", signal.SIGTERM, signal.SIGHUP, True),
+                                                 (gate, "K3", signal.SIGTERM, signal.SIGHUP, True)):
+            with self.subTest(mode=mode, first=first, second=second, way_out_begun=begun):
+                sent = []
+
+                def second_as_the_first_is_ignored(mod):
+                    real = mod.signal
+
+                    def set_handler(sig, handler):
+                        now = (sig == real.SIGTERM and real.getsignal(sig) == real.SIG_IGN) if begun else (
+                            sig != real.SIGTSTP)
+                        if handler is real.SIG_IGN and now and not sent:
+                            sent.append(second)
+                            send(second)
+                        return real.signal(sig, handler)
+                    mod.signal = types.SimpleNamespace(**{n: getattr(real, n) for n in dir(real)
+                                                          if not n.startswith("__")})
+                    mod.signal.signal = set_handler
+                rc, k = self.drill(tool, mode, expect_exit=SystemExit, abort=(2.0, first),
+                                   hook=second_as_the_first_is_ignored)
+                self.assertEqual(sent, [second])
+                self.assertWholeWayOut(k, cut=True)
+        # K1 and K2 never unlock, and their way out sets nothing to ignore:
+        # the handler alone holds a second, different signal at its lock.
+        for mode, at in (("K1", 1.0), ("K2", 0.2)):
+            with self.subTest(mode=mode, case="an Abort, then a lost terminal at the way out's lock"):
+                rc, k = self.drill(gate, mode, expect_exit=SystemExit, abort=(at, signal.SIGTERM),
+                                   then=signal.SIGHUP)
+                self.assertEqual((rc, k.then), (128 + signal.SIGTERM, None))
+                self.assertWholeWayOut(k, cut=True)
+        # A drill that ended by itself: a signal as its way out locks the
+        # latch changes nothing, and the verdict stands.
+        for tool, mode in ((fire, "B"), (gate, "K3")):
+            with self.subTest(mode=mode, case="a signal in the way out of a drill that ended by itself"):
+                rc, k = self.drill(tool, mode, at_relock=signal.SIGTERM)
+                self.assertEqual((rc, k.at_relock), (0, None))
+                self.assertWholeWayOut(k, cut=False)
+
+    def test_a_drill_reads_and_writes_under_the_root_its_guard_reads(self):
+        root = tempfile.mkdtemp(dir=self.tmp)
+        put(root, "cnc/motor_lock", "0")
+        for tool in ("fire_test.py", "gate_a_kernel_drills.py"):
+            with self.subTest(tool), mock.patch.dict(os.environ, {"GF_SYSFS_ROOT": root + os.sep}):
+                mod = load(tool)
+                try:
+                    mod.wr("cnc/motor_lock", 15)
+                    got = mod.rd("cnc/motor_lock")
+                except OSError as e:
+                    self.fail("the drill does not use the root its guard reads: %s" % e)
+                self.assertEqual((got, hw.sysfs_read("cnc/motor_lock")), ("15", "15"))
+                mod.wr("cnc/motor_lock", 0)
+
+    def test_each_phase_is_judged_as_the_catalog_judges_it(self):
+        for mode in ("A", "B", "U"):
+            with self.subTest(mode=mode, case="clean"):
+                self.assertEqual(self.fire(mode)[0], 0)
+        with self.subTest(mode="K3", case="clean"):
+            self.assertEqual(self.k3()[0], 0)
+        cases = (("a LASER_ON sample", "B", {"emit_at": 4.5}),
+                 ("FIRE never driven mid-window", "B", {"fire_follows": False}),
+                 ("a LASER_ON sample, latch locked", "A", {"emit_at": 2.0}))
+        for name, mode, kernel in cases:
+            with self.subTest(mode=mode, case=name):
+                self.assertEqual(self.fire(mode, **kernel)[0], 1)
+
+    def test_an_underrun_phase_that_breaks_mid_run_ends_with_streaming_off(self):
+        mod = load("fire_test.py")
+        k = FakeFireKernel(Clock(), fail_at=2.0)
+        k.install(mod)
+        k.behind_the_catalog(self)
+        set_argv(self, ["fire_test.py", "U"])
+        _, err = self.quiet(mod.main)
+        self.assertIsInstance(err, OSError)
+        self.assertEqual(k.streaming, 0)
+        self.assertEqual(k.latch_writes()[-1], "1")
+
+    def test_k3_unlocks_only_under_a_set_button_latch(self):
+        mod = load("gate_a_kernel_drills.py")
+        k = FakeFireKernel(Clock(), press_at="unlock", fire_follows=False)
+        k.install(mod)
+        k.behind_the_catalog(self)
+        watched = []
+        mod.watch_unlocked_until_idle = lambda timeout: watched.append(1) or ([], "idle", None)
+        rc, err = self.quiet(mod.drill_k3)
+        self.assertEqual((rc, err), (1, None))
+        self.assertEqual(watched, [], "K3 ran on with the button latch clear")
+        self.assertEqual(k.latch_writes()[-1], "1")
+
+    def test_no_takeover_drill_takes_the_rail_down(self):
+        rc, k = self.fire("A")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("cnc/disable", [a for a, _ in k.writes])
+        mod = load("pwm_stream_test.py")
+        k = FakeFireKernel(Clock())
+        k.install(mod)
+        mod.pwmsar = lambda: 0
+        self.assertEqual(self.quiet(mod.main), (0, None))
+        self.assertNotIn("cnc/disable", [a for a, _ in k.writes])
+        self.assertEqual(k.state(), "idle")
+        mod = load("platform_drills.py")
+        ran = []
+        mod.subprocess = types.SimpleNamespace(run=lambda cmd, **kw: ran.append(cmd) or types.SimpleNamespace(
+            returncode=0, stdout="", stderr=""))
+        mod.sh, mod.time = (lambda cmd: ran.append(cmd) or ""), Clock()
+        set_argv(self, ["platform_drills.py", "rmmod"])
+        self.assertEqual(self.quiet(mod.main), (2, None))
+        self.assertEqual([c for c in ran if "rmmod" in c or "modprobe" in c], [])
 
 
 class FakeBus:
@@ -1543,6 +2019,72 @@ class LiveFireDrillTests(ToolCase):
         mod.panel_token, mod.get_json = (lambda: "tok"), (lambda path: {})
         self.assertEqual(self.quiet(mod.drill_expstop, FakeDrillGrbl()), (1, None))
         self.assertEqual(posted, ["stop"])
+
+    def test_a_drill_that_stops_waiting_cancels_its_job(self):
+        # The button waits 300 s, longer than a drill waits for its job's
+        # end: a drill that gives up soft-resets first, and fails.
+        mod = load("live_fire_drills.py")
+        mod.time = Clock()
+        g = FakeDrillGrbl()
+        mod.sample_forgectrl = lambda: {"emission": 0, "armed": False}
+        samples, _ = self.quiet(lambda: mod.run_and_sample(g, ["G1 X1"], overall_timeout=200))
+        self.assertTrue(mod.gave_up(samples))
+        self.assertEqual(g.sent[-1], mod.SOFT_RESET)
+        # A job that ends sends no reset: the window must close by itself.
+        g = FakeDrillGrbl()
+        lit = iter([5, 5] + [0] * 1000)
+        mod.sample_forgectrl = lambda: {"emission": next(lit), "armed": True}
+        samples = mod.run_and_sample(g, ["G1 X1"])
+        self.assertFalse(mod.gave_up(samples))
+        self.assertNotIn(mod.SOFT_RESET, g.sent)
+        # witness fails a job that did not end, whatever its samples say:
+        # the reset closed the window, not the program end.
+        mod, _ = self.drill(["witness"], {"laser_disarm_s": "60"})
+        clean = mod.Samples([{"emission": 5, "ir": [1] * 4, "hv": 9, "armed": True, "pgood": 200},
+                             {"emission": 0, "ir": [1] * 4, "hv": 0, "armed": True, "pgood": 200}])
+        clean.gave_up = True
+        mod.run_and_sample = lambda g, job, **kw: clean
+        mod.sample_forgectrl = lambda: {"armed": False}
+        self.assertEqual(self.quiet(mod.drill_witness, FakeDrillGrbl()), (1, None))
+        # expstop that never sees the burn.
+        mod, _ = self.drill(["expstop"])
+        mod.panel_token = lambda: "tok"
+        mod.sample_forgectrl = lambda: {"emission": 0}
+        g = FakeDrillGrbl()
+        self.assertEqual(self.quiet(mod.drill_expstop, g), (1, None))
+        self.assertEqual(g.sent[-1], mod.SOFT_RESET)
+
+    @unittest.skipUnless(POSIX_SIGNALS, "needs POSIX signals")
+    def test_the_abort_sends_the_soft_reset_before_anything_else(self):
+        # live_fire_drills.py: the reset, then the cleanup's M5, then the
+        # exit; a second Abort in the cleanup sends the reset again and
+        # does not cut the cleanup short.
+        mod, _ = self.drill(["witness"])
+        g = FakeDrillGrbl()
+        mod.Grbl = lambda host, port: g
+
+        def drill(g):
+            g.cmd("G1 X10")
+            deliver(signal.SIGTERM)
+            g.cmd("not reached")
+        mod.drill_witness = drill
+        real_cmd = g.cmd
+
+        def cmd(line, timeout=5.0):
+            if line == "M5":
+                deliver(signal.SIGTERM)
+            return real_cmd(line, timeout)
+        g.cmd = cmd
+        _, err = self.quiet(mod.main)
+        self.assertEqual(getattr(err, "code", None), 128 + signal.SIGTERM)
+        self.assertEqual(g.sent, ["G1 X10", mod.SOFT_RESET, mod.SOFT_RESET, "M5"])
+        # resume_dark_lead.py: the reset first.
+        rdl = load("resume_dark_lead.py")
+        sent = []
+        rdl.end_on_signals(types.SimpleNamespace(s=types.SimpleNamespace(sendall=sent.append)))
+        with self.assertRaises(SystemExit) as cm:
+            deliver(signal.SIGHUP)
+        self.assertEqual((cm.exception.code, sent), (128 + signal.SIGHUP, [rdl.SOFT_RESET]))
 
     def test_expstop_refuses_from_a_lan_host_before_it_arms(self):
         # forgectrl takes the stop only from loopback: from a LAN host it

@@ -19,6 +19,7 @@ import socket
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -138,6 +139,43 @@ class ActTests(unittest.TestCase):
         threading.Thread(target=say_cannot, daemon=True).start()
         with self.assertRaises(Failed):
             self.ctx.ready("x")
+
+
+class MonotonicClockTests(unittest.TestCase):
+    """forgetest times its waits and its judgment windows on the monotonic
+    clock: a step of the wall clock (the board has no RTC, and its first
+    ntpd sync after a boot can step it mid-campaign) neither ends a wait or
+    a window early nor stretches it."""
+
+    def test_a_wall_clock_step_moves_no_wait(self):
+        from forgetest import runner
+        clock = helpers.Clock()
+        t_start = clock.t
+        stepped = types.SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep,
+                                        time=lambda: clock.t + (3600.0 if clock.t > t_start + 0.2 else 0.0),
+                                        strftime=time.strftime)
+        ctx = Context(Run("test", "t.x", "t.x"), None, helpers.make_test("t.x", []))
+        with mock.patch.object(runner, "time", stepped):
+            ctx.sleep(2.0)
+            self.assertAlmostEqual(clock.t - t_start, 2.0, delta=0.3)
+            t0 = clock.t
+            self.assertIsNone(ctx.wait_for(lambda: False, 3.0))
+            self.assertAlmostEqual(clock.t - t0, 3.0, delta=0.3)
+
+    def test_no_module_reads_the_wall_clock_unmarked(self):
+        import forgetest
+        root = os.path.dirname(os.path.abspath(forgetest.__file__))
+        bad = []
+        for sub in ("", "suite"):
+            d = os.path.join(root, sub)
+            for name in sorted(os.listdir(d)):
+                if not name.endswith(".py"):
+                    continue
+                with open(os.path.join(d, name), encoding="utf-8") as f:
+                    for n, line in enumerate(f, 1):
+                        if "time.time(" in line and "# wall clock:" not in line:
+                            bad.append("%s:%d" % (os.path.join(sub, name), n))
+        self.assertEqual(bad, [])
 
 
 class VerdictPrimitiveTests(unittest.TestCase):
@@ -383,13 +421,13 @@ class AccelSamplerTests(unittest.TestCase):
         s = self.hw.AccelSampler(period=0.02)
         self.assertTrue(s.available)
         with s:
-            t0 = time.time()
+            t0 = time.monotonic()
             time.sleep(0.1)
             self.write(1100, 200)
             time.sleep(0.1)
             self.write(100, 200)
             time.sleep(0.1)
-            t1 = time.time()
+            t1 = time.monotonic()
         p2px, p2py, n = s.p2p(t0, t1)
         self.assertGreaterEqual(n, 5)
         self.assertEqual((p2px, p2py), (1000, 0))

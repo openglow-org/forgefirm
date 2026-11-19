@@ -64,8 +64,8 @@ def step(a, b):
 
 def mean_over(secs):
     rs, ss = [], []
-    end = time.time() + secs
-    while time.time() < end:
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
         rs.append(raw())
         ss.append(status()[:4])
         time.sleep(0.5)

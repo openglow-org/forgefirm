@@ -58,7 +58,7 @@ file(MAKE_DIRECTORY "${_gen_dir}")
 configure_file("${CMAKE_CURRENT_LIST_DIR}/fixture_config.h.in" "${_gen_dir}/fixture_config.h" @ONLY)
 
 idf_component_register(
-    SRCS "main.c" "wifi.c" "relays.c" "api.c" "policy.c"
+    SRCS "main.c" "wifi.c" "relays.c" "api.c" "policy.c" "auth.c" "sha256.c"
     INCLUDE_DIRS "." "${_gen_dir}"
     REQUIRES nvs_flash esp_wifi esp_netif esp_event esp_http_server json esp_timer driver
 )

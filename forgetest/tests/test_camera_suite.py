@@ -30,9 +30,9 @@ class ScriptedStream:
         self.closed = threading.Event()
 
     def read1(self, n):
-        if self.closed.wait(self.period) or (self.stop_at is not None and time.time() >= self.stop_at):
+        if self.closed.wait(self.period) or (self.stop_at is not None and time.monotonic() >= self.stop_at):
             return b""
-        if self.quiet_at is not None and time.time() >= self.quiet_at:
+        if self.quiet_at is not None and time.monotonic() >= self.quiet_at:
             self.closed.wait()
             return b""
         return FRAME
@@ -49,14 +49,14 @@ class StreamWatchTests(unittest.TestCase):
         return w
 
     def test_a_stream_that_keeps_delivering_after_the_lid_fails(self):
-        v = self.watch(ScriptedStream()).after_edge(time.time(), end_s=0.3)
+        v = self.watch(ScriptedStream()).after_edge(time.monotonic(), end_s=0.3)
         self.assertGreater(v["frames"], camera.STREAM_FRAMES_AFTER_EDGE)       # counted after the edge
         self.assertIsNotNone(camera.lid_stream_failure(v))
 
     def test_a_stream_that_falls_silent_without_ending_fails(self):
         stream = ScriptedStream()
         w = self.watch(stream)
-        edge = time.time()
+        edge = time.monotonic()
         stream.quiet_at = edge
         v = w.after_edge(edge, end_s=0.3)
         self.assertFalse(v["ended"])
@@ -65,7 +65,7 @@ class StreamWatchTests(unittest.TestCase):
     def test_an_ended_stream_is_held_to_a_frame_or_so_after_the_edge(self):
         stream = ScriptedStream()
         w = self.watch(stream)
-        edge = time.time()
+        edge = time.monotonic()
         stream.stop_at = edge + 0.015              # a frame or so after the edge, then the end
         v = w.after_edge(edge, end_s=1.0)
         self.assertIsNone(camera.lid_stream_failure(v), v)

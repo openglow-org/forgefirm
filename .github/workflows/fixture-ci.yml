@@ -2,11 +2,18 @@
 #
 #  - the host tests, compiled with gcc and run: the policy (channel names,
 #    the loop request words, the button pulse clamp, the key comparison),
-#    and the relays against a stand-in GPIO, timer and mutex layer (no
-#    line written high during init, each low before its pin is an output,
-#    the button refused without the
-#    jumper and during a pulse, the pulse's end armed before the line
-#    rises, a release that stops the pulse and drops every line)
+#    the request authentication (SHA-256 and HMAC-SHA256 against published
+#    vectors, the request MAC the tool's client computes, a nonce taken
+#    once, refused when expired, cut short or never issued, spent by a
+#    wrong MAC), the relays against a stand-in GPIO, timer and mutex
+#    layer (no line written high during init, each low before its pin is
+#    an output, the button refused without the jumper and during a pulse,
+#    the pulse's end armed before the line rises, a release that stops the
+#    pulse and drops every line), and the API handlers against a stand-in
+#    server (a signed request actuating once and never when played again;
+#    an unissued nonce, another key's MAC, a nonce past its life and a
+#    request that carries neither refused with nothing actuated; each
+#    loop route acting on its own channel)
 #  - the firmware build: the whole project in the pinned ESP-IDF
 #    container, with a placeholder fixture.env, so a change that does
 #    not compile never reaches a bench
@@ -31,7 +38,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Host tests (the policy, the relays)
+      - name: Host tests (the policy, the authentication, the relays, the API handlers)
         working-directory: fixture
         run: CC=gcc sh test/run.sh
 

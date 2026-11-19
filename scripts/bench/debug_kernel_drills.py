@@ -17,7 +17,9 @@ forgectrl first and start it after. The drills refuse while any of the
 three runs, and never start or stop forgectrl themselves.
 
   drill A  rmmod + modprobe glowforge three times with a settle between,
-           and read dmesg for any lockdep/mutex splat.
+           while another thread reads cnc/state, cnc/position, cnc/faults
+           and head/hall_sensor in a tight loop the whole time, and read
+           dmesg for any lockdep/mutex splat or oops.
   drill B  unbind the cnc device, unbind the 40 V regulator it needs so
            the re-bind probe returns -EPROBE_DEFER and unwinds, read
            dmesg for a clean unwind, then restore the regulator so the
@@ -35,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 from gfbench import arming_processes
@@ -46,7 +49,41 @@ STATE = '/sys/glowforge/cnc/state'
 SPLAT = re.compile(r'BUG:|WARNING:|INFO: possible|held lock|'
                    r'circular locking|bad unlock|sleeping function|'
                    r'still has locks held|DEBUG_LOCKS_WARN|'
-                   r'lock held when returning')
+                   r'lock held when returning|Oops|Unable to handle|'
+                   r'Call trace')
+SYSFS = '/sys/glowforge/'
+# What drill A reads while the module goes and comes back.
+RACE_ATTRS = ('cnc/state', 'cnc/position', 'cnc/faults', 'head/hall_sensor')
+
+
+class Reader(object):
+    """A thread that reads the module's attributes in a tight loop: the
+    remove path must not oops under a reader. A read refused while the
+    module is out is counted, never an error."""
+
+    def __init__(self):
+        self.stop = threading.Event()
+        self.reads = {'n': 0, 'err': 0}
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        while not self.stop.is_set():
+            for a in RACE_ATTRS:
+                try:
+                    with open(SYSFS + a, 'rb') as f:
+                        f.read(64)
+                    self.reads['n'] += 1
+                except OSError:
+                    self.reads['err'] += 1
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.set()
+        self.thread.join(2)
+        return False
 
 
 def sh(cmd, check=False):
@@ -115,20 +152,23 @@ def drill_load_unload():
     print('== drill A: module load/unload under DEBUG_MUTEXES')
     m = mark('A')
     ok = True
-    for i in range(3):
-        r = sh('rmmod glowforge', check=True)
-        if r.returncode != 0:
-            print('  rmmod failed on cycle %d - aborting drill A' % (i + 1))
-            ok = False
-            break
-        time.sleep(2)          # rail settle (the module powered it off)
-        r = sh('modprobe glowforge', check=True)
-        if r.returncode != 0:
-            print('  modprobe failed on cycle %d' % (i + 1))
-            ok = False
-            break
-        time.sleep(2)
-        print('  cycle %d: unload/reload ok' % (i + 1))
+    with Reader() as reader:
+        for i in range(3):
+            r = sh('rmmod glowforge', check=True)
+            if r.returncode != 0:
+                print('  rmmod failed on cycle %d - aborting drill A' % (i + 1))
+                ok = False
+                break
+            time.sleep(2)          # rail settle (the module powered it off)
+            r = sh('modprobe glowforge', check=True)
+            if r.returncode != 0:
+                print('  modprobe failed on cycle %d' % (i + 1))
+                ok = False
+                break
+            time.sleep(2)
+            print('  cycle %d: unload/reload ok' % (i + 1))
+    print('  concurrent reads: %d ok, %d refused while unloaded'
+          % (reader.reads['n'], reader.reads['err']))
     found = splats(dmesg_since(m))
     if found:
         print('  FAIL: %d lock splat(s):' % len(found))

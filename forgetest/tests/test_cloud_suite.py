@@ -60,6 +60,15 @@ def cut(lines, marker, count=1):
     raise KeyError(marker)
 
 
+def setUpModule():
+    # The kernel's LASER_ON window, short for every print here: a dark
+    # print's watch reads on for a window after the print, and nothing here
+    # latches a count but EmissionWitnessTests, which sets its own.
+    p = mock.patch.object(cloud, "LASER_ON_WINDOW_S", 0.05)
+    p.start()
+    unittest.addModuleCleanup(p.stop)
+
+
 def dark_print(ctx):
     """The dark print as exthost.armed-freeze runs it: the cloud suite's
     dark_print_body between the offline service's setup and cleanup."""
@@ -160,6 +169,8 @@ class CloudSuiteTests(unittest.TestCase):
         self.sysfs = os.path.join(self.tmp, "sysfs") + os.sep
         os.makedirs(self.sysfs + "cnc")
         self._attr("cnc/interlock_circuit", "45")          # latch locked (bit 3)
+        for attr in ("cnc/laser_enable", "cnc/laser_on", "cnc/laser_on_sampled"):
+            self._attr(attr, "0")                           # dark: the emission witnesses read nothing
         self._pos(0, 0, 3)
         os.environ["GF_SYSFS_ROOT"] = self.sysfs
         # the button LEDs, dark (the tests check a cancel leaves them so)
@@ -358,6 +369,15 @@ class CloudSuiteTests(unittest.TestCase):
             with self.subTest(latch=latch), self.pause_waits():
                 self.assertFails(cloud.pause_resume, "the latch is not unlocked while the print waits paused",
                                  hooks=self.pause_hooks(fixture("pause"), latch_while_paused=latch))
+
+    def test_pause_resume_fails_on_fire_driven_during_the_pause(self):
+        # The lock is read, then the FIRE line reads driven while the print
+        # stops and backs up: the pause is not dark.
+        hooks = self.pause_hooks(fixture("pause"))
+        pause = hooks["the press pauses the print"]
+        hooks["the press pauses the print"] = lambda: (pause(), self._attr("cnc/laser_enable", "1"))
+        with self.pause_waits():
+            self.assertFails(cloud.pause_resume, "the pause was not dark", hooks=hooks)
 
     @contextlib.contextmanager
     def pause_waits(self):
@@ -603,9 +623,10 @@ class ButtonLatchJudgeTests(unittest.TestCase):
             self.ran = None
 
     def judge(self, latch_before=1, unlock_for_press=True, latch_at_button=1, run_samples=25,
-              lock_in_run=False, presses=1, relock_after=True):
+              lock_in_run=False, presses=1, relock_after=True, laser_on_count=0):
         self.m = dict(lock_in_run=lock_in_run, run_samples=run_samples, relock_after=relock_after)
         self.presses = presses
+        self.attr("laser_on_sampled", laser_on_count)
         self.attr("button_latch", latch_before)
         self.attr("interlock_circuit", LOCKED)
         self.attr("state", "idle")
@@ -635,6 +656,9 @@ class ButtonLatchJudgeTests(unittest.TestCase):
     def test_a_print_that_holds_every_rule_passes(self):
         ctx = self.judge()
         self.assertEqual(ctx.evidence["samples_in_run"], 25)
+
+    def test_a_laser_on_count_during_the_dark_print_fails(self):
+        self.assertJudged("LASER_ON counted during a dark print", laser_on_count=2)
 
     def test_too_few_samples_while_the_kernel_plays_fail(self):
         self.assertJudged("samples were taken", run_samples=cloudlatch.SAMPLES_MIN - 1)
@@ -768,6 +792,90 @@ class ArmedFreezeJudgeTests(unittest.TestCase):
         with self.assertRaises(Failed) as cm:
             self.judge()
         self.assertIn("the kernel never read running", str(cm.exception))
+
+
+class DarkJobTests(unittest.TestCase):
+    """The job the offline prints play, as puls.py writes it and puls.parse
+    reads it back, raw and gzip-compressed: the stream opens on a power
+    byte at duty 0, every power byte is at duty 0, and no other byte
+    carries the LASER (FIRE) bit."""
+
+    def test_the_written_job_is_dark(self):
+        tmp = tempfile.mkdtemp(prefix="forgetest-dark-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                path = os.path.join(tmp, "dark-%d.puls" % compress)
+                cloud.puls.write_job(path, compress=compress)
+                with open(path, "rb") as f:
+                    data = f.read()
+                self.assertEqual(data[:2] == b"\x1f\x8b", compress)
+                _tags, body = cloud.puls.parse(data)
+                self.assertTrue(body and body[0] & cloud.puls.POWER, "the stream does not open on a power byte")
+                self.assertEqual([b for b in body if b & cloud.puls.POWER and b & 0x7F], [])
+                self.assertEqual([b for b in body if not b & cloud.puls.POWER and b & cloud.puls.LASER], [])
+
+
+class EmissionWitnessTests(unittest.TestCase):
+    def test_a_dark_print_fails_on_any_count_or_an_unread_one(self):
+        self.assertEqual(cloud.emission_hits([(0.0, "0"), (0.4, "0")]), [])
+        self.assertEqual(cloud.emission_hits([(0.0, "0"), (0.4, "3"), (0.8, None)]), [(0.4, "3"), (0.8, None)])
+
+    def test_a_pause_is_dark_from_its_lock_to_the_resume_press(self):
+        lit_tail = [(0.0, 37, "1", "1", "200")]                  # the cut before the lock: not judged
+        locked = [(0.1 + i * 0.1, 45, "0", "0", "200" if i < 5 else "0") for i in range(30)]
+        self.assertIsNone(cloud.pause_dark_why(lit_tail + locked))
+        for name, samples in (
+                ("the lock never read", lit_tail),
+                ("FIRE driven after the lock", lit_tail + locked[:10] + [(1.2, 37, "1", "0", "0")]),
+                ("LASER_ON after the lock", lit_tail + locked[:10] + [(1.2, 45, "0", "1", "0")]),
+                ("a count in a window after the lock", lit_tail + locked + [(3.5, 37, "0", "0", "4")])):
+            with self.subTest(name):
+                self.assertIsNotNone(cloud.pause_dark_why(samples))
+
+    def watched(self, count, body_s=0.0):
+        """A dark print's watch over a body of body_s seconds, the kernel's
+        window at 0.1 s; count(t, watch) is laser_on_sampled at t seconds
+        after the watch began (t_end: when the body returned)."""
+        marks = {}
+        ctx = types.SimpleNamespace(evidence={}, log=lambda *a: None)
+
+        def check(cond, msg, *a):
+            if not cond:
+                raise Failed(msg % a if a else msg)
+        ctx.check = check
+
+        def sysfs_read(attr, default=None):
+            t = time.monotonic() - marks["t0"]
+            return count(t, marks.get("t_end"), watch)
+        with mock.patch.object(cloud, "LASER_ON_WINDOW_S", 0.1), \
+                mock.patch.object(cloud.hw, "sysfs_read", sysfs_read):
+            marks["t0"] = time.monotonic()
+            watch = cloud.EmissionWatch(ctx, "print")
+            with watch:
+                threading.Event().wait(body_s)
+                marks["t_end"] = time.monotonic() - marks["t0"]
+            return watch
+
+    def test_a_count_that_latches_after_the_print_is_read(self):
+        # The window under way when the body returns latches up to a window
+        # later: half a window after the body, and at the very end (once the
+        # watch has stopped polling).
+        for name, count in (
+                ("half a window after the body",
+                 lambda t, end, w: "3" if end is not None and t >= end + 0.05 else "0"),
+                ("at the end", lambda t, end, w: "3" if w._stop.is_set() else "0")):
+            with self.subTest(name):
+                watch = self.watched(count)
+                with self.assertRaises(Failed):
+                    watch.check()
+
+    def test_a_window_counted_mid_print_is_read(self):
+        # One window of count in the middle of the body: read at least twice
+        # a window, the watch sees it.
+        watch = self.watched(lambda t, end, w: "2" if 0.15 <= t < 0.25 else "0", body_s=0.4)
+        with self.assertRaises(Failed):
+            watch.check()
 
 
 if __name__ == "__main__":

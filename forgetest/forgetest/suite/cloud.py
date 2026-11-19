@@ -11,6 +11,7 @@ cloud mode and leave the machine there (see enter_cloud)."""
 import json
 import os
 import socket
+import threading
 import time
 
 from ..catalog import test
@@ -117,9 +118,9 @@ def session_established(lines):
 
 
 def wait_mode(ctx, fc, want_mode, want_controller="running", timeout=90, poll=1.0):
-    t0 = time.time()
+    t0 = time.monotonic()
     last = None
-    while time.time() - t0 < timeout:
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         st, m = fc.get("/mode")
         if st == 200 and isinstance(m, dict):
@@ -168,11 +169,11 @@ def gfhome_homing(ctx, ev, g):
     if st.startswith("Alarm"):
         g.command("$X")
     home_offset = log_size(GFHOME_LOG)
-    t0 = time.time()
+    t0 = time.monotonic()
     g.send_raw(b"$H\n")
     homed = False
     state = gs = None
-    while time.time() - t0 < HOMING_TIMEOUT_S:
+    while time.monotonic() - t0 < HOMING_TIMEOUT_S:
         ctx.checkpoint()
         s = ctx.forgectrl.status()
         state = s.get("state")
@@ -186,7 +187,7 @@ def gfhome_homing(ctx, ev, g):
         if gs.startswith("Alarm"):
             break
         time.sleep(2)
-    ev["homing_s"] = round(time.time() - t0, 1)
+    ev["homing_s"] = round(time.monotonic() - t0, 1)
     ev["homed"] = homed
     ctx.log("homing: homed=%s after %.1f s (kernel %s, grbl %s)", homed, ev["homing_s"], state, gs)
     ctx.check(homed, "homing did not complete (grbl %s)", gs)
@@ -579,8 +580,8 @@ def wait_log(ctx, offset, needles, timeout, poll=0.5):
     """Wait until every needle has appeared in the gfcloud log since offset;
     returns {needle: first matching line or None}."""
     found = {n: None for n in needles}
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         for ln in log_lines_since(GFCLOUD_LOG, offset):
             for n in needles:
@@ -608,8 +609,8 @@ def wait_button_wait(ctx, offset, timeout, also=()):
     result."""
     needles = list(also) + ["waiting for button"]
     found = {n: None for n in needles}
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         lines = log_lines_since(GFCLOUD_LOG, offset)
         for ln in lines:
@@ -655,8 +656,8 @@ def check_pause_resume(ctx, got, offset, what="the run"):
 def wait_action_finished(ctx, offset, action, timeout, poll=0.5):
     """The action's own terminal line ('<action> [id]: finished with event
     ":completed"' / '":cancelled"'), or None within timeout."""
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         lines = log_lines_since(GFCLOUD_LOG, offset)
         i = action_finish_index(lines, action)
@@ -672,8 +673,8 @@ def watch_hunt_gates(ctx, offset, timeout):
     can be a few seconds). Returns (line or None, samples)."""
     fc = ctx.forgectrl
     samples = []
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         st, c = fc.get("/cool/status")
         if st == 200 and isinstance(c, dict):
@@ -767,17 +768,17 @@ def wait_quiet(ctx, offset, quiet_s=None, timeout=None):
     quiet_s = QUIET_S if quiet_s is None else quiet_s
     timeout = QUIET_TIMEOUT_S if timeout is None else timeout
     fc = ctx.forgectrl
-    t0 = time.time()
+    t0 = time.monotonic()
     n_seen = -1
     last_change = t0
-    while time.time() - t0 < timeout:
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         lines = log_lines_since(GFCLOUD_LOG, offset)
         n = sum(1 for ln in lines if any(m in ln for m in ACTIVITY_MARKS))
         if n != n_seen:
             n_seen = n
-            last_change = time.time()
-        if fc.status().get("state") == "idle" and time.time() - last_change >= quiet_s:
+            last_change = time.monotonic()
+        if fc.status().get("state") == "idle" and time.monotonic() - last_change >= quiet_s:
             return True
         time.sleep(0.5)
     return False
@@ -785,8 +786,8 @@ def wait_quiet(ctx, offset, quiet_s=None, timeout=None):
 
 def wait_session(ctx, offset, timeout=120):
     session = []
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         session = session_lines(GFCLOUD_LOG, offset)
         if session_established(session):
@@ -1110,8 +1111,8 @@ def wait_print_running(ctx, offset, timeout):
     """The PRINT is running: a "starting run" line after the print's button
     wait (the connect-time hunt and the service's moves before it are runs
     too, and must not be mistaken for the print). Returns the line or None."""
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         lines = log_lines_since(GFCLOUD_LOG, offset)
         wait_i = next((i for i, ln in enumerate(lines) if "waiting for button" in ln), None)
@@ -1126,6 +1127,138 @@ def wait_print_running(ctx, offset, timeout):
 def latch_locked():
     ilk = hw.sysfs_int("cnc/interlock_circuit")
     return ilk is not None and bool(ilk & (1 << 3))
+
+
+# ---------------------------------------------------------------- emission witnesses
+
+# cnc/laser_on_sampled is the kernel's own count of LASER_ON over a window of
+# about one second (255 samples at 255 Hz), latched once a window: read at
+# least twice a window, no window goes unread; and the window under way when
+# a print's body ends latches up to a window later, so the reads go on for a
+# window and a poll after it.
+LASER_ON_WINDOW_S = 1.0
+
+
+def emission_poll_s():
+    return 0.4 * LASER_ON_WINDOW_S
+
+
+def emission_tail_s():
+    return LASER_ON_WINDOW_S + emission_poll_s()
+
+
+def emission_hits(samples):
+    """The samples of a dark print that show LASER_ON: (t, laser_on_sampled)
+    pairs whose count is not a clean 0 (a count, or a read that failed)."""
+    return [s for s in samples if s[1] != "0"]
+
+
+class EmissionWatch:
+    """The kernel's LASER_ON count read through a dark print, from before
+    its arm press to past its end. The print's chain is armed (the press
+    cleared the button latch, the client unlocked the latch), so any FIRE
+    byte the job or the client put in play would be LASER_ON. The kernel
+    samples LASER_ON 255 times a second and counts the samples that read it
+    active, so a LASER_ON longer than one sample period (about 3.9 ms) is
+    counted and a shorter one can fall between two samples. The count is
+    read at least twice a window through the body, then for a window and a
+    poll after it (emission_tail_s), and once more at the end, so the
+    window under way when the body ends is read after it latches. check()
+    fails the test on any count."""
+
+    def __init__(self, ctx, tag):
+        self.ctx = ctx
+        self.tag = tag
+        self.samples = []
+        self._stop = threading.Event()
+        self._th = None
+
+    def _sample(self):
+        self.samples.append((round(time.monotonic() - self._t0, 1), hw.sysfs_read("cnc/laser_on_sampled")))
+
+    def __enter__(self):
+        self._t0 = time.monotonic()
+        self._sample()                          # the first read before anything is asked of the print
+
+        def loop():
+            while not self._stop.wait(emission_poll_s()):
+                self._sample()
+        self._th = threading.Thread(target=loop, daemon=True, name="forgetest-emission-watch")
+        self._th.start()
+        return self
+
+    def __exit__(self, *exc):
+        time.sleep(emission_tail_s())           # the window under way at the body's end latches
+        self._stop.set()
+        if self._th is not None:
+            self._th.join(5)
+        self._sample()                          # and the last, the print's whole span covered
+        return False
+
+    def check(self):
+        hits = emission_hits(self.samples)
+        self.ctx.evidence[self.tag + "_emission"] = {"samples": len(self.samples), "hits": hits[:10]}
+        self.ctx.log("[%s] LASER_ON count read %d times through the dark print: %d not zero",
+                     self.tag, len(self.samples), len(hits))
+        self.ctx.check(self.samples, "[%s] the LASER_ON count was never read", self.tag)
+        self.ctx.check(not hits, "[%s] LASER_ON counted during a dark print: %s", self.tag, hits[:5])
+
+
+# A window counted after the pause's lock began after it: the count latches
+# once a window of about a second, and the window under way at the lock is
+# visible until the next one latches.
+PAUSE_COUNT_SETTLE_S = 2.0
+
+
+def pause_dark_why(samples):
+    """None when a lit print's pause stayed dark from the lock that began it
+    to the resume press, else why not. samples: (t, interlock_circuit,
+    laser_enable, laser_on, laser_on_sampled) read from the pause press's
+    line on. The judgment starts at the first sample that reads the latch
+    locked (the pause locks it before its stop and its backward run, and
+    unlocks it for the resume press): from there FIRE and LASER_ON read 0
+    in every sample, and the LASER_ON count reads 0 in every window that
+    began after the lock."""
+    start = next((i for i, s in enumerate(samples) if s[1] is not None and s[1] & (1 << 3)), None)
+    if start is None:
+        return "the pause's lock was never read (%d samples)" % len(samples)
+    t_lock = samples[start][0]
+    lit = [s for s in samples[start:] if s[2] != "0" or s[3] != "0"]
+    if lit:
+        return "FIRE or LASER_ON read during the pause: %s" % lit[:3]
+    counted = [s for s in samples[start:] if s[0] - t_lock >= PAUSE_COUNT_SETTLE_S and s[4] != "0"]
+    if counted:
+        return "LASER_ON counted during the pause: %s" % counted[:3]
+    return None
+
+
+class PauseWatch:
+    """The tight FIRE readback of a lit print's pause, from the pause press
+    to the moment before the resume press is asked for."""
+
+    def __init__(self):
+        self.samples = []
+        self._stop = threading.Event()
+        self._th = None
+
+    def __enter__(self):
+        t0 = time.monotonic()
+
+        def loop():
+            while not self._stop.is_set():
+                self.samples.append((round(time.monotonic() - t0, 4), hw.sysfs_int("cnc/interlock_circuit"),
+                                     hw.sysfs_read("cnc/laser_enable"), hw.sysfs_read("cnc/laser_on"),
+                                     hw.sysfs_read("cnc/laser_on_sampled")))
+                self._stop.wait(0.002)
+        self._th = threading.Thread(target=loop, daemon=True, name="forgetest-pause-watch")
+        self._th.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._th is not None:
+            self._th.join(5)
+        return False
 
 
 # A print a test leaves behind: the bound on its cancel's park and relock,
@@ -1149,8 +1282,8 @@ def job_alive(fc):
 def _until(cond, timeout):
     """Poll cond until it holds or the timeout: not abort-aware, since it
     runs after an Abort, which it must not cut short."""
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         if cond():
             return True
         time.sleep(0.5)
@@ -1265,7 +1398,9 @@ def lid_interlock_abort(ctx):
     job = offline_job(ctx, "abort.puls", seconds=40)
     off = Offline().__enter__()
     try:
-        lid_interlock_abort_body(ctx, ev, off, job, offset)
+        with EmissionWatch(ctx, "prints") as watch:
+            lid_interlock_abort_body(ctx, ev, off, job, offset)
+        watch.check()
     except BaseException:
         end_print(ctx, off)
         raise
@@ -1358,6 +1493,14 @@ def lid_interlock_abort_body(ctx, ev, off, job, offset):
 # ---------------------------------------------------------------- the dark print (exthost.armed-freeze)
 
 def dark_print_body(ctx, ev, off, job, offset, fc):
+    """The dark print exthost.armed-freeze runs, with the kernel's LASER_ON
+    count read from before its arm press to its end."""
+    with EmissionWatch(ctx, "dark print") as watch:
+        _dark_print(ctx, ev, off, job, offset, fc)
+    watch.check()
+
+
+def _dark_print(ctx, ev, off, job, offset, fc):
     # Before the print the latch is locked. At the button wait the armed
     # session is open, the cooling verdict has passed and the client has
     # released the lock: the hardware's own button latch clears only on a
@@ -1407,7 +1550,10 @@ def dark_print_body(ctx, ev, off, job, offset, fc):
                   "latch is locked for the stop and the backward run and unlocked again once the "
                   "pause has settled: read from sysfs between the two presses, it is unlocked while "
                   "the print waits paused (the cooling engine's armed window is recorded beside it), "
-                  "and the resume press comes after that read. The same "
+                  "and the resume press comes after that read. From the pause press until the resume "
+                  "press is asked for, the FIRE line, LASER_ON and the kernel's LASER_ON count are read "
+                  "tight: from the pause's lock on, the stop, the backward run and the wait read dark. "
+                  "The same "
                   "print is where the job's lifecycle shows: a print warms up before its first "
                   "fire and rests after its park, both non-zero, while the connect-time hunt in "
                   "the same session does neither. It is also where the app's progress bar shows: "
@@ -1427,24 +1573,35 @@ def pause_resume_body(ctx, ev, offset):
     ctx.instruct(APP_PRINT_CUE)
     got = wait_print_running(ctx, offset, 300)
     ctx.check(got, "the print never reached its run within 300 s (not started, or the button not pressed)")
-    ctx.act("button", "press", text="The head is moving: the press pauses the print.",
-            until=lambda: log_has(offset, PAUSE_LINES[0]), timeout=PRESS_TIMEOUT_S, fail=False)
     # The pause locks the latch for its stop and its backward run, and the
     # client logs "paused at" once it has unlocked it again for the resume
     # press. Read here, between the two presses, from sysfs: a relock by any
     # writer (the client, forgectrl's safing, the engine on a lapsed report)
     # shows, not only one the client logs. The engine's armed window is
-    # forgectrl's own bookkeeping, recorded beside it.
-    paused = wait_log(ctx, offset, [PAUSE_LINES[1]], PAUSE_SETTLE_S)[PAUSE_LINES[1]]
-    ctx.check(paused, "the pause did not settle within %d s (no 'paused at')", PAUSE_SETTLE_S)
-    ilk = hw.sysfs_int("cnc/interlock_circuit")
-    st, cs = ctx.forgectrl.get("/cool/status")
-    ev["while_paused"] = {"interlock_circuit": ilk,
-                          "armed": cs.get("armed") if st == 200 and isinstance(cs, dict) else None}
-    ctx.log("while paused: %s", ev["while_paused"])
-    ctx.check(ilk is not None and not ilk & (1 << 3),
-              "the latch is not unlocked while the print waits paused (interlock_circuit %s): the resume "
-              "press could not count", ilk)
+    # forgectrl's own bookkeeping, recorded beside it. The FIRE line and
+    # the LASER_ON count are read tight from before the pause press to just
+    # before the resume press is asked for: the pause is dark from its lock
+    # on (pause_dark_why); the lit cut before the lock is not judged.
+    with PauseWatch() as pw:
+        ctx.act("button", "press", text="The head is moving: the press pauses the print.",
+                until=lambda: log_has(offset, PAUSE_LINES[0]), timeout=PRESS_TIMEOUT_S, fail=False,
+                press="pause")
+        paused = wait_log(ctx, offset, [PAUSE_LINES[1]], PAUSE_SETTLE_S)[PAUSE_LINES[1]]
+        ctx.check(paused, "the pause did not settle within %d s (no 'paused at')", PAUSE_SETTLE_S)
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        st, cs = ctx.forgectrl.get("/cool/status")
+        ev["while_paused"] = {"interlock_circuit": ilk,
+                              "armed": cs.get("armed") if st == 200 and isinstance(cs, dict) else None}
+        ctx.log("while paused: %s", ev["while_paused"])
+        ctx.check(ilk is not None and not ilk & (1 << 3),
+                  "the latch is not unlocked while the print waits paused (interlock_circuit %s): the resume "
+                  "press could not count", ilk)
+    dark = pause_dark_why(pw.samples)
+    ev["pause_witness"] = {"samples": len(pw.samples),
+                           "span_s": pw.samples[-1][0] if pw.samples else None, "why": dark}
+    ctx.log("pause witness: %d samples over %s s: %s", len(pw.samples), ev["pause_witness"]["span_s"],
+            dark or "dark from the lock on")
+    ctx.check(dark is None, "the pause was not dark: %s", dark)
     ctx.act("button", "press", text="The print is paused (the head backed up a few millimeters): "
             "the press resumes it.",
             until=lambda: log_has(offset, RESUME_LINES[0]) or log_has(offset, RESUME_REFUSED),
@@ -1556,7 +1713,9 @@ def oversize_stream(ctx):
     ev["underruns_before"] = before
     off = Offline().__enter__()
     try:
-        oversize_stream_body(ctx, ev, off, job, offset, before)
+        with EmissionWatch(ctx, "print") as watch:
+            oversize_stream_body(ctx, ev, off, job, offset, before)
+        watch.check()
     except BaseException:
         end_print(ctx, off)
         raise
@@ -1614,7 +1773,8 @@ def oversize_stream_body(ctx, ev, off, job, offset, before):
     ev["max_backtrack"] = hw.sysfs_int("cnc/max_backtrack", 0)
     ctx.log("max_backtrack while the feed runs: %s steps", ev["max_backtrack"])
     ctx.act("button", "press", text="The press pauses the live-fed print.",
-            until=lambda: log_has(offset, PAUSE_LINES[0]), timeout=PRESS_TIMEOUT_S, fail=False)
+            until=lambda: log_has(offset, PAUSE_LINES[0]), timeout=PRESS_TIMEOUT_S, fail=False,
+            press="pause")
     ctx.act("button", "press", text="The print is paused (the head backed up a few millimeters): "
             "the press resumes it.",
             until=lambda: log_has(offset, RESUME_LINES[0]) or log_has(offset, RESUME_REFUSED),

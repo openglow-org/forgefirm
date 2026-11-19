@@ -8,7 +8,12 @@ page) or from a LAN host, against grblHAL over TCP (port 23) and
 forgectrl over HTTP (:80, FORGECTRL_PORT overrides); the machine is GF_HOST, default 127.0.0.1.
 expstop and ctrlstart write to forgectrl, which answers a write only from
 loopback: they run on the board. The exit status is the drill's verdict:
-0 pass, 1 fail, 2 refused before anything ran.
+0 pass, 1 fail, 2 refused before anything ran. The bench page's Abort
+(SIGTERM) and a lost terminal (SIGHUP) send the controller's soft reset
+first, which ends the drill's job wherever it stands, and then the
+cleanup runs with nothing to wait for. A drill that stops waiting for its
+job's end (witness, ircut, pthresh, dladder, expstop) sends the same reset
+before it reports the FAIL, so no job of its own is left for a late press.
 LIVE LASER: the operator must be armed with eye protection, a fire
 watch, an extinguisher, and the exhaust running. Every drill waits for
 the operator to press the physical arm button before the machine fires;
@@ -196,6 +201,7 @@ import json
 import math
 import os
 import re
+import signal
 import socket
 import sys
 import time
@@ -206,6 +212,70 @@ LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 PORT = 23
 CTRL_PORT = int(os.environ.get('FORGECTRL_PORT') or 80)
 BASE = 'http://%s:%d' % (HOST, CTRL_PORT)
+
+# The controller's real-time soft reset. In the button wait it cancels the
+# job, latch locked; in motion it relocks the latch once the core has
+# reported the alarm, ramps the kernel down and drops what was not shipped;
+# at rest it closes the armed window at once.
+SOFT_RESET = b'\x18'
+LINKS = []          # the open controller connections, newest last
+ENDING = []         # the signal that ends the drill, once one is taken
+
+
+def connect(host, port):
+    """A controller connection that a signal's soft reset reaches."""
+    g = Grbl(host, port)
+    LINKS.append(g)
+    return g
+
+
+def soft_reset_all():
+    for g in reversed(LINKS):
+        try:
+            g.rt(SOFT_RESET)
+        except Exception:
+            pass                            # a connection the controller dropped
+
+
+def end_on_signal(signum, frame):
+    """SIGTERM (the bench page's Abort) or SIGHUP: the soft reset goes out
+    on every connection first, so no job of this drill runs on or waits
+    for a press behind the exit; then the drill ends through its finally
+    blocks, which wait for nothing (rest()). A second signal sends the
+    reset again and lets the cleanup finish."""
+    soft_reset_all()
+    if not ENDING:
+        ENDING.append(signum)
+        raise SystemExit(128 + signum)
+
+
+def end_on_signals():
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, end_on_signal)
+
+
+def rest(seconds):
+    """time.sleep, except while the drill ends on a signal: the reset has
+    ended the job, and a cleanup then waits for nothing."""
+    if not ENDING:
+        time.sleep(seconds)
+
+
+def give_up(g, why):
+    """A drill that stops waiting cancels its job first: a job still
+    queued behind the button runs on a late press otherwise, with nothing
+    sampling it."""
+    print('GAVE UP: %s - soft reset: the job is canceled' % why)
+    g.rt(SOFT_RESET)
+
+
+class Samples(list):
+    """run_and_sample's samples; gave_up is set when it stopped waiting."""
+    gave_up = False
+
+
+def gave_up(samples):
+    return getattr(samples, 'gave_up', False)
 
 
 def panel_token():
@@ -224,8 +294,8 @@ def sample_ir_baseline(seconds=3.0):
     the baseline this run is judged against (never a stored one)."""
     acc = [0.0, 0.0, 0.0, 0.0]
     n = 0
-    t_end = time.time() + seconds
-    while time.time() < t_end:
+    t_end = time.monotonic() + seconds
+    while time.monotonic() < t_end:
         s = sample_forgectrl()
         if s and s['ir'] and len(s['ir']) == 4:
             for i in range(4):
@@ -311,7 +381,7 @@ class Grbl:
         # controller reports arming and refusals only to the sender.
         pieces = (self.partial + text).split('\n')
         self.partial = pieces.pop()
-        now = time.time()
+        now = time.monotonic()
         for ln in pieces:
             ln = ln.strip()
             if ln and not ln.startswith('<'):
@@ -320,9 +390,11 @@ class Grbl:
 
     def cmd(self, line, timeout=5.0):
         self.s.sendall(line.encode() + b'\n')
-        deadline = time.time() + timeout
+        if ENDING:
+            return '(ending on a signal)'
+        deadline = time.monotonic() + timeout
         text = ''
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             text += self.drain()
             if 'ok' in text or 'error' in text or 'ALARM' in text:
                 return text.strip()
@@ -331,9 +403,9 @@ class Grbl:
 
     def status(self):
         self.s.sendall(b'?')
-        t = time.time() + 1.0
+        t = time.monotonic() + 1.0
         text = ''
-        while time.time() < t:
+        while time.monotonic() < t:
             text += self.drain()
             if '>' in text:
                 break
@@ -350,8 +422,8 @@ class Grbl:
         self.s.sendall(ch)
 
     def wait_state(self, want, timeout=60.0, poll=0.1):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             s = self.state()
             if s.startswith(want):
                 return s
@@ -367,7 +439,7 @@ def sample_forgectrl():
     except Exception:
         return None
     return {
-        't': time.time(),
+        't': time.monotonic(),
         'kstate': st.get('state'),
         'emission': st.get('laser', {}).get('emission_samples'),
         'pgood': st.get('laser', {}).get('pgood_samples'),
@@ -397,23 +469,24 @@ def run_and_sample(g, gcode_lines, sample_hz=8, overall_timeout=200):
     NOT trigger on an early Idle. Complete on one of:
       - real fire captured: emission was seen > 0, then grbl Idle > 3 s;
       - no-fire disarm: armed went True then False, grbl Idle, > 15 s in;
-      - overall timeout.
+      - overall timeout: the drill gives up, and the job is canceled
+        (give_up) before the samples come back marked gave_up.
     """
-    samples = []
+    samples = Samples()
     period = 1.0 / sample_hz
     s0 = sample_forgectrl()
     if s0:
         samples.append(s0)
     for ln in gcode_lines:
         g.s.sendall(ln.encode() + b'\n')
-    t_start = time.time()
+    t_start = time.monotonic()
     next_t = t_start
     seen_emission = False
     seen_armed = False
     disarmed_now = False
     idle_since = None
-    while time.time() - t_start < overall_timeout:
-        now = time.time()
+    while time.monotonic() - t_start < overall_timeout:
+        now = time.monotonic()
         if now >= next_t:
             smp = sample_forgectrl()
             if smp:
@@ -436,6 +509,9 @@ def run_and_sample(g, gcode_lines, sample_hz=8, overall_timeout=200):
         else:
             idle_since = None
         time.sleep(0.05)
+    else:
+        give_up(g, 'no end of the job within %d s' % overall_timeout)
+        samples.gave_up = True
     return samples
 
 
@@ -516,6 +592,11 @@ def drill_witness(g):
     ]
     ir_base = sample_ir_baseline()
     samples = run_and_sample(g, job)
+    if gave_up(samples):
+        # The reset closed the window: X-3 would read a close the job's
+        # own end never made.
+        print('WITNESS FAIL: the job did not end within the wait')
+        return 1
     # Analysis.
     emis = [s['emission'] for s in samples if s['emission'] is not None]
     peak_emis = max(emis) if emis else 0
@@ -543,12 +624,12 @@ def drill_witness(g):
     # X-3: measure time-to-disarm after the job completes at Idle. The
     # job-based window (Phase 4) should disarm promptly at Idle entry,
     # not wait out the ~60 s laser_disarm_s grace.
-    t0 = time.time()
+    t0 = time.monotonic()
     disarm_dt = None
-    while time.time() - t0 < 75:
+    while time.monotonic() - t0 < 75:
         s = sample_forgectrl()
         if s and not s['armed']:
-            disarm_dt = time.time() - t0
+            disarm_dt = time.monotonic() - t0
             break
         time.sleep(1)
     print('X-3 time-to-disarm after Idle: %s s (job-based PASS if prompt, '
@@ -597,11 +678,11 @@ def drill_hold(g):
     if not took_hold:
         print('FAIL: the feed hold did not take (state=%s)' % st)
     print('watching the disarm grace count down IN HOLD (not resuming)...')
-    t0 = time.time()
+    t0 = time.monotonic()
     disarmed_at = None
     left_hold = None                # the state seen when it was not Hold
     armed_in_hold = None            # the first poll in Hold read the window open
-    while time.time() - t0 < 120:
+    while time.monotonic() - t0 < 120:
         s = sample_forgectrl()
         if armed_in_hold is None:
             armed_in_hold = bool(s and s['armed'])
@@ -612,7 +693,7 @@ def drill_hold(g):
             left_hold = state
             print('note: left Hold (state=%s) before disarm' % state)
         if s and not s['armed']:
-            disarmed_at = time.time() - t0
+            disarmed_at = time.monotonic() - t0
             break
         time.sleep(1)
     # Recover: laser off, abort out of hold.
@@ -648,6 +729,9 @@ def drill_ircut(g):
     ]
     ir_base = sample_ir_baseline()
     samples = run_and_sample(g, job, overall_timeout=400)
+    if gave_up(samples):
+        print('IRCUT FAIL: the cut did not end within the wait')
+        return 1
     ir_peak = [0, 0, 0, 0]
     ir_min = [10 ** 6] * 4
     hv_vals = []
@@ -808,6 +892,9 @@ def drill_pthresh(g):
         job.append('G0 Y%g' % PTHRESH_PITCH)
     job += ['M5', 'G90', 'M2']
     samples = run_and_sample(g, job, overall_timeout=600)
+    if gave_up(samples):
+        print('PTHRESH FAIL: the ladder did not end within the wait')
+        return 1
     hv_vals = [s['hv'] for s in samples if s['hv'] is not None]
     emis = [s['emission'] for s in samples if s['emission'] is not None]
     print('\n--- results ---')
@@ -1020,6 +1107,9 @@ def drill_dladder(g):
         job.append('G0 Y%g' % DLADDER_PITCH)
     job += ['M5', 'G90', 'M2']
     samples = run_and_sample(g, job, overall_timeout=600)
+    if gave_up(samples):
+        print('DLADDER FAIL: the ladder did not end within the wait')
+        return 1
 
     emis = [s['emission'] for s in samples if s['emission'] is not None]
     hv_vals = [s['hv'] for s in samples if s['hv'] is not None]
@@ -1124,7 +1214,7 @@ class Sampler:
         self._thr.join(timeout=3)
 
     def _read_sysfs(self):
-        smp = {'t': time.time()}
+        smp = {'t': time.monotonic()}
         for key, attr in self.channels:
             try:
                 with open(os.path.join(SYSFS, attr)) as f:
@@ -1137,7 +1227,7 @@ class Sampler:
     def _read_status(self):
         st = sample_forgectrl()
         smp = dict((key, None) for key, _attr in self.channels)
-        smp['t'] = time.time()
+        smp['t'] = time.monotonic()
         if st is None:
             self.errors += 1
             return smp
@@ -1147,15 +1237,15 @@ class Sampler:
 
     def _run(self):
         read = self._read_sysfs if self.local else self._read_status
-        next_t = time.time()
+        next_t = time.monotonic()
         while not self._stop.is_set():
             self.samples.append(read())
             next_t += self.period
-            delay = next_t - time.time()
+            delay = next_t - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
             else:
-                next_t = time.time()
+                next_t = time.monotonic()
 
     def rate(self):
         if len(self.samples) < 2:
@@ -1468,9 +1558,9 @@ def drill_pcurve(g):
             if repeat:
                 g.s.sendall(('G0 X%g\n' % length).encode())
                 g.wait_state('Idle', 30)
-            t_gap0 = time.time()
+            t_gap0 = time.monotonic()
             time.sleep(PCURVE_GAP_S)             # laser off: the baseline
-            t_m3 = time.time()
+            t_m3 = time.monotonic()
             job = ['M3 S%d' % sval,
                    'G1 X%g F%d' % (-length if repeat else length, feed),
                    'M5']
@@ -1481,9 +1571,9 @@ def drill_pcurve(g):
                 aborted = ('rung %d never ran (state=%s): arm refused, no '
                            'press, or the controller alarmed' % (idx + 1, st))
                 break
-            t_run0 = time.time()
+            t_run0 = time.monotonic()
             st = g.wait_state('Idle', line_s + 30.0, poll=0.05)
-            t_run1 = time.time()
+            t_run1 = time.monotonic()
             if not st.startswith('Idle'):
                 aborted = 'rung %d did not finish (state=%s)' % (idx + 1, st)
                 break
@@ -1513,7 +1603,7 @@ def drill_pcurve(g):
             g.rt(b'\x18')                   # abort out of whatever it is in
         else:
             g.s.sendall(b'G90\nM2\n')       # program end closes the window
-        time.sleep(1.5)
+        rest(1.5)
         sampler.stop()
     if aborted:
         print('ABORTED: %s' % aborted)
@@ -1678,7 +1768,7 @@ def drill_dpatch(g):
             lines, dx, dy = dpatch_gcode(p['feed'], width, pitch, n_lines)
             est_s = n_lines * (width / p['feed'] * 60.0 + 0.25) + 2.0
             time.sleep(DPATCH_SETTLE_S)
-            t_m3 = time.time()
+            t_m3 = time.monotonic()
             for ln in ['M3 S%d' % p['s']] + lines + ['M5']:
                 g.s.sendall(ln.encode() + b'\n')
             # The first Run seen after the press is the first line of the
@@ -1690,9 +1780,9 @@ def drill_dpatch(g):
                 aborted = ('patch %d never ran (state=%s): arm refused, no press, '
                            'or the controller alarmed' % (i + 1, st))
                 break
-            t_run0 = time.time()
+            t_run0 = time.monotonic()
             st = g.wait_state('Idle', est_s + 60.0, poll=0.05)
-            t_run1 = time.time()
+            t_run1 = time.monotonic()
             if not st.startswith('Idle'):
                 cs = sample_forgectrl() or {}
                 aborted = ('patch %d did not finish (state=%s; cooling verdict %s, %r)'
@@ -1722,7 +1812,7 @@ def drill_dpatch(g):
             g.rt(b'\x18')                   # abort out of whatever it is in
         else:
             g.s.sendall(b'G90\nM2\n')       # program end closes the window
-        time.sleep(1.5)
+        rest(1.5)
         sampler.stop()
     if aborted:
         print('ABORTED: %s' % aborted)
@@ -1806,9 +1896,9 @@ class CoolPoller:
     def _run(self):
         keys = ('phase', 'verdict', 'hold', 'reason', 'down_c', 'up_c',
                 'armed', 'fire_ok', 'fan_gates')
-        next_t = time.time()
+        next_t = time.monotonic()
         while not self._stop.is_set():
-            smp = {'t': time.time()}
+            smp = {'t': time.monotonic()}
             try:
                 cs = get_json('/cool/status')
                 for k in keys:
@@ -1817,11 +1907,11 @@ class CoolPoller:
                 self.errors += 1
             self.samples.append(smp)
             next_t += 1.0
-            delay = next_t - time.time()
+            delay = next_t - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
             else:
-                next_t = time.time()
+                next_t = time.monotonic()
 
 
 # --- a sender change mid-job closes the window; the next laser-on prompts ----
@@ -1842,9 +1932,9 @@ SENDERCHG_DROP_S = 5.0                    # lit seconds before the drop
 
 def senderchg_wait_reply(g, needle, timeout):
     """Poll the socket until a reply containing `needle` arrives."""
-    end = time.time() + timeout
+    end = time.monotonic() + timeout
     seen = len(g.log)
-    while time.time() < end:
+    while time.monotonic() < end:
         g.drain()
         for _t, ln in g.log[seen:]:
             if needle in ln:
@@ -1872,7 +1962,7 @@ def drill_senderchg(g):
     print('>>> lights again. The line goes dark at the drop and the head HOLDS')
     print('>>> where it is; the new session resumes it with your second press.\n')
     print('G91/G21: %s / %s' % (g.cmd('G91'), g.cmd('G21')))
-    t_m3 = time.time()
+    t_m3 = time.monotonic()
     for ln in ('M3 S%d' % SENDERCHG_S, SENDERCHG_LINE1, 'M5'):
         g.s.sendall(ln.encode() + b'\n')
     prompt1 = senderchg_wait_reply(g, 'press the button', 10)
@@ -1884,18 +1974,18 @@ def drill_senderchg(g):
         sampler.stop()
         poller.stop()
         return 1
-    t_run1 = time.time()
+    t_run1 = time.monotonic()
     time.sleep(SENDERCHG_DROP_S)
-    t_drop = time.time()
+    t_drop = time.monotonic()
     replies_a = list(g.log)
     g.s.close()                              # the sender goes away, mid-line, lit
     print('  connection dropped %.1f s into the first line' % (t_drop - t_run1))
     time.sleep(1.0)
-    g2 = Grbl(HOST, PORT)                    # a new session
-    t_reconnect = time.time()
+    g2 = connect(HOST, PORT)                 # a new session
+    t_reconnect = time.monotonic()
     st = g2.wait_state('Hold', 10)
     print('  reconnected; the job is held %.1f s after the drop (state %s)'
-          % (time.time() - t_drop, st))
+          % (time.monotonic() - t_drop, st))
     cs = sample_forgectrl() or {}
     print('  engine after the drop: armed=%s verdict=%s' % (cs.get('armed'), cs.get('verdict')))
     outcome = 'done'
@@ -1917,7 +2007,7 @@ def drill_senderchg(g):
                     outcome = 'no-run'
                     g2.rt(b'\x18')
                 else:
-                    t_run2 = time.time()
+                    t_run2 = time.monotonic()
                     g2.wait_state('Idle', 60)
                     print('  M2: %s' % g2.cmd('G90\nM2', timeout=10))
     finally:
@@ -1925,7 +2015,7 @@ def drill_senderchg(g):
             g2.cmd('M5', timeout=1)
         except Exception:
             pass
-        time.sleep(3.0)
+        rest(3.0)
         sampler.stop()
         poller.stop()
     tr = sampler.samples
@@ -1934,7 +2024,7 @@ def drill_senderchg(g):
     # up to a second after the beam stops, so the gap opens 2.5 s after
     # the drop; hv_current and the thermopile answer within a sample.
     lit1 = [t for t in lit if t_run1 - 1 <= t <= t_drop + 2.5]
-    lit_gap = [t for t in lit if t_drop + 2.5 < t < (t_run2 or time.time()) - 0.5]
+    lit_gap = [t for t in lit if t_drop + 2.5 < t < (t_run2 or time.monotonic()) - 0.5]
     lit2 = [t for t in lit if t_run2 and t >= t_run2] if t_run2 else []
     hv_off = [s['t'] - t_drop for s in tr if s['t'] > t_drop and (s.get('hv') or 0) <= HV_DARK_MAX]
     print('  hv_current read dark %.2f s after the drop' % (hv_off[0] if hv_off else -1))
@@ -2009,7 +2099,7 @@ def drill_overrun(g):
     print('>>> blast is %d bytes written at once %.0f s into the line.\n'
           % (len(blast), OVERRUN_BLAST_S))
     print('G91/G21: %s / %s' % (g.cmd('G91'), g.cmd('G21')))
-    t_m3 = time.time()
+    t_m3 = time.monotonic()
     for ln in ('M3 S%d' % OVERRUN_S, OVERRUN_LINE1):
         g.s.sendall(ln.encode() + b'\n')
     prompt1 = senderchg_wait_reply(g, 'press the button', 10)
@@ -2021,14 +2111,14 @@ def drill_overrun(g):
         sampler.stop()
         poller.stop()
         return 1
-    t_run1 = time.time()
+    t_run1 = time.monotonic()
     time.sleep(OVERRUN_BLAST_S)
-    t_blast = time.time()
+    t_blast = time.monotonic()
     g.s.sendall(blast)
     reported = senderchg_wait_reply(g, 'RX overrun', 10)
-    t_report = time.time()
+    t_report = time.monotonic()
     st = g.wait_state('Alarm', 10)
-    t_alarm = time.time()
+    t_alarm = time.monotonic()
     print('  overrun reported: %s (%.1f s after the blast); state %s' % (reported, t_report - t_blast, st))
     outcome = 'done'
     t_run2 = None
@@ -2054,7 +2144,7 @@ def drill_overrun(g):
                     outcome = 'no-run'
                     g.rt(b'\x18')
                 else:
-                    t_run2 = time.time()
+                    t_run2 = time.monotonic()
                     g.wait_state('Idle', 30)
                     print('  M2: %s' % g.cmd('G90\nM2', timeout=10))
     finally:
@@ -2062,7 +2152,7 @@ def drill_overrun(g):
             g.cmd('M5', timeout=1)
         except Exception:
             pass
-        time.sleep(3.0)
+        rest(3.0)
         sampler.stop()
         poller.stop()
     tr = sampler.samples
@@ -2070,11 +2160,11 @@ def drill_overrun(g):
     # laser_on_sampled is a one-second window count (see senderchg): the
     # gap opens 2.5 s after the alarm; hv_current answers within a sample.
     lit1 = [t for t in lit if t_run1 - 1 <= t <= t_alarm + 2.5]
-    lit_gap = [t for t in lit if t_alarm + 2.5 < t < (t_run2 or time.time()) - 0.5]
+    lit_gap = [t for t in lit if t_alarm + 2.5 < t < (t_run2 or time.monotonic()) - 0.5]
     lit2 = [t for t in lit if t_run2 and t >= t_run2] if t_run2 else []
     hv_off = [s['t'] - t_blast for s in tr if s['t'] > t_blast and (s.get('hv') or 0) <= HV_DARK_MAX]
     print('  hv_current read dark %.2f s after the blast' % (hv_off[0] if hv_off else -1))
-    last_lit_after_blast = max([t for t in lit if t <= (t_run2 or time.time())], default=t_blast)
+    last_lit_after_blast = max([t for t in lit if t <= (t_run2 or time.monotonic())], default=t_blast)
     print('\n--- replies (t from the first M3) ---')
     for t, ln in g.log:
         if ln != 'ok' and not re.match(r'\$\d+=', ln):
@@ -2152,9 +2242,9 @@ def drill_m5dark(g):
         return 1
     # The controller reports Idle inside a G4 dwell, so Idle is no sign the
     # job is over; the armed window closing at M2 is.
-    t0 = time.time()
+    t0 = time.monotonic()
     seen_armed = False
-    while time.time() - t0 < 90:
+    while time.monotonic() - t0 < 90:
         smp = sample_forgectrl()
         if smp and smp['armed']:
             seen_armed = True
@@ -2294,8 +2384,8 @@ def drill_m4corner(g):
         g.cmd('M2')
         time.sleep(0.5)
         g.drain()
-        t0 = time.time()
-        while time.time() - t0 < 90:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 90:
             smp = sample_forgectrl()
             if smp and not smp['armed']:
                 break
@@ -2415,8 +2505,8 @@ def drill_m4feeds(g):
                 g.wait_state('Idle', 30)
         g.cmd('G90')
         g.cmd('M2')
-        t0 = time.time()
-        while time.time() - t0 < 90:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 90:
             smp = sample_forgectrl()
             if smp and not smp['armed']:
                 break
@@ -2555,8 +2645,8 @@ def drill_xymode(g):
             g.wait_state('Idle', 30)
         g.cmd('G90')
         g.cmd('M2')
-        t0 = time.time()
-        while time.time() - t0 < 90:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 90:
             smp = sample_forgectrl()
             if smp and not smp['armed']:
                 break
@@ -2671,8 +2761,8 @@ def drill_xycircle(g):
             g.wait_state('Idle', 60)
         g.cmd('G90')
         g.cmd('M2')
-        t0 = time.time()
-        while time.time() - t0 < 90:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 90:
             smp = sample_forgectrl()
             if smp and not smp['armed']:
                 break
@@ -2738,21 +2828,21 @@ def drill_expstop(g):
     for ln in job:
         g.s.sendall(ln.encode() + b'\n')
     # Wait for the burn to be under way (emission > 0), then stop.
-    t0 = time.time()
+    t0 = time.monotonic()
     seen = False
-    while time.time() - t0 < 240:
+    while time.monotonic() - t0 < 240:
         smp = sample_forgectrl()
         if smp and smp['emission'] and smp['emission'] > 0:
             seen = True
             break
         time.sleep(0.15)
     if not seen:
-        print('no emission seen within the wait - operator did not arm? ABORT')
+        give_up(g, 'no emission seen within 240 s (operator did not arm?)')
         return 1
     print('emission live (%s) - stopping the controller NOW' % smp['emission'])
-    t_stop = time.time()
+    t_stop = time.monotonic()
     code, body = post_ctrl('stop')
-    print('POST /controller/stop -> %s %s (%.2f s)' % (code, body.strip(), time.time() - t_stop))
+    print('POST /controller/stop -> %s %s (%.2f s)' % (code, body.strip(), time.monotonic() - t_stop))
     if code != 200:
         # The stop was not taken: nothing here judged a stop, and the drill
         # ends now, its closing M5 and connection close behind it. Neither
@@ -2764,7 +2854,7 @@ def drill_expstop(g):
     for _ in range(40):                     # ~5 s at 8 Hz
         smp = sample_forgectrl()
         if smp:
-            trail.append((round(time.time() - t_stop, 2), smp['emission'], smp['kstate'], smp['armed']))
+            trail.append((round(time.monotonic() - t_stop, 2), smp['emission'], smp['kstate'], smp['armed']))
         time.sleep(0.12)
     print('post-stop trail (t, emission_samples, kstate, armed):')
     for t in trail:
@@ -2813,15 +2903,15 @@ def holdres_pause(g, label, wait_disarm=False):
         return 'no-hold (%s)' % st
     seen = len(g.log)
     if wait_disarm:
-        t0 = time.time()
-        while time.time() - t0 < 120:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 120:
             s = sample_forgectrl()
             if s and not s['armed']:
                 break
             time.sleep(1)
         else:
             return 'still armed after 120 s in Hold'
-        print('  %s: the window closed in Hold after %.0f s; sending ~' % (label, time.time() - t0))
+        print('  %s: the window closed in Hold after %.0f s; sending ~' % (label, time.monotonic() - t0))
         g.rt(b'~')
         if not senderchg_wait_reply(g, 'press the button to resume', 10):
             return 'no resume prompt on ~'
@@ -2940,9 +3030,10 @@ def main():
     if drill not in drills:
         print(__doc__)
         return 2
+    end_on_signals()
     if drill == 'ctrlstart':
         return verdict(drills[drill](None))  # no controller connection needed
-    g = Grbl(HOST, PORT)
+    g = connect(HOST, PORT)
     try:
         rc = drills[drill](g)
     finally:

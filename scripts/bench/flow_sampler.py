@@ -12,10 +12,10 @@ import time
 
 dur = float(sys.argv[1])
 iv = float(sys.argv[2])
-t0 = time.time()
+t0 = time.monotonic()
 
 while True:
-    el = time.time() - t0
+    el = time.monotonic() - t0
     if el > dur:
         break
     with open('/sys/glowforge/pic/water_temp_1') as f:

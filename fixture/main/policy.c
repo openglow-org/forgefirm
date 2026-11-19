@@ -17,16 +17,6 @@ const char *policy_channel_name(channel_t ch)
     return (ch >= 0 && ch < CH_COUNT) ? NAMES[ch] : "?";
 }
 
-int policy_channel_from_path(const char *path)
-{
-    if (path == NULL || path[0] != '/')
-        return -1;
-    for (int i = 0; i < CH_COUNT; i++)
-        if (strcmp(path + 1, NAMES[i]) == 0)
-            return i;
-    return -1;
-}
-
 bool policy_parse_loop_state(const char *word, bool *energize)
 {
     if (word == NULL)

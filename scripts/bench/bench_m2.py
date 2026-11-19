@@ -48,9 +48,9 @@ class Grbl:
     def cmd(self, line, timeout=5.0):
         """Send a line, wait for ok/error."""
         self.s.sendall(line.encode() + b'\n')
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         text = ''
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             text += self.drain()
             if 'ok' in text or 'error' in text:
                 return text.strip()
@@ -60,9 +60,9 @@ class Grbl:
     def status(self):
         """Realtime ? query -> raw <...> report or ''."""
         self.s.sendall(b'?')
-        t = time.time() + 1.0
+        t = time.monotonic() + 1.0
         text = ''
-        while time.time() < t:
+        while time.monotonic() < t:
             text += self.drain()
             if '>' in text:
                 break
@@ -75,8 +75,8 @@ class Grbl:
         """Poll until Idle; return (peak_feed_mm_min, states_seen)."""
         peak = 0.0
         states = []
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             st = self.status()
             if st:
                 state = st[1:].split('|')[0]

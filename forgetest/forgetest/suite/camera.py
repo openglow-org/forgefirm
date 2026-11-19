@@ -40,19 +40,19 @@ class StreamWatch:
             try:
                 data = read(65536)
             except (OSError, http.client.HTTPException, ValueError) as e:
-                self.end = (time.time(), type(e).__name__)
+                self.end = (time.monotonic(), type(e).__name__)
                 return
             if not data:
-                self.end = (time.time(), "EOF")
+                self.end = (time.monotonic(), "EOF")
                 return
             # a marker split between two reads is counted with the second
-            self.chunks.append((time.time(), len(data), (self._carry + data).count(JPEG_SOI)))
+            self.chunks.append((time.monotonic(), len(data), (self._carry + data).count(JPEG_SOI)))
             self._carry = data[-1:]
 
     def wait_frames(self, n, timeout):
         """True once n frames have arrived; False at the timeout or the end."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             if sum(c[2] for c in list(self.chunks)) >= n:
                 return True
             if self.end is not None:
@@ -64,8 +64,8 @@ class StreamWatch:
         """What the stream delivered after t_edge, read once it ended or
         end_s later: whether it ended, the frames and bytes after the edge,
         and a frame's size before it."""
-        deadline = time.time() + end_s
-        while self.end is None and time.time() < deadline:
+        deadline = time.monotonic() + end_s
+        while self.end is None and time.monotonic() < deadline:
             time.sleep(0.05)
         chunks = list(self.chunks)
         before = [c for c in chunks if c[0] <= t_edge]
@@ -502,7 +502,7 @@ def lid_privacy(ctx):
         # stream ends. The watch has read the stream as it arrived, so what
         # comes after the lid is seen open is what the engine sent after it,
         # not a backlog: a frame or so, then the end.
-        verdict = watch.after_edge(time.time())
+        verdict = watch.after_edge(time.monotonic())
         ev["stream_after_lid_open"] = verdict
         ctx.log("after the lid opened: %s", verdict)
         why = lid_stream_failure(verdict)

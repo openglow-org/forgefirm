@@ -52,12 +52,15 @@ Usage: resume_dark_lead.py [--run dry|live] [--power S] [--feed F]
 Operator sequence in both cases: press to arm (live only), then press once
 mid-move to pause, and once more to resume. GRBL mode only, with the
 controller idle and no other Grbl client attached (a connection here
-displaces the sender).
+displaces the sender). An Abort (SIGTERM) or a lost terminal (SIGHUP)
+sends the controller's soft reset before the tool exits, which ends the
+job wherever it stands.
 """
 import argparse
 import json
 import mmap
 import os
+import signal
 import socket
 import struct
 import sys
@@ -88,6 +91,28 @@ MOTION_GAP_S = 0.10
 
 SLEEP_S = 0.0005
 HOST, PORT = '127.0.0.1', 23
+SOFT_RESET = b'\x18'                # the controller's real-time soft reset
+
+
+def end_on_signals(grbl):
+    """SIGTERM (the bench page's Abort) and SIGHUP: the controller's soft
+    reset goes out first, which ends the job wherever it stands (in the
+    button wait it is canceled with the latch locked; in motion the latch
+    relocks once the core has reported the alarm), and then the tool exits
+    through its finally blocks. A second signal sends the reset again and
+    lets them finish."""
+    ending = []
+
+    def handler(signum, frame):
+        try:
+            grbl.s.sendall(SOFT_RESET)
+        except OSError:
+            pass
+        if not ending:
+            ending.append(signum)
+            raise SystemExit(128 + signum)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, handler)
 
 
 class Pads:
@@ -160,9 +185,9 @@ class Grbl:
 
     def status(self):
         self.s.sendall(b'?')
-        deadline = time.time() + 1.0
+        deadline = time.monotonic() + 1.0
         text = ''
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             text += self.drain()
             if '>' in text:
                 break
@@ -370,6 +395,7 @@ def main():
         sys.exit('must run as root (needs /dev/mem)')
 
     grbl = Grbl()
+    end_on_signals(grbl)
     st = grbl.state()
     if not st.startswith('Idle'):
         sys.exit('controller is not Idle (%s) - clear it first' % (st or '?'))

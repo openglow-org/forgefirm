@@ -17,16 +17,10 @@ static int failures;
 
 int main(void)
 {
-    /* names and paths */
+    /* names */
     CHECK(strcmp(policy_channel_name(CH_LID), "lid") == 0);
     CHECK(strcmp(policy_channel_name(CH_INTERLOCK), "interlock") == 0);
     CHECK(strcmp(policy_channel_name(CH_BUTTON), "button") == 0);
-    CHECK(policy_channel_from_path("/lid") == CH_LID);
-    CHECK(policy_channel_from_path("/interlock") == CH_INTERLOCK);
-    CHECK(policy_channel_from_path("/button") == CH_BUTTON);
-    CHECK(policy_channel_from_path("/lids") == -1);
-    CHECK(policy_channel_from_path("lid") == -1);
-    CHECK(policy_channel_from_path(NULL) == -1);
 
     /* a loop request: open energizes, close/closed releases, nothing else */
     bool e = false;

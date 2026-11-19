@@ -78,8 +78,8 @@ class Grbl:
         self.s.sendall((line + "\n").encode())
         self.s.settimeout(timeout)
         buf = ""
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             try:
                 buf += self.s.recv(4096).decode(errors="replace")
             except socket.timeout:
@@ -92,8 +92,8 @@ class Grbl:
         self.s.sendall(b"?")
         self.s.settimeout(1.0)
         buf = ""
-        end = time.time() + 1.0
-        while time.time() < end and ">" not in buf:
+        end = time.monotonic() + 1.0
+        while time.monotonic() < end and ">" not in buf:
             try:
                 buf += self.s.recv(4096).decode(errors="replace")
             except socket.timeout:
@@ -106,9 +106,9 @@ class Grbl:
 
     def wait_idle(self, timeout):
         peak = 0.0
-        end = time.time() + timeout
+        end = time.monotonic() + timeout
         seen_run = False
-        while time.time() < end:
+        while time.monotonic() < end:
             st, pos, f = self.status()
             peak = max(peak, f)
             if st and st.startswith(("Run", "Jog")):
@@ -139,7 +139,7 @@ def raster(mode):
         for line in ("M5", "G21", "G90", "G91"):
             g.cmd(line)
         c0 = cpu_ticks(pid)
-        t0 = time.time()
+        t0 = time.monotonic()
         for i in range(LINES):
             dx = LEN if i % 2 == 0 else -LEN
             r = g.cmd("G1 X%.3f F%d" % (dx, FEED), timeout=60)
@@ -152,13 +152,13 @@ def raster(mode):
         ok, peak_end, pos1 = g.wait_idle(120)
         peak = max(peak, peak_end)
         g.cmd("G90")
-        elapsed = time.time() - t0
+        elapsed = time.monotonic() - t0
         cpu = 100.0 * (cpu_ticks(pid) - c0) / (os.sysconf("SC_CLK_TCK") * elapsed)
     finally:
         g.close()
     # the machine itself idle: the kernel plays out the depth behind Idle
-    end = time.time() + 20
-    while time.time() < end and fc_get("/status").get("state") != "idle":
+    end = time.monotonic() + 20
+    while time.monotonic() < end and fc_get("/status").get("state") != "idle":
         time.sleep(0.5)
     k1 = kernel_mm()
     und1 = int(sysfs("cnc/underruns"))

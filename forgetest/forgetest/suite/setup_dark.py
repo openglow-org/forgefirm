@@ -92,12 +92,12 @@ def run_check(ctx, wid, on_prompt, timeout_s, on_poll=None):
     fc = ctx.forgectrl
     ev = ctx.evidence
     start(ctx, fc, wid)
-    t0 = time.time()
+    t0 = time.monotonic()
     seen = set()
     phases = []
     last = None
     try:
-        while time.time() - t0 < timeout_s:
+        while time.monotonic() - t0 < timeout_s:
             ctx.checkpoint()
             d = dark(fc)
             if d.get("id") != wid:
@@ -130,7 +130,7 @@ def run_check(ctx, wid, on_prompt, timeout_s, on_poll=None):
         # behind this test: the next run must be able to start its own.
         fc.post("/wiz/%s/abort" % wid)
         raise
-    ev["elapsed_s"] = round(time.time() - t0, 1)
+    ev["elapsed_s"] = round(time.monotonic() - t0, 1)
     ev["phases"] = phases[-12:]
     if last is None:
         # A check this test stops following is aborted before the test
@@ -167,7 +167,7 @@ def check_switches(ctx):
         elif pid == "button-press":
             ctx.act("button", "press",
                     until=lambda: (dark(ctx.forgectrl).get("prompt") or {}).get("id") != "button-press",
-                    text=p.get("text", ""))
+                    text=p.get("text", ""), press="plain")
         elif pid == "button-release":
             pass                                    # the fixture's press releases on its own
         elif pid.startswith("interlock-"):
@@ -347,8 +347,8 @@ def check_lens(ctx):
         too; a check still ending starts its own controller after the
         put-back, which reads them already."""
         try:
-            t_end = time.time() + 120
-            while time.time() < t_end and dark(fc).get("running"):
+            t_end = time.monotonic() + 120
+            while time.monotonic() < t_end and dark(fc).get("running"):
                 time.sleep(1)
             if dark(fc).get("running"):
                 restart["skipped"] = "the check is still ending"

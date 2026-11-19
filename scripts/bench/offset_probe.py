@@ -70,18 +70,18 @@ class Sampler(threading.Thread):
 
     def run(self):
         period = 1.0 / HZ
-        nxt = time.time()
+        nxt = time.monotonic()
         while not self.stop.is_set():
-            t = time.time()
+            t = time.monotonic()
             a, b = rd(SYSFS + 'pic/water_temp_1'), rd(SYSFS + 'pic/water_temp_2')
             self.samples.append((t, int(a) if a and a.isdigit() else None,
                                  int(b) if b and b.isdigit() else None))
             nxt += period
-            d = nxt - time.time()
+            d = nxt - time.monotonic()
             if d > 0:
                 time.sleep(d)
             else:
-                nxt = time.time()
+                nxt = time.monotonic()
 
 
 def mean_c(samples, t0, t1, idx):
@@ -143,7 +143,7 @@ def run_jog():
             time.sleep(0.2)
 
     def phase(label, fan, motion, dwell):
-        t0 = time.time()
+        t0 = time.monotonic()
         if fan is not None:
             wr(aa, fan)
         th = None
@@ -152,16 +152,16 @@ def run_jog():
             th = threading.Thread(target=mover, daemon=True)
             th.start()
         end = t0 + dwell
-        while time.time() < end:
+        while time.monotonic() < end:
             v = rd(SYSFS + 'head/air_assist_tach')
-            tach.append((time.time(), int(v) if v and v.isdigit() else None))
+            tach.append((time.monotonic(), int(v) if v and v.isdigit() else None))
             time.sleep(1.0)
         if th:
             stop_motion.set()
             th.join(25)
             g.wait_state('Idle', 20)
-        phases.append((label, t0, time.time()))
-        print('  %+7.1f s  %s done' % (time.time() - phases[0][1], label), flush=True)
+        phases.append((label, t0, time.monotonic()))
+        print('  %+7.1f s  %s done' % (time.monotonic() - phases[0][1], label), flush=True)
 
     failed = []
     try:
@@ -226,7 +226,7 @@ def run_armed():
                 s = _json.load(r)
             with urllib.request.urlopen(BASE + '/cool/status', timeout=2) as r:
                 c = _json.load(r)
-            return {'t': time.time(), 'armed': c.get('armed'), 'phase': c.get('phase'),
+            return {'t': time.monotonic(), 'armed': c.get('armed'), 'phase': c.get('phase'),
                     'hv_enable': (s.get('switches') or {}).get('hv_enable'),
                     'emission': (s.get('laser') or {}).get('emission_samples'),
                     'hv': s.get('hv_current_raw')}
@@ -253,7 +253,7 @@ def run_armed():
                     lit.append(s)
             v = rd(SYSFS + 'cnc/laser_on_sampled')
             if v and v.isdigit() and int(v) > 0:
-                lit.append({'t': time.time(), 'lon': int(v)})
+                lit.append({'t': time.monotonic(), 'lon': int(v)})
             time.sleep(0.5)
     th = threading.Thread(target=poller, daemon=True)
     th.start()
@@ -261,15 +261,15 @@ def run_armed():
     t_m3 = None
     try:
         time.sleep(8)
-        phases.append(('before the session', sampler.samples[0][0], time.time()))
+        phases.append(('before the session', sampler.samples[0][0], time.monotonic()))
         print('G91/G21: %s / %s' % (g.cmd('G91'), g.cmd('G21')))
-        t_m3 = time.time()
+        t_m3 = time.monotonic()
         for ln in ('M3 S0', 'G4 P60', 'M5', 'G90', 'M2'):
             g.s.sendall(ln.encode() + b'\n')
         # wait for the press: the engine's armed goes true
         t_armed = None
-        deadline = time.time() + 300
-        while time.time() < deadline and not lit:
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline and not lit:
             g.drain()
             if poll and poll[-1]['armed']:
                 t_armed = poll[-1]['t']
@@ -283,19 +283,19 @@ def run_armed():
         print('  armed %.1f s after the M3' % (t_armed - t_m3), flush=True)
         # the dwell: armed, dark
         t_end = None
-        while time.time() < t_armed + 75 and not lit:
+        while time.monotonic() < t_armed + 75 and not lit:
             g.drain()
-            if poll and not poll[-1]['armed'] and time.time() > t_armed + 5:
+            if poll and not poll[-1]['armed'] and time.monotonic() > t_armed + 5:
                 t_end = poll[-1]['t']
                 break
             time.sleep(0.2)
         if lit:
             raise RuntimeError('LIT SAMPLE DURING THE ARMED DWELL: %s' % lit[:2])
-        t_end = t_end or time.time()
+        t_end = t_end or time.monotonic()
         phases.append(('armed, dark dwell', t_armed, t_end))
         print('  window closed %.1f s after the arm' % (t_end - t_armed), flush=True)
         time.sleep(20)
-        phases.append(('after M2, fans still at run', t_end, time.time()))
+        phases.append(('after M2, fans still at run', t_end, time.monotonic()))
     except Exception as e:
         print('ABORT: %s' % e)
         g.rt(b'\x18')
@@ -419,13 +419,13 @@ def main():
     try:
         for label, key, val, dwell in sched:
             if label == 'all run fans':
-                t = time.time()
+                t = time.monotonic()
                 wr(attrs['exhaust'], 65535)
                 wr(attrs['intake'], 43278)
                 wr(attrs['air_assist'], 1023)
                 edges.append((t, label))
                 time.sleep(15)
-                t = time.time()
+                t = time.monotonic()
                 wr(attrs['exhaust'], 0)
                 wr(attrs['intake'], 0)
                 wr(attrs['air_assist'], 204)
@@ -435,20 +435,20 @@ def main():
             if key == 'pump' and not val:
                 refuse_if_armable('before the pump-off dwell')
             if key:
-                t = time.time()
+                t = time.monotonic()
                 wr(attrs[key], val)
                 edges.append((t, label))
                 print('  %+7.1f s  %s' % (t - edges[0][0], label), flush=True)
             else:
-                edges.append((time.time(), label))
+                edges.append((time.monotonic(), label))
             if key in ('heater', 'tec') and val:
                 # The kernel holds a heater duty above zero, and a TEC on,
                 # only for its lease (heater_lease_ms, 5 s): written again
                 # every second.
-                end = time.time() + dwell
-                while time.time() < end:
-                    time.sleep(min(1.0, max(0.0, end - time.time())))
-                    if time.time() < end:
+                end = time.monotonic() + dwell
+                while time.monotonic() < end:
+                    time.sleep(min(1.0, max(0.0, end - time.monotonic())))
+                    if time.monotonic() < end:
                         wr(attrs[key], val)
             else:
                 time.sleep(dwell)

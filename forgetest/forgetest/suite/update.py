@@ -185,8 +185,8 @@ def slots_and_signature(ctx):
         ctx.check(st == 202 and isinstance(body, dict) and body.get("started") is True,
                   "the apply job did not start: %s %s (the drill's slot was free at its start)", st, body)
         result = None
-        t0 = time.time()
-        while time.time() - t0 < 60:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 60:
             ctx.sleep(1)
             st, us = fc.get("/update/status")
             if isinstance(us, dict) and not us.get("running"):

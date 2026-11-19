@@ -236,14 +236,18 @@ class JudgeCtx:
 
 
 class Clock:
-    """time.time and time.sleep for a module under test: the clock moves
-    only when the module sleeps, and each sleep runs the machine's tick."""
+    """time.time, time.monotonic and time.sleep for a module under test: the
+    clock moves only when the module sleeps, and each sleep runs the
+    machine's tick."""
 
     def __init__(self, tick=None):
         self.t = 1000.0
         self.tick = tick or (lambda: None)
 
     def time(self):
+        return self.t
+
+    def monotonic(self):
         return self.t
 
     def sleep(self, seconds):

@@ -13,6 +13,7 @@ import os
 import shutil
 import struct
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -454,6 +455,14 @@ class BaselineTests(BaselineFixture, unittest.TestCase):
     def test_clean_ring_reads_zero_residue(self):
         self.assertEqual(baseline.read_ring_residue(), 0)
 
+    def test_an_interlock_loop_left_open_is_a_leftover(self):
+        # The kernel drives INTERLOCK_RESET (bit 4) while the loop reads
+        # open: every fire is blocked until a person closes it.
+        self._attr("cnc/interlock_circuit", str(45 | 0x10))
+        items = {x.item: x for x in self.bl().enforce("post", captured=None)}
+        self.assertIn("interlock loop", items)
+        self.assertTrue(items["interlock loop"].judged())
+
     def test_lamp_needs_forgectrl(self):
         # the lamp's idle level comes from forgectrl's settings: without the
         # daemon there is nothing to compare against
@@ -519,15 +528,13 @@ class BaselineTests(BaselineFixture, unittest.TestCase):
     def test_wait_configured_times_out_and_says_so(self):
         self._probe_state()
         t = {"now": 0.0}
-        real_time = baseline.time.time
-        baseline.time.time = lambda: t["now"]
-        try:
-            def sleep(s):
-                t["now"] += s
+
+        def sleep(s):
+            t["now"] += s
+        clock = types.SimpleNamespace(monotonic=lambda: t["now"], time=lambda: t["now"], sleep=sleep)
+        with mock.patch.object(baseline, "time", clock):
             ok = baseline.wait_controller_configured(
                 self.lines.append, {"controller": "running", "mode": "grbl"}, timeout=2, sleep=sleep)
-        finally:
-            baseline.time.time = real_time
         self.assertFalse(ok)
         self.assertTrue(any("did not apply its config" in l for l in self.lines))
 

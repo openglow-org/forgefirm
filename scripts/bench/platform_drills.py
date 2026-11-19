@@ -5,7 +5,11 @@
 # SPDX-License-Identifier:    MIT
 """Kernel platform drills - runs ON the board, with forgectrl stopped
 (/etc/init.d/forgectrl stop) so the pulse device is free. Restart forgectrl
-afterward. Usage: platform_drills.py deadman|rmmod|decay|led|all
+afterward. Usage: platform_drills.py deadman|decay|led|all
+
+None of them cycles the 40 V rail: the dead man's close halts the engine
+and leaves the rail up. The module reload cycles, which do take the rail
+down, are drill A of debug_kernel_drills.py, on the debug-kernel image.
 
 deadman  Trip the kernel dead-man mid-run and read back what it touched.
          Before the run: heater and TEC on, pump/exhaust/intake at a known
@@ -15,15 +19,12 @@ deadman  Trip the kernel dead-man mid-run and read back what it touched.
          dead-man trip. PASS: the run stops; heater and TEC are off; the
          measure laser, UV LED and Z driver are off; pump, exhaust and intake
          are UNCHANGED (airflow and circulation stay with the engine).
-rmmod    Three rmmod/modprobe cycles while another thread reads cnc/state
-         and cnc/position in a tight loop the whole time. PASS: every cycle
-         completes, the attrs come back, no oops/BUG/WARNING in dmesg.
-decay    Set every decay mode (0/1/2) and microstep mode on each axis and
+decay   Set every decay mode (0/1/2) and microstep mode on each axis and
          read each back. PASS: readback equals the write, every time.
 led      Drive the button and lid LEDs through target/pulse settings and
          back to their resting state. Operator confirms visually.
 """
-import errno, fcntl, os, subprocess, sys, threading, time
+import errno, fcntl, os, subprocess, sys, time
 
 TICK_HZ = 10000
 PAD = b'\x00'
@@ -60,8 +61,8 @@ def open_pulsedev():
 
 
 def wait_state(want, timeout, poll=0.05):
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         s = rd('cnc/state')
         if s == want:
             return s
@@ -185,56 +186,6 @@ def drill_deadman():
     return 0 if ok else 1
 
 
-# --------------------------------------------------------------- rmmod
-
-def drill_rmmod():
-    print('=== rmmod/modprobe x3 with concurrent attr reads ===')
-    stop = threading.Event()
-    reads = {'n': 0, 'err': 0}
-
-    def reader():
-        while not stop.is_set():
-            for a in ('cnc/state', 'cnc/position', 'cnc/faults', 'head/hall_sensor'):
-                try:
-                    with open(G + a, 'rb') as f:
-                        f.read(64)
-                    reads['n'] += 1
-                except OSError:
-                    reads['err'] += 1      # expected while the module is out
-    th = threading.Thread(target=reader, daemon=True)
-    th.start()
-    t_mark = uptime()
-    ok = True
-    for i in range(3):
-        r1 = subprocess.run('rmmod glowforge', shell=True, capture_output=True, text=True)
-        gone = not os.path.exists(G + 'cnc/state')
-        r2 = subprocess.run('modprobe glowforge', shell=True, capture_output=True, text=True)
-        time.sleep(1.0)
-        back = os.path.exists(G + 'cnc/state') and rd('cnc/state') in ('idle', 'disabled')
-        print('cycle %d: rmmod rc=%d %s| unloaded=%s | modprobe rc=%d %s| back=%s state=%s'
-              % (i + 1, r1.returncode, r1.stderr.strip(), gone, r2.returncode,
-                 r2.stderr.strip(), back, rd('cnc/state') if back else '-'))
-        ok &= r1.returncode == 0 and gone and r2.returncode == 0 and back
-    stop.set()
-    th.join(2)
-    print('concurrent reads: %d ok, %d refused while unloaded' % (reads['n'], reads['err']))
-    bad = [ln for ln in dmesg_since(t_mark)
-           if any(k in ln for k in ('Oops', 'BUG', 'WARNING', 'Call trace', 'Unable to handle'))]
-    for ln in dmesg_since(t_mark):
-        if 'glowforge' in ln and ('probe' in ln or 'init' in ln or 'remove' in ln):
-            print('  dmesg: %s' % ln)
-    if bad:
-        ok = False
-        print('KERNEL COMPLAINTS:')
-        for ln in bad:
-            print('  ' + ln)
-    print('note: a module reload resets the analog config and the lid LED; the')
-    print('      controller re-applies its analog config at start, relight the lid')
-    print('      LED via /sys/class/leds/lid_led_*/target if wanted')
-    print('RMMOD %s' % ('PASS' if ok else 'FAIL'))
-    return 0 if ok else 1
-
-
 # --------------------------------------------------------------- decay
 
 def drill_decay():
@@ -310,11 +261,10 @@ def drill_led():
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ''
-    drills = {'deadman': drill_deadman, 'rmmod': drill_rmmod,
-              'decay': drill_decay, 'led': drill_led}
+    drills = {'deadman': drill_deadman, 'decay': drill_decay, 'led': drill_led}
     if mode == 'all':
         rc = 0
-        for name in ('decay', 'led', 'deadman', 'rmmod'):
+        for name in ('decay', 'led', 'deadman'):
             rc |= drills[name]()
             print()
         return rc

@@ -142,6 +142,70 @@ ACTION_TEXT = {
     ("button", "press"): "Press the button once.",
 }
 ACT_TIMEOUT_S = 180
+# What a button press made through Context.act is, as the test declares it
+# (None: an arm or a resume press, the arm press's policy).
+PRESS_KINDS = (None, "pause", "plain")
+# After a press the box may have made (its answer was lost), how long the
+# act watches for what the press does, whatever the act's own timeout,
+# counted from the moment the press's nonce was in hand (the client's own
+# wait for the answer is part of it): longer than the box can still make
+# that press (its nonce's life and its pulse, fixture.NONCE_LIFE_S +
+# PULSE_MAX_S), and no longer than a cut whose pause press was lost should
+# play on with nobody asked.
+SENT_PRESS_WAIT_S = 20.0
+# After such a press at an arm wait, how long past the box's last moment to
+# make it the button is still watched: the controller's read of a press.
+PRESS_READ_S = 0.5
+
+
+def withheld_wording(wording, press, why):
+    """The notice for a press the bench withheld. An arm or resume press is
+    the person's by policy, and the test's own words are for them. A pause
+    or plain press is withheld because the machine is not as the test
+    declared it, so the test's words no longer describe what a press does:
+    the notice says what the judgment found."""
+    if press is None:
+        return wording
+    found = why[why.find("(") + 1:why.rfind(")")] if "(" in why else why
+    return ("The bench held back its %s press: %s. Press the button only if you mean the press it "
+            "would be now." % (press, found))
+
+
+def press_withheld(fixture, press, fc):
+    """The kind of press the bench may not make, judged on the machine, or
+    None when it may. Judged before the box is asked and again right before
+    its request goes out (Context.act's judge). The arm press's policy: a
+    press that can arm a job or resume a paused one is the box's only where
+    the bench opted in (arm_press). No other press is made while the button
+    asks for one, or while it cannot be read: a controller breathes it white
+    only while a job waits for its arm or resume press (hw.button_asks). A
+    pause press takes the beam off and is the box's while the kernel reads
+    running; with the kernel not playing, or not read, it could resume or
+    arm, and is withheld. A plain press is the box's while the cooling
+    engine reads no armed window and the laser latch reads locked
+    (interlock_circuit bit 3: the lock holds the button latch set, which
+    the latch keeps over a press); with a window open, the latch unlocked,
+    or either not read, it is withheld."""
+    if fixture.arm_press:
+        return None
+    if press not in ("pause", "plain"):
+        return "arm or resume"
+    if hw.button_asks() is not False:
+        return "%s (the button asks for a press, or cannot be read: the press could arm or resume)" % press
+    if press == "pause":
+        if hw.sysfs_read("cnc/state") == "running":
+            return None
+        return "pause (the kernel is not playing: the press could resume or arm)"
+    try:
+        st, cs = fc.get("/cool/status")
+    except hw.HwError:
+        st, cs = None, None
+    if not (st == 200 and isinstance(cs, dict) and cs.get("armed") is False):
+        return "plain (an armed window is open, or the cooling engine does not say)"
+    ilk = hw.sysfs_int("cnc/interlock_circuit")
+    if ilk is None or not ilk & _baseline.LATCH_BIT:
+        return "plain (the laser latch does not read locked)"
+    return None
 # How long a live test waits for the operator to prove they are at the
 # machine by pressing its button. Generous: they may be setting up the
 # scrap, and nothing fires until it lands.
@@ -155,7 +219,7 @@ class Run:
         self.kind = kind          # 'test' | 'bench'
         self.id = id
         self.title = title
-        self.started = time.time()
+        self.started = time.monotonic()
         self.started_ts = now_ts()
         self.lines = []
         self.dropped = 0
@@ -164,14 +228,21 @@ class Run:
         self.answers = []
         self.unattended = False   # a fixture-run test: no prompt can be answered
         # The operator proved they are at the machine by pressing its
-        # button, so the bench actuator performs every press from there
-        # on. Set by Ctx.ready() when an actuator is up to take over.
+        # button, so the bench actuator makes the test's pause presses from
+        # there on (an arm or resume press stays the person's unless the
+        # bench opted in). Set by Ctx.ready() when an actuator is up.
         self.fixture_takeover = False
+        # The test's body has returned or raised: an arm-press thread the
+        # body started makes no press after it (press_lock orders the two).
+        self.body_ended = threading.Event()
+        self.press_lock = threading.Lock()
+        self.press_threads = []
         self.evidence = {}
         self.baseline_captured = None   # preserved state the post pass hands back
         self.aborted = threading.Event()
         self.finished = None      # {"result","message","duration_s"}
         self.released = False     # the fixture's release after the run has run
+        self.hand_opened = set()  # loops the operator was asked to open after the box failed to
         self.start_seq = None     # the place of the run's "start" record in the log
         self.fingerprint = None   # a test run's fingerprint and campaign, as its start record has them
         self.campaign_id = None
@@ -204,7 +275,7 @@ class Run:
             # the time since, not the time it took.
             "started": self.started_ts,
             "elapsed_s": (self.finished["duration_s"] if self.finished
-                          else int(time.time() - self.started)),
+                          else int(time.monotonic() - self.started)),
             "log": lines, "dropped": self.dropped, "prompt": prompt, "notice": notice,
             "finished": self.finished, "aborting": self.aborted.is_set(),
         }
@@ -288,10 +359,10 @@ class Context:
             raise Aborted("aborted")
 
     def sleep(self, seconds):
-        deadline = time.time() + seconds
-        while time.time() < deadline:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
             self.checkpoint()
-            time.sleep(min(0.25, max(0.0, deadline - time.time())))
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
 
     # -- operator ------------------------------------------------------
     def prompt(self, question, options=("Yes", "No")):
@@ -319,12 +390,14 @@ class Context:
 
         Where an actuator is up and wired to the button, the operator
         proves they are at the machine by pressing the machine's own
-        button, and the actuator then performs every press in the test.
-        A person doing timing-critical presses in the middle of a live
-        cut is how a press count becomes unknowable: a press that lands
-        late, or twice, cannot be told apart afterwards from the machine
-        misbehaving. The button does nothing at Idle, so this press is
-        only a presence check.
+        button, and the actuator then makes the test's pause presses. A
+        person doing timing-critical presses in the middle of a live cut is
+        how a press count becomes unknowable: a press that lands late, or
+        twice, cannot be told apart afterwards from the machine
+        misbehaving. A press that can arm a job or resume a paused one is
+        the arm press's, and stays the person's unless the bench opted in
+        (act, arm_press): presence is not consent to fire. The button does
+        nothing at Idle, so this press is only a presence check.
 
         With no actuator the operator does the presses and answers on the
         page, as before. With the run unattended there is nobody to
@@ -337,11 +410,12 @@ class Context:
         # two armed halves (the kill drill stops the controller and does it
         # again) reaches this twice, and asking a second time is friction
         # with nothing behind it: the operator proved presence a moment ago
-        # and the actuator is already making the presses. The setup line
-        # still goes up, because the second half may want the scrap moved.
+        # and the actuator is already making the pause presses. The setup
+        # line still goes up, because the second half may want the scrap
+        # moved.
         if self.run.fixture_takeover:
             self.notice(text)
-            self.log("READY: presence already proved this test; the bench has the presses")
+            self.log("READY: presence already proved this test; the bench makes the pause presses")
             return
 
         fixture = getattr(self.runner, "fixture", None) if self.runner is not None else None
@@ -352,7 +426,7 @@ class Context:
             edges = hw.ButtonEdges()
             self.notice(text + " Then press the button on the machine to start.")
             self.log("READY: waiting for the operator's press on the machine "
-                     "(the bench then does every press in this test)")
+                     "(the bench then makes the pause presses in this test)")
             try:
                 if edges.available:
                     pressed = edges.wait(1, PRESENCE_TIMEOUT_S, self.checkpoint)
@@ -375,7 +449,7 @@ class Context:
             self.evidence.setdefault("actions", []).append(
                 {"channel": "button", "state": "presence", "by": "operator",
                  "took_s": round(pressed, 2), "ts": now_ts()})
-            self.log("READY: operator present (press after %.1f s); the bench takes the presses", pressed)
+            self.log("READY: operator present (press after %.1f s); the bench makes the pause presses", pressed)
             return
 
         ans = self.prompt(text, ("Ready", "Cannot"))
@@ -395,12 +469,12 @@ class Context:
     def wait_for(self, cond, timeout, poll=0.25):
         """Poll `cond()` until true; the seconds it took, or None on
         timeout. Abort-aware. An error in cond counts as not yet."""
-        t0 = time.time()
-        while time.time() - t0 < timeout:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
             self.checkpoint()
             try:
                 if cond():
-                    return time.time() - t0
+                    return time.monotonic() - t0
             except Exception:  # noqa: BLE001 - a transient read error is "not yet"
                 pass
             time.sleep(poll)
@@ -410,20 +484,46 @@ class Context:
         """One of forgectrl's switch readings (lid, interlock_ok, ...)."""
         return (self.forgectrl.status().get("switches") or {}).get(name)
 
-    def act(self, channel, state, until=None, timeout=ACT_TIMEOUT_S, text="", fail=True, ms=None):
+    def act(self, channel, state, until=None, timeout=ACT_TIMEOUT_S, text="", fail=True, ms=None,
+            press=None):
         """A machine action by name: ("lid", "open"|"close"),
         ("interlock", "open"|"close"), ("button", "press"). The bench's
         actuator performs it when one covers the channel (the runner's
-        `fixture`; none exists yet); otherwise the operator does, told by
-        a standing notice, and the test watches the machine for the
-        result - the switch reaching the state, or `until()` true
-        (required for the button, whose press is proven by what it does).
-        `text` adds the test's own context after the action's wording.
-        Returns the seconds the action took; with fail=False a timeout
-        returns None instead of failing the test."""
+        `fixture`); otherwise the operator does, told by a standing
+        notice, and the test watches the machine for the result - the
+        switch reaching the state, or `until()` true (required for the
+        button, whose press is proven by what it does). `text` adds the
+        test's own context after the action's wording. Returns the seconds
+        the action took; with fail=False a timeout returns None instead of
+        failing the test.
+
+        A button press is the arm press's unless the test says what else it
+        is (`press`, judged on the machine at the press, press_withheld):
+        "pause", a press that pauses a job the kernel is playing, and
+        "plain", a press with no armed window open (a dark check's). The
+        actuator makes an arm press, and a resume press, only where the
+        bench opted in (arm_press); otherwise the operator is asked, and
+        an unattended run fails, since nobody is there to press. The kind
+        is judged again right before the box's request goes out, and a
+        press withheld there goes the same way.
+
+        A press the box may have made (its request went out and the answer
+        was lost: FixtureError.sent) is asked of nobody: a person asked then
+        could press a second time. What the press does decides, watched
+        until SENT_PRESS_WAIT_S after the press's nonce was in hand at most,
+        whatever `timeout` says, and a press not seen ends the test as the
+        harness's error.
+
+        A press withheld from the box is asked of the operator in words that
+        say what the judgment found (withheld_wording). A loop the operator
+        was asked to open because the box failed to (its answer lost, it may
+        hold the loop open as well) is closed by both: the box is asked, and
+        the operator is asked to restore it."""
         key = (channel, state)
         if key not in ACTION_TEXT:
             raise ValueError("unknown action %r" % (key,))
+        if press not in PRESS_KINDS or (press is not None and channel != "button"):
+            raise ValueError("unknown press kind %r for %s" % (press, channel))
         if until is None:
             if channel == "button":
                 raise ValueError("a button press needs `until`: what the press is expected to do")
@@ -445,11 +545,47 @@ class Context:
             self.log("ACT %s %s: WARNING the bench actuator took this test's presses and is now "
                      "gone - asking the operator instead; a press from here on is a person's",
                      channel, state)
-        if fixture is not None and fixture.covers(channel):
+        withheld = None
+        if fixture is not None and fixture.covers(channel) and channel == "button":
+            withheld = press_withheld(fixture, press, self.forgectrl)
+            if withheld is not None:
+                rec["withheld"] = withheld
+                self.log("ACT %s %s: the bench makes no %s press - asking the operator", channel, state,
+                         withheld)
+                if self.run.unattended:
+                    raise Failed("the test needs a press the bench may not make (%s) while running "
+                                 "unattended: declare the test live" % withheld)
+        lost = None
+        noticed = True
+        both = self.run.hand_opened
+        if fixture is not None and fixture.covers(channel) and withheld is None:
             self.log("ACT %s %s (fixture)", channel, state)
             rec["by"] = "fixture"
+            noticed = False
             try:
-                fixture.act(channel, state, ms)
+                if channel == "button":
+                    fixture.act(channel, state, ms, judge=lambda: press_withheld(fixture, press, self.forgectrl))
+                else:
+                    fixture.act(channel, state, ms)
+                if channel in both and state == "close":
+                    # a person holds this loop open too: the box's close
+                    # alone does not close it
+                    self.log("ACT %s %s: the operator was asked to open it as well - asking the operator "
+                             "to restore it", channel, state)
+                    rec["also"] = "operator"
+                    noticed = True
+                    self.notice(wording)
+            except _fixture.PressWithheld as e:
+                # judged again right before the request: the machine moved
+                # since the first judgment, and the box sent nothing
+                rec["by"], rec["withheld"] = "operator", e.why
+                self.log("ACT %s %s: the bench makes no %s press%s - asking the operator", channel, state, e.why,
+                         " [%s]" % e.error if e.error else "")
+                if self.run.unattended:
+                    raise Failed("the test needs a press the bench may not make (%s) while running "
+                                 "unattended: declare the test live" % e.why)
+                noticed = True
+                self.notice(withheld_wording(wording, press, e.why))
             except _fixture.FixtureError as e:
                 rec["fixture_error"] = str(e)
                 if self.run.unattended:
@@ -457,21 +593,35 @@ class Context:
                     # here, as the harness's failure, not the machine's
                     self.log("ACT %s %s: fixture failed (%s) - unattended, nobody to ask", channel, state, e)
                     raise
-                # the box did not do it: the operator is asked instead,
-                # and the record says so
-                self.log("ACT %s %s: fixture failed (%s) - asking the operator", channel, state, e)
-                rec["by"] = "operator"
-                self.notice(wording)
+                if channel == "button" and getattr(e, "sent", False):
+                    self.log("ACT %s %s: the fixture's press may have been made (%s) - asking nobody, "
+                             "watching for what it does", channel, state, e)
+                    lost = e
+                else:
+                    # the box did not do it, or its answer was lost: the
+                    # operator is asked instead, and the record says so
+                    self.log("ACT %s %s: fixture failed (%s) - asking the operator", channel, state, e)
+                    rec["by"] = "operator"
+                    if state == "open":
+                        both.add(channel)       # a person opens it; the box may hold it open as well
+                    noticed = True
+                    self.notice(wording)
         else:
-            self.notice(wording)
+            self.notice(wording if withheld is None else withheld_wording(wording, press, withheld))
+        if lost is not None:
+            timeout = min(timeout, SENT_PRESS_WAIT_S - fixture.nonce_age())
         try:
             dt = self.wait_for(until, timeout)
         finally:
-            if rec["by"] == "operator":
+            if noticed:
                 self.clear_notice()
+        if dt is not None and state == "close":
+            both.discard(channel)
         rec["took_s"] = round(dt, 2) if dt is not None else None
         if dt is None:
             self.log("ACT %s %s: not seen within %d s", channel, state, timeout)
+            if lost is not None:
+                raise lost
             if fail:
                 raise Failed("%s %s was not seen on the machine within %d s" % (channel, state, timeout))
             return None
@@ -490,21 +640,17 @@ class Context:
         controller), and a press then lands before the job waits for it
         and is lost.
 
-        The fixture presses where the bench took this test's presses (or
-        opted in standing); otherwise the notice goes up for a person,
-        who is looking at the same prompt. A press the fixture reports
-        failed while the button went out was taken all the same, and no
-        notice goes up for it. Returns True when the fixture pressed."""
+        The fixture presses only where the bench opted in (arm_press, the
+        button channel enabled): a presence press is not consent to fire.
+        Otherwise the notice goes up for a person, who is looking at the
+        same prompt. A press the fixture reports failed while the button
+        went out was taken all the same, and no notice goes up for it.
+        Returns True when the fixture pressed."""
         fixture = getattr(self.runner, "fixture", None) if self.runner is not None else None
         rec = {"channel": "button", "state": "arm", "by": "operator", "ts": now_ts()}
         self.evidence.setdefault("actions", []).append(rec)
-        opted_in = fixture is not None and fixture.covers("button") and \
-            (fixture.arm_press or self.run.fixture_takeover)
+        opted_in = fixture is not None and fixture.covers("button") and fixture.arm_press
         if not opted_in:
-            if self.run.fixture_takeover:
-                rec["fixture_lost"] = True
-                self.log("ARM: WARNING the bench actuator took this test's presses and is now "
-                         "gone - asking the operator for the arm press")
             self.notice(text)
             self._clear_when_taken()
             return False
@@ -512,8 +658,9 @@ class Context:
             fixture.act("button", "press")
         except _fixture.FixtureError as e:
             rec["fixture_error"] = str(e)
-            if self._press_taken(rec, e):
+            if self._press_taken(rec, e, fixture):
                 return rec["by"] == "fixture"
+            self.checkpoint()
             self.log("ARM press: fixture failed (%s) - asking the operator", e)
             self.notice(text)
             self._clear_when_taken()
@@ -522,7 +669,7 @@ class Context:
         self.log("ARM press by the fixture, at the machine's own press prompt")
         return True
 
-    def _press_taken(self, rec, err):
+    def _press_taken(self, rec, err, fixture=None):
         """After the box reported a failed press of a lit button: True when
         the button is out, so the controller took a press. No notice goes
         up then, because it would ask for a second press, and a press during
@@ -531,7 +678,19 @@ class Context:
         pressed and its reply was lost). After a refusal, a failed lookup
         or a failed connect the box made no press, and the record stays as
         it was: the press was a person's. A button still lit, or
-        unreadable, is False: the operator is asked."""
+        unreadable, is False: the operator is asked.
+
+        A press whose request went out may still be made by the box, until
+        its nonce's life and its pulse are over (the fixture's pulse_left):
+        the button is watched that long, and PRESS_READ_S more for the
+        controller to take the press, before it is read as still lit, so
+        nobody is asked for a press the box is making. An Abort ends the
+        watch."""
+        if getattr(err, "sent", False) and fixture is not None:
+            until = time.monotonic() + fixture.pulse_left() + PRESS_READ_S
+            while hw.button_asks() is not False and time.monotonic() < until:
+                if self.run.aborted.wait(0.05):
+                    break
         if hw.button_asks() is not False:
             return False
         if getattr(err, "sent", False):
@@ -564,14 +723,14 @@ class Context:
                 return run.finished is None and (run.notice or {}).get("id") == nid
 
         def watch():
-            t0 = time.time()
+            t0 = time.monotonic()
             while hw.button_asks() is not True:
-                if not standing() or time.time() - t0 > lit_timeout:
+                if not standing() or time.monotonic() - t0 > lit_timeout:
                     return
                 if run.aborted.wait(0.05):
                     return
             while hw.button_asks() is not False:
-                if not standing() or time.time() - t0 > lit_timeout + ARM_PRESS_WAIT_S:
+                if not standing() or time.monotonic() - t0 > lit_timeout + ARM_PRESS_WAIT_S:
                     return
                 if run.aborted.wait(0.05):
                     return
@@ -594,51 +753,108 @@ class Context:
         to the arm wait; a card that settles the coolant first takes
         minutes) and presses once, recorded as the fixture's; if the
         button never lights, or the press fails with the button still lit,
-        the notice goes up for a person. Returns True when the fixture has
-        been asked."""
+        the notice goes up for a person. A presence press is not consent to
+        fire: it opts nothing in. The thread lives only as long as the
+        test's body (end_body): it makes no press once the body has
+        returned or raised, so a test that failed before its arm wait
+        leaves no press for the next job that reaches one. Returns True
+        when the fixture has been asked."""
         fixture = getattr(self.runner, "fixture", None) if self.runner is not None else None
         rec = {"channel": "button", "state": "arm", "by": "operator", "ts": now_ts()}
         self.evidence.setdefault("actions", []).append(rec)
-        # A presence press at the ready gate hands this test's presses to
-        # the bench, whatever the config's standing opt-in says: the
-        # operator has already proved they are at the machine, which is
-        # the thing the opt-in exists to establish.
-        opted_in = fixture is not None and fixture.covers("button") and \
-            (fixture.arm_press or self.run.fixture_takeover)
+        opted_in = fixture is not None and fixture.covers("button") and fixture.arm_press
         if not opted_in:
-            if self.run.fixture_takeover:
-                rec["fixture_lost"] = True
-                self.log("ARM: WARNING the bench actuator took this test's presses and is now "
-                         "gone - asking the operator for the arm press")
             self.notice(text)
             self._clear_when_taken()
             return False
         self.log("ARM: the fixture presses when the button lights (the bench's arm_press opt-in)")
+        run = self.run
+
+        def lit_wait():
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < lit_timeout:
+                if run.body_ended.is_set() or run.aborted.is_set():
+                    return None
+                try:
+                    if hw.button_asks():
+                        return time.monotonic() - t0
+                except Exception:  # noqa: BLE001 - a transient read error is "not yet"
+                    pass
+                run.body_ended.wait(0.25)
+            return None
 
         def press():
-            lit = self.wait_for(hw.button_asks, lit_timeout)
+            lit = lit_wait()
             if lit is None:
+                # the wait ended with the body or an Abort: nobody is asked
+                if run.aborted.is_set() or run.body_ended.is_set():
+                    return
                 self.log("ARM: the button never lit within %d s - asking the operator", lit_timeout)
                 self.notice(text)
                 self._clear_when_taken()
                 return
-            try:
-                fixture.act("button", "press")
-            except _fixture.FixtureError as e:
-                rec["fixture_error"] = str(e)
-                if self._press_taken(rec, e):
-                    rec["took_s"] = round(lit, 2)
+            with run.press_lock:
+                if run.body_ended.is_set():
+                    self.log("ARM: the test's body ended before the press; the fixture makes none")
                     return
-                self.log("ARM press: fixture failed (%s) - asking the operator", e)
-                self.notice(text)
-                self._clear_when_taken()
-                return
+                try:
+                    fixture.act("button", "press")
+                except _fixture.FixtureError as e:
+                    rec["fixture_error"] = str(e)
+                    if self._press_taken(rec, e, fixture):
+                        rec["took_s"] = round(lit, 2)
+                        return
+                    if run.aborted.is_set():
+                        return              # an Abort: nobody is asked
+                    self.log("ARM press: fixture failed (%s) - asking the operator", e)
+                    self.notice(text)
+                    self._clear_when_taken()
+                    return
             rec["by"] = "fixture"
             rec["took_s"] = round(lit, 2)
             self.log("ARM press by the fixture, button lit after %.1f s", lit)
 
-        threading.Thread(target=press, daemon=True, name="forgetest-arm-press").start()
+        th = threading.Thread(target=press, daemon=True, name="forgetest-arm-press")
+        run.press_threads.append(th)
+        th.start()
         return True
+
+    PRESS_JOIN_S = 10.0       # a press under way: the box's request and its spacing
+    # The longest the box can still hold, or still make, a press this run
+    # asked for: its pulse (the clamp is 500 ms) and, for a press whose
+    # answer was lost, the rest of its nonce's life before it.
+    PULSE_HOLD_S = _fixture.NONCE_LIFE_S + _fixture.PULSE_MAX_S + 0.5
+
+    def end_body(self):
+        """The test's body has returned or raised: no arm-press thread it
+        started presses after this. A press under way is waited for whole,
+        so the fixture's release after the run never meets a press in
+        flight or a closure still held: its request (press_lock, which the
+        thread holds through the box's request, its 409 wait and its
+        retries, each bounded by the client's timeouts), the thread's end
+        (PRESS_JOIN_S), and the box's pulse (the fixture's pulse_left, at
+        most PULSE_HOLD_S). A press whose answer was lost is one the box can
+        still make until its nonce expires, and a loop request whose answer
+        was lost is one it can still serve that long: the wait covers both
+        (the fixture module's unanswered_left, which outlives the client: a
+        probe during the test replaces the runner's, or finds the box
+        gone)."""
+        run = self.run
+        with run.press_lock:
+            run.body_ended.set()
+        for th in list(run.press_threads):
+            th.join(self.PRESS_JOIN_S)
+            if th.is_alive():
+                self.log("ARM: an arm-press thread did not end within %.0f s", self.PRESS_JOIN_S)
+        fixture = getattr(self.runner, "fixture", None) if self.runner is not None else None
+
+        def left():
+            return max(fixture.pulse_left() if fixture is not None else 0.0, _fixture.unanswered_left())
+        deadline = time.monotonic() + self.PULSE_HOLD_S
+        wait = left()
+        while wait > 0 and time.monotonic() < deadline:
+            time.sleep(min(wait, 0.05))
+            wait = left()
 
     # -- hardware ------------------------------------------------------
     @property
@@ -785,8 +1001,8 @@ class Takeover:
                 hw.sysfs_write("cnc/stop", "1")         # a controlled stop: no step lost
             except OSError as e:
                 self.log("takeover: WARNING could not stop the program: %s" % e)
-            deadline = time.time() + self.STOP_IDLE_S
-            while hw.sysfs_read("cnc/state") == "running" and time.time() < deadline:
+            deadline = time.monotonic() + self.STOP_IDLE_S
+            while hw.sysfs_read("cnc/state") == "running" and time.monotonic() < deadline:
                 time.sleep(0.1)
             if hw.sysfs_read("cnc/state") == "running":
                 self.log("takeover: a program still plays after the stop: the saved attributes are left "
@@ -881,8 +1097,8 @@ class Takeover:
         self.write_marker()
         rc, out = hw.initd("forgectrl", "stop")
         log("takeover: forgectrl stop -> rc %s" % rc)
-        deadline = time.time() + 15
-        while time.time() < deadline and self.holders():
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and self.holders():
             time.sleep(0.5)
         left = self.holders()
         if left:
@@ -985,7 +1201,7 @@ class Takeover:
     def wait_offline(self):
         """The cloud client's pid once it listens on the offline socket, or
         None after OFFLINE_BACK_S."""
-        deadline = time.time() + self.OFFLINE_BACK_S
+        deadline = time.monotonic() + self.OFFLINE_BACK_S
         while True:
             try:
                 st, m = hw.Forgectrl().get("/mode")
@@ -994,7 +1210,7 @@ class Takeover:
             pid = m.get("pid") if st == 200 and isinstance(m, dict) else None
             if hw.listens_on(pid, _baseline.OFFLINE_SOCKET):
                 return pid
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 return None
             time.sleep(0.5)
 
@@ -1784,7 +2000,7 @@ class Runner:
                              "and every export is refused until the campaign is reset" % (run.id, again))
                 self.refused_charges.extend(run.safety_pending)
             run.finished = {"result": _campaign.ERROR, "message": message,
-                            "duration_s": int(time.time() - run.started)}
+                            "duration_s": int(time.monotonic() - run.started)}
 
     def _judge_and_record(self, t, run, campaign):
         ctx = Context(run, self, t)
@@ -1796,7 +2012,10 @@ class Runner:
         captured = None
         try:
             captured = self._baseline_pre(run, mode=t.mode)
-            t.fn(ctx)
+            try:
+                t.fn(ctx)
+            finally:
+                ctx.end_body()          # before the post pass and the fixture's release
             if run.aborted.is_set():
                 result, message = _campaign.ABORTED, "aborted"
         except NotRun as e:
@@ -1851,7 +2070,7 @@ class Runner:
                     " (the run was %s: %s)" % (result, message) if message else "")
                 result = _campaign.FAIL
             fixture_error = not_run = False
-        duration = int(time.time() - run.started)
+        duration = int(time.monotonic() - run.started)
         run.log("result %s%s" % (result, (": " + message) if message else ""))
         # whether the run was earned on the pins as built, judged before it
         # and after it: a result that was not is never inherited
@@ -1964,7 +2183,7 @@ class Runner:
         # runner keeps it (_retry_refused)
         self._retry_safety(run)
         self.refused_charges.extend(run.safety_pending)
-        duration = int(time.time() - run.started)
+        duration = int(time.monotonic() - run.started)
         result = "ABORTED" if run.aborted.is_set() else ("OK" if rc == 0 else "EXIT %s" % rc)
         run.log("bench %s finished: %s" % (tool["id"], result))
         run.finished = {"result": result, "message": message, "duration_s": duration, "rc": rc}

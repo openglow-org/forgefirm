@@ -57,7 +57,7 @@ def reach(family, addr, port, udp):
     s = socket.socket(socket.AF_INET6 if family == 6 else socket.AF_INET,
                       socket.SOCK_DGRAM if udp else socket.SOCK_STREAM)
     s.settimeout(4.0)
-    t0 = time.time()
+    t0 = time.monotonic()
     try:
         if udp:
             s.sendto(b"x", (addr, port))
@@ -69,7 +69,7 @@ def reach(family, addr, port, udp):
     except OSError as e:
         out = word(e)
     s.close()
-    return [out, round(time.time() - t0, 2)]
+    return [out, round(time.monotonic() - t0, 2)]
 
 
 if mode == "spin":
@@ -330,9 +330,9 @@ def platform(ctx):
                   "the probe is in %r", _read("/proc/%d/cgroup" % spin.pid).strip())
         ctx.check("Uid:\t%d\t%d" % (uid, uid) in _read("/proc/%d/status" % spin.pid), "the probe is not uid %d", uid)
         ctx.sleep(1.0)
-        u0, t0 = _flat(PROBE_GROUP + "/cpu.stat")["usage_usec"], time.time()
+        u0, t0 = _flat(PROBE_GROUP + "/cpu.stat")["usage_usec"], time.monotonic()
         ctx.sleep(3.0)
-        u1, t1 = _flat(PROBE_GROUP + "/cpu.stat")["usage_usec"], time.time()
+        u1, t1 = _flat(PROBE_GROUP + "/cpu.stat")["usage_usec"], time.monotonic()
         share = (u1 - u0) / 1e6 / (t1 - t0)
         throttled = _flat(PROBE_GROUP + "/cpu.stat").get("nr_throttled", 0)
         ctx.log("a spinning probe under cpu.max 5%%: %.1f%% of the core, throttled %d times", share * 100, throttled)
@@ -649,9 +649,9 @@ while True:
         # A poll that waits: it comes back with an event as soon as there
         # is one, and with nothing when its two seconds are up.
         ask = {"wait": 2} if place is None else {"since": place, "wait": 2}
-        began = time.time()
+        began = time.monotonic()
         st, ans = api("POST", "/v0/events", ask)
-        took = round(time.time() - began, 2)
+        took = round(time.monotonic() - began, 2)
         if st == 200:
             place = ans.get("next")
             seen = (seen + [e.get("event") for e in ans.get("events") or []])[-40:]
@@ -743,8 +743,8 @@ def _forgeext(*args, wait=120):
 
 
 def _until(ctx, cond, seconds, poll=0.25):
-    end = time.time() + seconds
-    while time.time() < end:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
         v = cond()
         if v:
             return v
@@ -861,7 +861,7 @@ def _frozen(id_):
 
 
 @test("exthost.armed-freeze", title="A package's service is frozen for the armed window",
-      subsystem="exthost", kind="operator", hardware="takeover", est_min=6,
+      subsystem="exthost", kind="live", hardware="takeover", est_min=6,
       covers=[("forgeext", "src/super.*"), ("forgeext", "src/run.*"), ("forgeext", "src/machine.*"),
               ("forgeext", "src/cgroup.*"), ("forgectrl", "src/cool.*"), ("forgectrl", "src/cam.*"),
               ("forgectrl", "src/main.c")],
@@ -913,7 +913,7 @@ def armed_freeze(ctx):
         while not stop.is_set():
             st_, cool = fc.get("/cool/status")
             armed = bool(cool.get("armed")) if st_ == 200 and isinstance(cool, dict) else None
-            samples.append((time.time(), armed, _frozen(REF_ID), _read(beat_path).strip(),
+            samples.append((time.monotonic(), armed, _frozen(REF_ID), _read(beat_path).strip(),
                             (_svc(REF_ID) or {}).get("pid"), latch_locked(),
                             (hw.sysfs_read("cnc/state") or "").startswith("running")))
             # One background capture from inside the window. The refusal is

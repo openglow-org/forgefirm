@@ -140,8 +140,8 @@ class Forgectrl:
         return body
 
     def wait_idle(self, timeout=60.0, poll=0.5, abort=None):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             if abort and abort():
                 raise HwError("aborted while waiting for idle")
             try:
@@ -293,7 +293,7 @@ class AccelSampler:
     def _loop(self):
         while not self._stop.is_set():
             v = head_accel_read(self.dir)
-            now = time.time()
+            now = time.monotonic()
             if v is None:
                 self.errors += 1
                 self.error_times.append(now)
@@ -305,7 +305,7 @@ class AccelSampler:
 
     def p2p(self, t0, t1=None):
         """(p2p_x, p2p_y, n) over [t0, t1]; (0, 0, 0) with no samples."""
-        t1 = time.time() if t1 is None else t1
+        t1 = time.monotonic() if t1 is None else t1
         xs = [x for t, x, _y in self.samples if t0 <= t <= t1]
         ys = [y for t, _x, y in self.samples if t0 <= t <= t1]
         if not xs:
@@ -314,7 +314,7 @@ class AccelSampler:
 
     def window_errors(self, t0, t1=None):
         """How many reads failed in [t0, t1]."""
-        t1 = time.time() if t1 is None else t1
+        t1 = time.monotonic() if t1 is None else t1
         return sum(1 for t in self.error_times if t0 <= t <= t1)
 
     def moved(self, t0, t1=None):
@@ -418,6 +418,33 @@ def switches_device():
     return None
 
 
+SW_INTERLOCK = 5            # EV_SW code 5: the remote-interlock loop reads open
+SW_INTERLOCK_LATCH = 6      # EV_SW code 6: the interlock latch is set (LASER_ON blocked)
+
+
+def switch_bits():
+    """The switches' current EV_SW state as a bitmap (bit n is code n), read
+    with EVIOCGSW from the device the switches_device() names, without a
+    grab; None when there is no device or it cannot be read."""
+    dev = switches_device()
+    if not dev:
+        return None
+    try:
+        import fcntl
+        fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except (ImportError, OSError):
+        return None
+    try:
+        buf = bytearray(8)
+        # EVIOCGSW(len) = _IOC(_IOC_READ, 'E', 0x1b, len)
+        fcntl.ioctl(fd, (2 << 30) | (len(buf) << 16) | (ord("E") << 8) | 0x1b, buf, True)
+        return int.from_bytes(bytes(buf), "little")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 class ButtonEdges:
     """The button as edges, from the switches' input events. A press is an
     event however short it is, so nothing has to be held long enough for a
@@ -446,7 +473,7 @@ class ButtonEdges:
         0 released), or None at the timeout. checkpoint() is called about
         every 0.1 s (an abort raises out of it)."""
         size = self.EVENT.size
-        t0 = time.time()
+        t0 = time.monotonic()
         while True:
             # The events already read come first: a short press arrives
             # with its release in one read, and the release is the next
@@ -455,8 +482,8 @@ class ButtonEdges:
                 _sec, _usec, typ, code, val = self.EVENT.unpack_from(self.pending, 0)
                 self.pending = self.pending[size:]
                 if typ == EV_SW and code == SW_BUTTON and val == value:
-                    return time.time() - t0
-            if time.time() - t0 >= timeout:
+                    return time.monotonic() - t0
+            if time.monotonic() - t0 >= timeout:
                 return None
             if checkpoint:
                 checkpoint()
@@ -802,10 +829,10 @@ class Grbl:
         return lines
 
     def wait_response(self, timeout):
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         lines = []
         self.sock.settimeout(0.2)
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             try:
                 d = self.sock.recv(4096)
                 if not d:
@@ -837,19 +864,19 @@ class Grbl:
         self._recv()
         self._take_report()                 # stale: predates this '?'
         self.send_raw(b"?")
-        deadline = time.time() + self.timeout
-        resend = time.time() + 0.5
+        deadline = time.monotonic() + self.timeout
+        resend = time.monotonic() + 0.5
         self.sock.settimeout(0.2)
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             try:
                 d = self.sock.recv(4096)
                 if d:
                     self.buf += d
             except socket.timeout:
                 pass
-            if time.time() >= resend:
+            if time.monotonic() >= resend:
                 self.send_raw(b"?")
-                resend = time.time() + 0.5
+                resend = time.monotonic() + 0.5
             rep = self._take_report()
             if rep is not None:
                 return parse_report(rep)

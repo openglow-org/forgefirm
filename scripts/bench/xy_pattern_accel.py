@@ -189,8 +189,8 @@ def put_mode(value):
         fail("settings write refused: %s %s" % (st, body))
     mode = int(value) if value else MODE_UNSET
     time.sleep(3)
-    t0 = time.time()
-    while time.time() - t0 < 180:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 180:
         m = fc_get("/mode")
         if m.get("controller") == "running" and m.get("motion") == "verified" and sysfs("cnc/x_mode") == str(mode):
             time.sleep(2)
@@ -234,13 +234,13 @@ def settle(g=None, timeout=SETTLE_S):
     instant between lines). True once it has stopped; False, said loudly,
     when it has not, and then nothing that needs it at rest may be put
     back."""
-    end = time.time() + timeout
+    end = time.monotonic() + timeout
     still = 0
     while True:
         still = still + 1 if machine_still(g) else 0
         if still >= 2:
             return True
-        if time.time() >= end:
+        if time.monotonic() >= end:
             print("WARNING: the machine did not stop within %.0f s: what needs it at rest is NOT "
                   "put back" % timeout, flush=True)
             return False
@@ -285,8 +285,8 @@ class Grbl:
         self.s.sendall((line + "\n").encode())
         self.s.settimeout(timeout)
         buf = ""
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             try:
                 buf += self.s.recv(4096).decode(errors="replace")
             except socket.timeout:
@@ -299,8 +299,8 @@ class Grbl:
         self.s.sendall(b"?")
         self.s.settimeout(1.0)
         buf = ""
-        end = time.time() + 1.0
-        while time.time() < end and ">" not in buf:
+        end = time.monotonic() + 1.0
+        while time.monotonic() < end and ">" not in buf:
             try:
                 buf += self.s.recv(4096).decode(errors="replace")
             except socket.timeout:
@@ -323,8 +323,8 @@ class Grbl:
         t_run = t_idle = None
         peak = 0.0
         pos = None
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             st, pos, fs = self.status()
             now = time.monotonic()
             peak = max(peak, fs)
@@ -428,8 +428,8 @@ def run_pattern(mode, home):
                      "cooled")
         g.cmd("G90")
         time.sleep(1.0)
-        end = time.time() + 20
-        while time.time() < end and fc_get("/status").get("state") != "idle":
+        end = time.monotonic() + 20
+        while time.monotonic() < end and fc_get("/status").get("state") != "idle":
             time.sleep(0.5)
         k1 = fc_get("/status").get("pos") or {}
         und1 = int(sysfs("cnc/underruns"))

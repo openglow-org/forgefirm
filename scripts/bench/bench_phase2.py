@@ -47,8 +47,8 @@ def sc(ctx, n):
     return int(re.search(rf"sc{n}=([0-9a-f]{{8}})", ctx).group(1), 16)
 
 def wait_state(target, timeout=15):
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         s = state()
         if s == target: return s
         time.sleep(0.05)
@@ -135,8 +135,8 @@ clear_data()
 wr("streaming", 1)
 feed(0x00, SEC)
 wr("run", 1)
-t0 = time.time(); ok = True
-while time.time() - t0 < 5:
+t0 = time.monotonic(); ok = True
+while time.monotonic() - t0 < 5:
     feed(0x00, SEC // 4)
     if state() != "running":
         ok = False

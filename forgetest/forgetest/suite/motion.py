@@ -57,8 +57,8 @@ def cpu_percent(ctx, pid, window):
 
 
 def wait_state(ctx, g, prefix, timeout):
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         ctx.checkpoint()
         st = g.status_report()
         if st["state"].startswith(prefix):
@@ -94,12 +94,12 @@ def wait_idle(ctx, g, timeout=30.0, poll=0.05, start_s=START_S, since=None):
     the total is read as the wait begins."""
     peak = 0.0
     states = []
-    t0 = time.time()
+    t0 = time.monotonic()
     deadline = t0 + timeout
     total0 = since if since is not None else _program_total()
     started = False
     st = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         ctx.checkpoint()
         st = g.status_report()
         state = st["state"]
@@ -118,7 +118,7 @@ def wait_idle(ctx, g, timeout=30.0, poll=0.05, start_s=START_S, since=None):
             started = total0 is not None and total is not None and total != total0
         if state.startswith("Idle") and started:
             return peak, states, st
-        if not started and time.time() - t0 >= start_s:
+        if not started and time.monotonic() - t0 >= start_s:
             return peak, states + ["NOSTART"], st
         time.sleep(poll)
     return peak, states + ["TIMEOUT"], st
@@ -298,7 +298,7 @@ def jog_roundtrip(ctx):
         kstate = hw.sysfs_read("cnc/state")
         ctx.check(kstate == "running", "the kernel was %s at the ^X: the move had ended before it", kstate)
         g.realtime(0x18)
-        t_x = time.time()
+        t_x = time.monotonic()
         # The stop: the kernel leaves running, polled at 5 ms. Each sample
         # is the time after the ^X, the state, the bytes played and the
         # bytes handed (the position record).
@@ -306,14 +306,14 @@ def jog_roundtrip(ctx):
         while True:
             st = hw.sysfs_read("cnc/state")
             pos = _kernel_position()
-            t = time.time() - t_x
+            t = time.monotonic() - t_x
             samples.append((t, st, pos[3], pos[4]))
             if st != "running" or t > 1.0:
                 break
             time.sleep(0.005)
         state = None
         end = t_x + 2.0
-        while time.time() < end:
+        while time.monotonic() < end:
             state = g.status_report()["state"]
             if state.startswith("Alarm"):
                 break
@@ -330,7 +330,7 @@ def jog_roundtrip(ctx):
 
         # The read-back ends inside a second of the reset, and the core's
         # re-init flushes what it has read: the unlock goes after both.
-        ctx.sleep(max(0.0, t_x + 2.0 - time.time()))
+        ctx.sleep(max(0.0, t_x + 2.0 - time.monotonic()))
         text = g.drain()
         r = g.command("$X")
         text += "\n".join(r) + "\n"
@@ -480,11 +480,11 @@ def jog_roundtrip(ctx):
                 ("X max-rate 60mm", "$J=G91X60F12000", "$J=G91X-60F12000"),
                 ("diag 40mm", "$J=G91X40Y40F8000", "$J=G91X-40Y-40F8000")):
             for jog in (out, back):
-                t0 = time.time()
+                t0 = time.monotonic()
                 r = g.command(jog)
                 ctx.check(not any(x.startswith("error") for x in r), "%s: jog refused: %s", name, r)
                 peak, states, _ = wait_idle(ctx, g)
-                t1 = time.time()
+                t1 = time.monotonic()
                 p2px, p2py, n = accel.p2p(t0, t1)
                 leg = "out" if jog == out else "back"
                 ctx.log("%s %s: peak %.0f mm/min, states %s; accel p2p x=%d y=%d over %d samples",
@@ -579,14 +579,14 @@ def set_xy_mode(ctx, fc, value):
               "the controller did not come back after the xy_microsteps write (/mode: %s)", body)
     ctx.check(_baseline.wait_controller_configured(ctx.log, body, xy_mode=mode),
               "the controller came back but did not apply its x%d config", mode)
-    end = time.time() + _baseline.GRBL_PORT_S
+    end = time.monotonic() + _baseline.GRBL_PORT_S
     while True:
         ctx.checkpoint()
         try:
             with hw.Grbl():
                 return body
         except OSError:
-            if time.time() > end:
+            if time.monotonic() > end:
                 raise Failed("the Grbl port did not answer within %d s of the restart"
                              % _baseline.GRBL_PORT_S)
             time.sleep(1.0)
@@ -648,7 +648,7 @@ def microstep_modes(ctx):
 
                 start = g.status_report()["MPos"]
                 k0 = kernel_xy_mm(ctx)
-                t0 = time.time()
+                t0 = time.monotonic()
                 rr = g.command("$J=G91X40F12000")
                 ctx.check(not any(x.startswith("error") for x in rr), "x%d: jog refused: %s", mode, rr)
                 peak, states, _ = wait_idle(ctx, g, 30)
@@ -668,7 +668,7 @@ def microstep_modes(ctx):
                 peak2, states, _ = wait_idle(ctx, g, 30)
                 ctx.check(ran(states), "x%d: the jog back did not run to Idle: %s", mode, states)
                 machine_idle(ctx)
-                t1 = time.time()
+                t1 = time.monotonic()
                 final = g.status_report()["MPos"]
                 drift = abs(final[0] - start[0])
                 p2px, p2py, n = accel.p2p(t0, t1)
@@ -734,8 +734,8 @@ def _liveness_verdict(ctx, fc, ev):
         ctx.sleep(2)
         st, body = fc.post("/controller/start")
         ctx.check(st == 200, "POST /controller/start -> %s", st)
-        t0 = time.time()
-        while time.time() - t0 < 60:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 60:
             ctx.sleep(1)
             st, m = fc.get("/mode")
             if isinstance(m, dict) and m.get("controller") == "running":
@@ -792,8 +792,8 @@ def _liveness_masked_restart(ctx, fc, ev):
     rc, out = hw.initd("forgectrl", "restart")
     ctx.check(rc == 0, "forgectrl restart -> rc %s", rc)
     m = None
-    t0 = time.time()
-    while time.time() - t0 < 150:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 150:
         ctx.checkpoint()
         try:
             st, m = fc.get("/mode")
@@ -805,9 +805,9 @@ def _liveness_masked_restart(ctx, fc, ev):
         ctx.sleep(1)
     # The probe's own line reaches the file through rsyslog a moment after
     # the supervisor reports its verdict: wait for it, briefly.
-    t1 = time.time()
+    t1 = time.monotonic()
     lines = _probe_lines(FORGECTRL_LOG, off)
-    while not lines and time.time() - t1 < 10:
+    while not lines and time.monotonic() - t1 < 10:
         ctx.sleep(0.5)
         lines = _probe_lines(FORGECTRL_LOG, off)
     for ln in lines:
@@ -837,8 +837,8 @@ def _wait_controller(ctx, fc, states, timeout, motion=None):
     running one, the motion verdict is `motion` when given). Tolerates a
     daemon that is still coming up. Returns the last document read."""
     m = {}
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         try:
             st, m = fc.get("/mode")
@@ -894,7 +894,7 @@ def _kill_safing(t0, seconds=KILL_SAFING_S):
     seen = []
     unlocked = False
     end = t0 + seconds
-    while time.time() < end:
+    while time.monotonic() < end:
         st = hw.sysfs_read("cnc/state")
         ilk = hw.sysfs_int("cnc/interlock_circuit")
         if ilk is None or not ilk & (1 << 3):
@@ -902,7 +902,7 @@ def _kill_safing(t0, seconds=KILL_SAFING_S):
         if st is not None and (not seen or seen[-1] != st):
             seen.append(st)
         if left_at is None and st is not None and st != "running":
-            left_at = round(time.time() - t0, 3)
+            left_at = round(time.monotonic() - t0, 3)
             try:
                 left_pos = list(_kernel_position())
             except (OSError, struct.error):
@@ -1046,12 +1046,13 @@ def deadman(ctx):
         g.command("G91")
         g.command("G1X30F300", timeout=0.5)
         ctx.sleep(1.0)
-        t_kill = time.time()
+        t_kill = time.monotonic()
+        t_kill_wall = time.time()           # wall clock: against the supervisor's log stamp (reap_s)
         _os.kill(pid0, _signal.SIGKILL)
         safing = _kill_safing(t_kill)
         ctx.log("SIGKILL sent to controller pid %d mid-move; the kernel after it: %s", pid0, safing)
     unlocked_seen = safing["latch_unlocked_seen"]
-    while time.time() - t_kill < 15:
+    while time.monotonic() - t_kill < 15:
         if not latch_locked():
             unlocked_seen = True
         st, m = fc.get("/mode")
@@ -1059,12 +1060,12 @@ def deadman(ctx):
             break
         ctx.sleep(0.2)
     m1 = wait_running(30)
-    respawn_s = round(time.time() - t_kill, 1)
+    respawn_s = round(time.monotonic() - t_kill, 1)
     # The reap's time, from the supervisor's own line against the kill:
     # recorded, so the end state the window saw can be read against it.
     exited = _log_lines(FORGECTRL_LOG, log_kill, "controller exited")
     t_reap = _line_epoch(exited[0]) if exited else None
-    safing["reap_s"] = round(t_reap - t_kill, 3) if t_reap is not None else None
+    safing["reap_s"] = round(t_reap - t_kill_wall, 3) if t_reap is not None else None
     ev["sigkill"] = {"old_pid": pid0, "new": m1, "respawn_s": respawn_s, "unlocked_seen": unlocked_seen,
                      "kernel": safing}
     ctx.log("after SIGKILL: reaped %s s after the kill, the kernel at the window's end %s with %s bytes "
@@ -1093,14 +1094,14 @@ def deadman(ctx):
         ctx.sleep(1.0)
         with _stopped(ctx, pid1):
             ctx.log("SIGSTOP sent to controller pid %d mid-move", pid1)
-            t0 = time.time()
+            t0 = time.monotonic()
             kstate = None
-            while time.time() - t0 < 10:
+            while time.monotonic() - t0 < 10:
                 kstate = hw.sysfs_read("cnc/state")
                 if kstate == "underrun":
                     break
                 ctx.sleep(0.05)
-            halt_s = round(time.time() - t0, 2)
+            halt_s = round(time.monotonic() - t0, 2)
             ev["sigstop"] = {"kernel_state": kstate, "halt_s": halt_s, "latch_locked": latch_locked(),
                              "underruns": hw.sysfs_int("cnc/underruns", 0)}
             ctx.log("after SIGSTOP: kernel %s in %s s, latch locked %s, underruns %s -> %s",
@@ -1171,8 +1172,8 @@ def deadman(ctx):
         g.command("G90")
     machine_idle(ctx)                           # the kernel's tail plays out behind grbl's Idle
     warned = None
-    t0 = time.time()
-    while time.time() - t0 < 5 and not warned:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 5 and not warned:
         lines = _log_lines(GRBLHAL_LOG, log0, "late events clamped")
         warned = lines[-1] if lines else None
         if not warned:
@@ -1211,13 +1212,13 @@ def deadman(ctx):
         done = {}
         restart = threading.Thread(target=lambda: done.update(rc=hw.initd("forgectrl", "restart", timeout=120)[0]))
         hw.sysfs_write("head/uv_led", str(RESTART_UV))  # lit as the restart begins
-        t0 = time.time()
+        t0 = time.monotonic()
         restart.start()
-        while time.time() - t0 < 10 and ("gone_s" not in rec or "halt_s" not in rec):
+        while time.monotonic() - t0 < 10 and ("gone_s" not in rec or "halt_s" not in rec):
             if "gone_s" not in rec and not _alive(pid2):
-                rec["gone_s"] = round(time.time() - t0, 2)
+                rec["gone_s"] = round(time.monotonic() - t0, 2)
             if "halt_s" not in rec and hw.sysfs_read("cnc/state") != "running":
-                rec["halt_s"] = round(time.time() - t0, 2)
+                rec["halt_s"] = round(time.monotonic() - t0, 2)
                 x1 = _kernel_position()[0]          # before the new controller re-zeroes the counters
             time.sleep(0.02)
         rec["state_after"] = hw.sysfs_read("cnc/state")
@@ -1320,12 +1321,12 @@ def _homing_kill_drill(ctx, wait_running):
             os.kill(pid4, signal.SIGKILL)
     except (hw.HwError, OSError) as e:
         ctx.log("the Grbl connection ended with the kill: %s", e)
-    t_kill = time.time()
+    t_kill = time.monotonic()
     gone_s = ctx.wait_for(lambda: not hw.pidof("gfhome.py"), 15)
     ev["homing_kill"]["runner_gone_s"] = gone_s
     ctx.check(gone_s is not None, "the homing runner outlived its controller")
     m5 = None
-    while time.time() - t_kill < 60:
+    while time.monotonic() - t_kill < 60:
         st, m5 = fc.get("/mode")
         if isinstance(m5, dict) and m5.get("controller") == "running" and m5.get("pid") != pid4:
             break
@@ -1334,7 +1335,7 @@ def _homing_kill_drill(ctx, wait_running):
     holders = _pulse_holders()
     lines = _log_lines(FORGECTRL_LOG, off, "homing runner")
     halted = _log_absent(ctx, FORGECTRL_LOG, off, "halting it", "that the kernel was not halted for the respawn")
-    ev["homing_kill"].update({"respawn_s": round(time.time() - t_kill, 1), "mode_after": m5,
+    ev["homing_kill"].update({"respawn_s": round(time.monotonic() - t_kill, 1), "mode_after": m5,
                               "kernel_state_at_respawn": kstate, "pulse_holders": holders,
                               "super_lines": [ln[-160:] for ln in lines[-3:]]})
     ctx.log("kill during $H: runner gone in %s s, respawned as %s, kernel %s, pulse held by %s",
@@ -1409,9 +1410,9 @@ class Watch:
 
 def drain_text(g, seconds):
     """Everything the controller said in the next `seconds`."""
-    end = time.time() + seconds
+    end = time.monotonic() + seconds
     text = ""
-    while time.time() < end:
+    while time.monotonic() < end:
         text += g.drain()
         time.sleep(0.1)
     return text
@@ -1490,7 +1491,7 @@ def step_timing_under_load(ctx):
         with ctx.grbl() as g:
             clean_slate(ctx, g)
             ctrl0 = cpu_ticks(pid)
-            t0 = time.time()
+            t0 = time.monotonic()
             legs = 0
             for _i in range(10):
                 ctx.checkpoint()
@@ -1501,7 +1502,7 @@ def step_timing_under_load(ctx):
                     _peak, states, _ = wait_idle(ctx, g, 30)
                     ctx.check(ran(states), "a leg did not run to Idle under load: %s", states)
                     legs += 1
-            elapsed = time.time() - t0
+            elapsed = time.monotonic() - t0
             hz = os.sysconf("SC_CLK_TCK")
             ev["legs"] = legs
             ev["motion_s"] = round(elapsed, 1)
@@ -1550,8 +1551,8 @@ def _wait_running(ctx, fc, timeout=30, not_pid=None):
     other than that pid (a killed controller can still read as running
     until it is reaped). A forgectrl that refuses the request (a restarted
     daemon still coming up) is waited out. The document, or None."""
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         try:
             st, m = fc.get("/mode")
         except hw.HwError:
@@ -1696,13 +1697,13 @@ def motor_release(ctx):
             # The rotors have relaxed by now: from here on the head is still.
             ctx.sleep(1.0)
             k0 = _kernel_position()
-            t0 = time.time()
+            t0 = time.monotonic()
             refusals = {}
             for line in ("$J=G91X10F2400", "G0X10", "$X"):
                 refusals[line] = _refused(ctx, g, line)
                 ctx.check(refusals[line], "%s was accepted while the motors are released", line)
             ctx.sleep(RELEASED_WINDOW_S)
-            t1 = time.time()
+            t1 = time.monotonic()
             p2px, p2py, n = accel.p2p(t0, t1)
             errors = accel.window_errors(t0, t1)
             still = accel.still(t0, t1)

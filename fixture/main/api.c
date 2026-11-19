@@ -7,6 +7,8 @@
  */
 #include "api.h"
 
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -14,9 +16,13 @@
 #include "esp_http_server.h"
 #include "esp_idf_version.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lwip/sockets.h"
 
+#include "auth.h"
 #include "policy.h"
 #include "relays.h"
 #include "version.h"
@@ -26,8 +32,15 @@ static const char *TAG = "api";
 
 static const char *s_key;
 static const char *s_hostname;
+/* The nonces outstanding. The server runs every handler in its one task,
+ * so nothing else touches the store. */
+static auth_store_t s_auth;
 
 #define BODY_MAX 256
+
+/* A route's channel rides in its user_ctx as the channel plus one, so a
+ * route registered without one reads as no channel. */
+#define ROUTE_CHANNEL(ch) ((void *)(intptr_t)((ch) + 1))
 
 /* The peer's address for the log: every action is attributed. */
 static void peer(httpd_req_t *req, char *buf, size_t n)
@@ -82,45 +95,79 @@ static cJSON *state_json(void)
     cJSON_AddBoolToObject(w, "connected", wifi_connected());
     cJSON_AddStringToObject(w, "ip", ip);
     cJSON_AddNumberToObject(w, "rssi", wifi_rssi());
+    /* The least stack the server's task has had free since it started, in
+     * bytes (ESP-IDF's FreeRTOS counts a stack in bytes): every handler runs
+     * on that task, the request's body, nonce and HMAC state among its
+     * locals, so this says how near the deepest request came to the end. */
+    cJSON_AddNumberToObject(o, "httpd_stack_free", (double)uxTaskGetStackHighWaterMark(NULL));
     return o;
 }
 
-/* The key check, before anything else on every path. */
-static bool authorized(httpd_req_t *req)
+/* The request's body, whole, into buf (BODY_MAX + 1 bytes, NUL ended):
+ * false with the error already sent. The MAC covers these bytes, so they
+ * are read before anything is judged. */
+static bool body_read(httpd_req_t *req, char *buf, size_t *len)
 {
-    char presented[96] = {0};
-    esp_err_t r = httpd_req_get_hdr_value_str(req, "X-Fixture-Key", presented, sizeof(presented));
-    bool ok = (r == ESP_OK) && policy_key_matches(presented, s_key);
-    if (!ok) {
-        char who[48];
-        peer(req, who, sizeof(who));
-        ESP_LOGW(TAG, "%s %s from %s: refused (%s)", http_method_str(req->method), req->uri, who,
-                 r == ESP_OK ? "wrong key" : "no key");
-        send_error(req, "401 Unauthorized", "X-Fixture-Key missing or wrong");
-    }
-    return ok;
-}
-
-/* The JSON body, or NULL (an error already sent). An empty body parses
- * as an empty object so "POST /button" alone means the default pulse. */
-static cJSON *body_json(httpd_req_t *req)
-{
-    char buf[BODY_MAX + 1];
     if (req->content_len > BODY_MAX) {
         send_error(req, "413 Payload Too Large", "body over 256 bytes");
-        return NULL;
+        return false;
     }
     size_t got = 0;
     while (got < req->content_len) {
         int n = httpd_req_recv(req, buf + got, req->content_len - got);
         if (n <= 0) {
             send_error(req, "400 Bad Request", "body not received");
-            return NULL;
+            return false;
         }
         got += (size_t)n;
     }
     buf[got] = '\0';
-    cJSON *o = got ? cJSON_Parse(buf) : cJSON_CreateObject();
+    *len = got;
+    return true;
+}
+
+/* A header's value into buf, or NULL when it is absent or longer than
+ * buf holds (never a truncated value). */
+static const char *header(httpd_req_t *req, const char *field, char *buf, size_t n)
+{
+    return httpd_req_get_hdr_value_str(req, field, buf, n) == ESP_OK ? buf : NULL;
+}
+
+/* The nonce and the MAC, before anything is done on any path but
+ * /nonce. */
+static bool authorized(httpd_req_t *req, const char *body, size_t body_len)
+{
+    char nonce_buf[AUTH_NONCE_HEX + 2];
+    char mac_buf[AUTH_MAC_HEX + 2];
+    const char *nonce = header(req, "X-Fixture-Nonce", nonce_buf, sizeof(nonce_buf));
+    const char *mac = header(req, "X-Fixture-Mac", mac_buf, sizeof(mac_buf));
+    auth_result_t r = auth_check(&s_auth, s_key, http_method_str(req->method), req->uri, nonce, mac,
+                                 (const uint8_t *)body, body_len, esp_timer_get_time());
+    if (r == AUTH_OK)
+        return true;
+    char who[48];
+    peer(req, who, sizeof(who));
+    ESP_LOGW(TAG, "%s %s from %s: refused (%s)", http_method_str(req->method), req->uri, who,
+             auth_result_name(r));
+    char msg[64];
+    snprintf(msg, sizeof(msg), "not authorized: %s", auth_result_name(r));
+    send_error(req, "401 Unauthorized", msg);
+    return false;
+}
+
+/* The body read and the request authorized: true, with the body in buf.
+ * Otherwise false, the refusal already sent. */
+static bool take_request(httpd_req_t *req, char *buf, size_t *len)
+{
+    return body_read(req, buf, len) && authorized(req, buf, *len);
+}
+
+/* The body as a JSON object, or NULL (an error already sent). An empty
+ * body parses as an empty object so "POST /button" alone means the
+ * default pulse. */
+static cJSON *body_json(httpd_req_t *req, const char *buf, size_t len)
+{
+    cJSON *o = len ? cJSON_Parse(buf) : cJSON_CreateObject();
     if (o == NULL || !cJSON_IsObject(o)) {
         cJSON_Delete(o);
         send_error(req, "400 Bad Request", "body is not a JSON object");
@@ -129,19 +176,41 @@ static cJSON *body_json(httpd_req_t *req)
     return o;
 }
 
+/* A nonce for the next request. Asking needs no key: a nonce is worth
+ * nothing without one. */
+static esp_err_t h_nonce(httpd_req_t *req)
+{
+    uint8_t random[AUTH_NONCE_BYTES];
+    char hex[AUTH_NONCE_HEX + 1];
+    esp_fill_random(random, sizeof(random));
+    auth_issue(&s_auth, random, esp_timer_get_time(), hex);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "nonce", hex);
+    cJSON_AddNumberToObject(o, "expires_s", (double)(AUTH_NONCE_LIFE_US / 1000000LL));
+    return send_json(req, "200 OK", o);
+}
+
 static esp_err_t h_state(httpd_req_t *req)
 {
-    if (!authorized(req))
+    char buf[BODY_MAX + 1];
+    size_t len;
+    if (!take_request(req, buf, &len))
         return ESP_OK;
     return send_json(req, "200 OK", state_json());
 }
 
 static esp_err_t h_loop(httpd_req_t *req)
 {
-    if (!authorized(req))
+    char buf[BODY_MAX + 1];
+    size_t len;
+    if (!take_request(req, buf, &len))
         return ESP_OK;
-    int ch = policy_channel_from_path(req->uri);
-    cJSON *body = body_json(req);
+    /* The channel is the matched route's own (ROUTE_CHANNEL), never parsed
+     * from the URI; a route that names none is refused. */
+    int ch = (int)(intptr_t)req->user_ctx - 1;
+    if (ch != CH_LID && ch != CH_INTERLOCK)
+        return send_error(req, "400 Bad Request", "not a loop channel");
+    cJSON *body = body_json(req, buf, len);
     if (body == NULL)
         return ESP_OK;
     const cJSON *state = cJSON_GetObjectItemCaseSensitive(body, "state");
@@ -154,15 +223,18 @@ static esp_err_t h_loop(httpd_req_t *req)
     char who[48];
     peer(req, who, sizeof(who));
     ESP_LOGI(TAG, "%s %s by %s", policy_channel_name((channel_t)ch), energize ? "open" : "close", who);
-    relays_set_loop((channel_t)ch, energize);
+    if (relays_set_loop((channel_t)ch, energize) != ESP_OK)
+        return send_error(req, "400 Bad Request", "not a loop channel");
     return send_json(req, "200 OK", state_json());
 }
 
 static esp_err_t h_button(httpd_req_t *req)
 {
-    if (!authorized(req))
+    char buf[BODY_MAX + 1];
+    size_t len;
+    if (!take_request(req, buf, &len))
         return ESP_OK;
-    cJSON *body = body_json(req);
+    cJSON *body = body_json(req, buf, len);
     if (body == NULL)
         return ESP_OK;
     const cJSON *ms = cJSON_GetObjectItemCaseSensitive(body, "ms");
@@ -188,7 +260,9 @@ static esp_err_t h_button(httpd_req_t *req)
 
 static esp_err_t h_release(httpd_req_t *req)
 {
-    if (!authorized(req))
+    char buf[BODY_MAX + 1];
+    size_t len;
+    if (!take_request(req, buf, &len))
         return ESP_OK;
     char who[48];
     peer(req, who, sizeof(who));
@@ -207,6 +281,7 @@ void api_start(const char *api_key, const char *hostname)
 {
     s_key = api_key;
     s_hostname = hostname;
+    auth_init(&s_auth);
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
     cfg.lru_purge_enable = true;
@@ -217,8 +292,9 @@ void api_start(const char *api_key, const char *hostname)
     static const httpd_uri_t routes[] = {
         {.uri = "/", .method = HTTP_GET, .handler = h_state},
         {.uri = "/state", .method = HTTP_GET, .handler = h_state},
-        {.uri = "/lid", .method = HTTP_POST, .handler = h_loop},
-        {.uri = "/interlock", .method = HTTP_POST, .handler = h_loop},
+        {.uri = "/nonce", .method = HTTP_GET, .handler = h_nonce},
+        {.uri = "/lid", .method = HTTP_POST, .handler = h_loop, .user_ctx = ROUTE_CHANNEL(CH_LID)},
+        {.uri = "/interlock", .method = HTTP_POST, .handler = h_loop, .user_ctx = ROUTE_CHANNEL(CH_INTERLOCK)},
         {.uri = "/button", .method = HTTP_POST, .handler = h_button},
         {.uri = "/release", .method = HTTP_POST, .handler = h_release},
     };

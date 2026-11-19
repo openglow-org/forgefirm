@@ -55,7 +55,7 @@ def sample(ctx):
     if st1 != 200 or st2 != 200 or not isinstance(st, dict) or not isinstance(cs, dict):
         return None
     return {
-        "t": time.time(),
+        "t": time.monotonic(),
         "kstate": st.get("state"),
         "emission": (st.get("laser") or {}).get("emission_samples"),
         "pgood": (st.get("laser") or {}).get("pgood_samples"),
@@ -188,8 +188,8 @@ def arm_and_fire(ctx, g, room="40 mm +X and +Y", job=None, timeout=240):
     ctx.ready(ARM_CUE % room)
     stream(g, job or MARK_JOB)
     ctx.arm_press()
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         smp = sample(ctx)
         if smp and smp["emission"] and smp["emission"] > 0:
@@ -206,8 +206,8 @@ def wait_grbl_port(ctx, timeout=30):
     process running is not the same thing: the supervisor has spawned it, but
     the socket may not be bound yet, and a bare connect would fail the test on
     a race rather than on the behavior it is about."""
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         ctx.checkpoint()
         try:
             with ctx.grbl():
@@ -223,7 +223,7 @@ def kill_trail(ctx, t0, seconds=5.0):
     for _ in range(int(seconds / 0.12)):
         s = sample(ctx)
         if s:
-            trail.append((round(time.time() - t0, 2), s["emission"], s["kstate"], s["armed"]))
+            trail.append((round(time.monotonic() - t0, 2), s["emission"], s["kstate"], s["armed"]))
         time.sleep(0.12)
     return trail
 
@@ -236,8 +236,8 @@ def kill_fast_trail(t0, seconds=1.5):
     milliseconds; the kernel leaves running once its stop ramp is done."""
     locked_at = stopped_at = None
     end = t0 + seconds
-    while time.time() < end and (locked_at is None or stopped_at is None):
-        now = time.time() - t0
+    while time.monotonic() < end and (locked_at is None or stopped_at is None):
+        now = time.monotonic() - t0
         ilk = hw.sysfs_int("cnc/interlock_circuit")
         if locked_at is None and ilk is not None and ilk & IL_LASER_LATCH:
             locked_at = round(now, 3)
@@ -362,10 +362,10 @@ def sample_to_disarm(ctx, g, timeout=20.0, sample_hz=8):
     sampling stopped, the trail's end for the read rule."""
     samples = []
     period = 1.0 / sample_hz
-    t0 = time.time()
+    t0 = time.monotonic()
     end = t0 + timeout
     t_closed = None
-    while time.time() < end:
+    while time.monotonic() < end:
         ctx.checkpoint()
         rep = g.status_report()
         smp = sample(ctx)
@@ -374,10 +374,10 @@ def sample_to_disarm(ctx, g, timeout=20.0, sample_hz=8):
             smp["x"] = (rep.get("MPos") or (None,))[0]
             samples.append(smp)
             if t_closed is None and not smp["armed"]:
-                t_closed = time.time()
+                t_closed = time.monotonic()
                 end = t_closed + 2 * EMISSION_WINDOW_S + EMISSION_READ_GAP_S
         time.sleep(period)
-    return samples, time.time()
+    return samples, time.monotonic()
 
 
 def run_and_sample(ctx, g, job, sample_hz=8, overall_timeout=200):
@@ -390,13 +390,13 @@ def run_and_sample(ctx, g, job, sample_hz=8, overall_timeout=200):
     if s0:
         samples.append(s0)
     stream(g, job)
-    t_start = time.time()
+    t_start = time.monotonic()
     next_t = t_start
     seen_emission = seen_armed = disarmed_now = False
     idle_since = None
-    while time.time() - t_start < overall_timeout:
+    while time.monotonic() - t_start < overall_timeout:
         ctx.checkpoint()
-        now = time.time()
+        now = time.monotonic()
         if now >= next_t:
             smp = sample(ctx)
             if smp:
@@ -453,12 +453,12 @@ class LiveJob:
 
 
 def wait_disarm(ctx, timeout):
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         ctx.checkpoint()
         s = sample(ctx)
         if s and not s["armed"]:
-            return time.time() - t0
+            return time.monotonic() - t0
         time.sleep(0.5)
     return None
 
@@ -712,9 +712,9 @@ def armed_kill(ctx):
         prepare(ctx, g)
         smp = arm_and_fire(ctx, g)
         ctx.log("emission live (%s) - stopping the controller NOW", smp["emission"])
-        t_stop = time.time()
+        t_stop = time.monotonic()
         code, body = fc.post("/controller/stop")
-        post_dt = time.time() - t_stop
+        post_dt = time.monotonic() - t_stop
         # The latch as the stop's answer leaves it, before anything after
         # it (the restart, phase 2's own arm, the hand-back) could relock it.
         ilk_stop = hw.sysfs_int("cnc/interlock_circuit")
@@ -754,7 +754,7 @@ def armed_kill(ctx):
         prepare(ctx, g)
         smp = arm_and_fire(ctx, g)
         ctx.log("emission live (%s) - SIGKILL controller pid %s NOW", smp["emission"], pid)
-        t_kill = time.time()
+        t_kill = time.monotonic()
         _os.kill(pid, _signal.SIGKILL)
         fast = kill_fast_trail(t_kill)
         trail = kill_trail(ctx, t_kill)
@@ -775,9 +775,9 @@ def armed_kill(ctx):
     ctx.check(tail_zero, "emission returned after the kill")
     ctx.check(not_running, "the kernel was still running after the kill")
     ctx.check(locked, "latch not locked after the kill")
-    t0 = time.time()
+    t0 = time.monotonic()
     m1 = None
-    while time.time() - t0 < 60:
+    while time.monotonic() - t0 < 60:
         st, m1 = fc.get("/mode")
         if isinstance(m1, dict) and m1.get("controller") == "running" and m1.get("pid") != pid:
             break
@@ -841,7 +841,7 @@ def pause_resume_lid_cancel(ctx):
         g.drain()                                   # the message window opens here
         w = Watch(g)
         ctx.act("button", "press", text="The laser is cutting: the press pauses it.",
-                until=w.in_state("Hold"), timeout=20, fail=False)
+                until=w.in_state("Hold"), timeout=20, fail=False, press="pause")
         st, text = w.last, w.text
         if st is not None and not st["state"].startswith("Hold"):
             st = None
@@ -849,11 +849,11 @@ def pause_resume_lid_cancel(ctx):
         ev["hold_state"] = st["state"]
         ev["pause_message"] = "job paused" in text
         paused = []
-        t1 = time.time()
-        while time.time() - t1 < 4:
+        t1 = time.monotonic()
+        while time.monotonic() - t1 < 4:
             s = sample(ctx)
             if s:
-                paused.append((round(time.time() - t1, 2), s["emission"], s["armed"]))
+                paused.append((round(time.monotonic() - t1, 2), s["emission"], s["armed"]))
             time.sleep(0.2)
         for p in paused:
             ctx.log("  paused %s", p)
@@ -885,13 +885,13 @@ def pause_resume_lid_cancel(ctx):
         ctx.check(st["state"].startswith(("Run", "Idle")),
                   "the job left the hold into %s, not into motion", st["state"])
         back = False
-        t2 = time.time()
+        t2 = time.monotonic()
         trail = []
-        while time.time() - t2 < 20:
+        while time.monotonic() - t2 < 20:
             ctx.checkpoint()
             s = sample(ctx)
             if s:
-                trail.append((round(time.time() - t2, 2), s["emission"]))
+                trail.append((round(time.monotonic() - t2, 2), s["emission"]))
                 beams.append((s.get("beam"), s.get("beam_d")))
                 if s["emission"] and s["emission"] > 0:
                     back = True
@@ -906,13 +906,13 @@ def pause_resume_lid_cancel(ctx):
         g.drain()
         ctx.act("lid", "open", text="The cut is running again: leave the lid open until the head "
                 "has come back.", timeout=30)
-        t_lid = time.time()
+        t_lid = time.monotonic()
         lid_trail = []
         text = ""
-        while time.time() - t_lid < 8:
+        while time.monotonic() - t_lid < 8:
             s = sample(ctx)
             if s:
-                lid_trail.append((round(time.time() - t_lid, 2), s["emission"], s["kstate"], s["armed"]))
+                lid_trail.append((round(time.monotonic() - t_lid, 2), s["emission"], s["kstate"], s["armed"]))
             text += g.drain()
             time.sleep(0.12)
         for t in lid_trail:
@@ -929,9 +929,9 @@ def pause_resume_lid_cancel(ctx):
         ctx.check("lid opened - job canceled" in text, "the lid open was not reported as canceling the job")
         ctx.check("help]" in text, "no reset banner after the cancel")
         ctx.check("ALARM" not in text, "an alarm was raised on the cancel (position should be kept)")
-        t3 = time.time()
+        t3 = time.monotonic()
         returned = "returned to the job start" in text
-        while not returned and time.time() - t3 < 30:
+        while not returned and time.monotonic() - t3 < 30:
             ctx.checkpoint()
             text += g.drain()
             returned = "returned to the job start" in text

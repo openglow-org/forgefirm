@@ -65,13 +65,18 @@ over mDNS with a `_forgefixture._tcp` service. It reconnects forever and
 never sleeps the radio. The API is HTTP on port 80, JSON, LAN only, no
 OTA (the flash happens over USB and nowhere else).
 
-Every request carries the key in `X-Fixture-Key`; without it, or with
-a wrong one, every path answers 401 and the attempt is logged with the
-caller's address.
+The key never travels. Every request but `GET /nonce` carries a nonce
+the fixture issued for it, in `X-Fixture-Nonce`, and in `X-Fixture-Mac`
+the lowercase hex of HMAC-SHA256 under the key over the method, the URI
+as sent, the nonce and the body (`method "\n" uri "\n" nonce "\n" body`;
+`main/auth.h`). The fixture takes each nonce once, and a nonce expires
+10 s after it was issued. Without a good nonce and MAC every path answers
+401 and the attempt is logged with the caller's address.
 
 | Request | Does |
 |---|---|
-| `GET /` or `/state` | identity, firmware version, uptime, the three channels' states, whether the button is enabled, the wifi link |
+| `GET /nonce` | `{"nonce": "<32 hex>", "expires_s": 10}`: the nonce for one request; needs no key |
+| `GET /` or `/state` | identity, firmware version, uptime, the three channels' states, whether the button is enabled, the wifi link, and `httpd_stack_free`: the least stack the server's task has had free since boot, in bytes |
 | `POST /lid {"state":"open"}` | energizes the lid channel (the loop opens); `"close"` releases it |
 | `POST /interlock {"state":"open"}` | the same for the interlock loop |
 | `POST /button {"ms":200}` | one press, `ms` clamped into 20 to 500 (200 when absent); 409 while the enable jumper is out or a press is still in progress |
@@ -81,8 +86,13 @@ An action answers with the state as `GET /` shows it. The fixture does
 not read the machine's switches; the tool verifies every action through
 the machine's own readings, which is the point.
 
-    curl -s -H "X-Fixture-Key: $KEY" http://forgefixture.local/
-    curl -s -H "X-Fixture-Key: $KEY" -d '{"state":"open"}' http://forgefixture.local/lid
+A request is signed, so a bare `curl` cannot make one. The tool's own
+client can: on a dev image, where `forgetest` is an installed package, or
+from the `forgetest/` folder of a forgefirm checkout:
+
+    KEY=... python3 -c 'import json, os; from forgetest import fixture
+    f = fixture.Fixture({"hostname": "forgefixture", "key": os.environ["KEY"], "channels": list(fixture.CHANNELS)})
+    print(json.dumps(f.status()))'
 
 ## The tool's side
 
@@ -106,10 +116,23 @@ sees two presses and not one long one.
 
 - Every line is driven low first thing at boot, before the radio or the
   server exist, and after any reset.
-- The button is a pulse whose end is armed before the line rises; a hung
-  task trips the task watchdog, which panics and reboots to all-low.
-- The button channel needs the jumper; a LAN key leak cannot press the
-  button on a fixture whose jumper is out.
+- The button is a pulse whose end is armed before the line rises. The
+  task watchdog watches the idle tasks: a task that spins starves them,
+  and the watchdog panics and reboots to all-low. A task that blocks
+  (the HTTP server, the timer task the pulse's end runs in) does not trip
+  it.
+- The key never travels, and a request is good once: a host on the bench
+  network without the key can ask for nonces and nothing else, and a
+  request it captures answers 401 when played again. A host that answers
+  the fixture's mDNS name, or sits on the path, can hold a request back,
+  drop it, or let it through up to 10 s late; it cannot change a request
+  or make one of its own. Pin `ip` in `fixture.json` to skip the lookup.
+  A host that asks for nonces fast enough pushes out one the tool holds
+  (the fixture keeps eight): that request is refused and nothing is done.
+  The fixture's answers are not signed, which is why the tool proves
+  every action through the machine's own readings.
+- The button channel needs the jumper; even with the key, nothing presses
+  the button on a fixture whose jumper is out.
 - NC contacts in the loops: a fixture fault can only add an open, never
   mask a real lid open or a pulled interlock.
 - No OTA, no configuration over the network, nothing persisted beyond
@@ -117,6 +140,7 @@ sees two presses and not one long one.
 
 ## Layout
 
-    main/         the firmware: main.c, wifi.c, api.c, relays.c, policy.c (the pure decisions)
-    test/         the host tests of policy.c and relays.c (./fixture.sh test)
+    main/         the firmware: main.c, wifi.c, api.c, relays.c, policy.c (the pure decisions),
+                  auth.c and sha256.c (the nonces and the request MAC)
+    test/         the host tests of policy.c, auth.c, sha256.c, relays.c and api.c (./fixture.sh test)
     fixture.env.example, sdkconfig.defaults, dependencies.lock

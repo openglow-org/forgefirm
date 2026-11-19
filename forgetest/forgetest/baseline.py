@@ -192,6 +192,7 @@ IDLE_READBACKS = [
 LASER_READBACKS = ("cnc/laser_enable", "cnc/laser_on")
 
 LATCH_BIT = 0x08                    # interlock_circuit bit 3: latch locked
+INTERLOCK_RESET_BIT = 0x10          # interlock_circuit bit 4: the remote-interlock loop reads open
 
 # The leftovers on the laser's safety state (campaign.SAFETY_ITEMS: the
 # latch, as the kernel and forgectrl read it, and LASER_READBACKS). Each one
@@ -502,7 +503,7 @@ class Baseline:
         miss is kept (self.missed) and silences this instance for
         FC_SILENCE_S, so one slow daemon costs one timeout, not one per
         request; every request the silence turns away is a miss too."""
-        if time.time() < self._unreachable_until:
+        if time.monotonic() < self._unreachable_until:
             self._miss(path)
             return None, None
         try:
@@ -510,7 +511,7 @@ class Baseline:
         except hw.HwError:
             st, body = None, None
         if st is None:
-            self._unreachable_until = time.time() + FC_SILENCE_S
+            self._unreachable_until = time.monotonic() + FC_SILENCE_S
             self._miss(path)
             self._asked_misses += 1
         return st, body
@@ -534,7 +535,7 @@ class Baseline:
         otherwise None, the miss is kept and the pass asks no more."""
         if timeout is None:
             timeout = 0 if host_run() else FC_WAIT_S
-        t0 = time.time()
+        t0 = time.monotonic()
         while True:
             try:
                 st, body = self.fc().get("/mode")
@@ -542,11 +543,11 @@ class Baseline:
                 st, body = None, None
             if st == 200 and isinstance(body, dict):
                 return body
-            if time.time() - t0 >= timeout or self.abort():
+            if time.monotonic() - t0 >= timeout or self.abort():
                 break
             time.sleep(1.0)
         self._miss("/mode")
-        self._unreachable_until = time.time() + FC_SILENCE_S
+        self._unreachable_until = time.monotonic() + FC_SILENCE_S
         self.log("forgectrl did not answer within %d s%s" % (
             timeout, " (a host run: the service side is skipped)" if host_run() else ""))
         return None
@@ -578,22 +579,22 @@ class Baseline:
         is closed: no controller spawns until it opens). Gives up after
         unreachable_s without an answer. Returns the last /mode body (None
         if unreachable)."""
-        t0 = time.time()
+        t0 = time.monotonic()
         deadline = t0 + timeout
         last = seen = heard = None
         pending_since = None        # verified but not running: the spawn follows
-        while time.time() < deadline and not self.abort():
+        while time.monotonic() < deadline and not self.abort():
             try:
                 st, body = self.fc().get("/mode")
             except hw.HwError:
                 st, body = None, None
-            if st is None and heard is None and time.time() - t0 >= unreachable_s:
+            if st is None and heard is None and time.monotonic() - t0 >= unreachable_s:
                 self.log("forgectrl unreachable for %d s - not waiting for it" % unreachable_s)
-                self._unreachable_until = time.time() + FC_SILENCE_S
+                self._unreachable_until = time.monotonic() + FC_SILENCE_S
                 self._miss("/mode")
                 return None
             if st == 200 and isinstance(body, dict):
-                heard = time.time()
+                heard = time.monotonic()
                 last = body
                 key = (body.get("controller"), body.get("motion"))
                 if key != seen:
@@ -608,8 +609,8 @@ class Baseline:
                 if body.get("motion") == "verified":
                     # the probe passed; the spawn (or a respawn backoff of up to
                     # 30 s) is in flight - give it a bounded moment
-                    pending_since = pending_since or time.time()
-                    if time.time() - pending_since > 35:
+                    pending_since = pending_since or time.monotonic()
+                    if time.monotonic() - pending_since > 35:
                         return body
                 else:
                     pending_since = None
@@ -775,10 +776,10 @@ class Baseline:
         return left
 
     def _wait(self, what, pred, timeout):
-        t0 = time.time()
-        while time.time() - t0 < timeout and not self.abort():
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout and not self.abort():
             if pred():
-                return time.time() - t0
+                return time.monotonic() - t0
             time.sleep(1.0)
         return None
 
@@ -806,8 +807,8 @@ class Baseline:
         st, _b = self.fc_post("/controller/stop")
         if st != 200:
             self.log("baseline: stand-down: /controller/stop -> %s" % st)
-        deadline = time.time() + 30
-        while time.time() < deadline and not self.abort():
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not self.abort():
             body = self.fc_dict("/mode") or {}
             if body.get("controller") != "running":
                 break
@@ -1475,6 +1476,16 @@ class Baseline:
         if residue:
             left.append(Leftover("pulse ring", "%d unplayed bytes" % residue, "0 (nothing queued)",
                                  "unrestorable: the next run would replay them first"))
+        # The remote-interlock loop held open (interlock_circuit bit 4: the
+        # kernel drives the interlock latch's SET while the loop reads open)
+        # blocks every fire until a person closes it. Read after the
+        # fixture's release, so a loop the box held is let go first: what
+        # stays open is a person's, or a drill's that could not ask for it
+        # back (an Abort), and the next live test would fail at its arm.
+        ilk = hw.sysfs_int("cnc/interlock_circuit")
+        if ilk is not None and ilk & INTERLOCK_RESET_BIT:
+            left.append(Leftover("interlock loop", "open (interlock_circuit 0x%x)" % ilk, "closed",
+                                 "unrestorable: close the remote-interlock loop (plug or jumper back in)"))
         # The values that follow the XY microstep mode are judged against
         # the mode the settings name; with the settings unread they are left
         # as found and named, never written for a default mode. The GRBL
@@ -1580,8 +1591,8 @@ class Baseline:
                         "controller restart - a jog would replay them" % residue)
         # a controller may be inside a respawn backoff (seconds): wait for it
         mode = None
-        deadline = time.time() + 30
-        while time.time() < deadline:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
             st, mode = self.fc_get("/mode")
             if (st == 200 and isinstance(mode, dict) and mode.get("mode") == "grbl"
                     and mode.get("controller") == "running"):
@@ -1602,8 +1613,8 @@ class Baseline:
                     # kept, and hands the controller back
                     held = rep["state"]
                     g.realtime(0x18)
-                    deadline = time.time() + 5
-                    while time.time() < deadline:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
                         rep = g.status_report()
                         if not rep["state"].startswith(("Hold", "Door")):
                             break
@@ -1612,10 +1623,10 @@ class Baseline:
                 if rep["state"].startswith("Alarm"):
                     g.command("$X")
                 g.command("$J=G91X%.3fY%.3fF1200" % (-dx, -dy))
-                deadline = time.time() + 60
-                while time.time() < deadline:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
                     rep = g.status_report()
-                    if rep["state"].startswith("Idle") and time.time() > deadline - 59.5:
+                    if rep["state"].startswith("Idle") and time.monotonic() > deadline - 59.5:
                         break
                     time.sleep(0.2)
                 g.command("G90")
@@ -1872,12 +1883,12 @@ def wait_controller_configured(log, mode_body, timeout=CONFIGURED_TIMEOUT_S, sle
             and (mode_body.get("mode") or "grbl") == "grbl"):
         return True
     markers = configured_markers(xy_mode)
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
         got = [(a, hw.sysfs_read(a)) for a, _ in markers]
         if all(g == want for (a, g), (_, want) in zip(got, markers)):
             sleep(CONFIGURED_SETTLE_S)
-            log("baseline: controller configured %.1f s after running" % (time.time() - t0))
+            log("baseline: controller configured %.1f s after running" % (time.monotonic() - t0))
             return True
         if any(g is None for _, g in got):
             return True                 # no kernel sysfs (host run): nothing to wait for

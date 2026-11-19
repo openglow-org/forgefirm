@@ -266,7 +266,7 @@ class TakeoverEndTests(MachineFixture, unittest.TestCase):
         # attributes only on an idle kernel; a program that plays on keeps them
         real = hw.sysfs_write
         clock = helpers.Clock()
-        clocked = types.SimpleNamespace(time=clock.time, sleep=clock.sleep, strftime=time.strftime)
+        clocked = types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=clock.sleep, strftime=time.strftime)
         for stops, motor_lock in ((True, "0"), (False, "15")):
             with self.subTest(stops=stops):
                 self._attr("cnc/state", "running")
@@ -295,7 +295,7 @@ class TakeoverEndTests(MachineFixture, unittest.TestCase):
 
     def test_a_holder_that_outlives_the_stop_fails_the_takeover(self):
         clock = helpers.Clock()
-        clocked = types.SimpleNamespace(time=clock.time, sleep=clock.sleep, strftime=time.strftime)
+        clocked = types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=clock.sleep, strftime=time.strftime)
         with mock.patch.object(runner, "time", clocked), \
                 mock.patch.object(hw, "pidof", lambda comm: [4242] if comm == "forgectrl" else []), \
                 mock.patch.object(hw, "pgrep_f", lambda needle: []):

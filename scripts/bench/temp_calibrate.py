@@ -105,8 +105,8 @@ def supply_main(mode):
     if mode == 'supply-watch':
         seconds = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
         print('pwr_temp raw   guess-C   (%.0f s)' % seconds)
-        t0 = time.time()
-        while time.time() - t0 < seconds:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < seconds:
             r = supply_raw(1, 0)
             if r is None:
                 print('  (no reading)')
@@ -170,8 +170,8 @@ def main():
     if mode == 'watch':
         seconds = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
         print('raw1(down) raw2(up)   uapi-C down/up   (%.0f s)' % seconds)
-        t0 = time.time()
-        while time.time() - t0 < seconds:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < seconds:
             r1, r2 = raws(1, 0)
             if r1 is None:
                 print('  (no reading)')

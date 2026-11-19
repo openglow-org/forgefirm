@@ -205,13 +205,13 @@ def main(argv):
         time.sleep(2)
         heater(HEATER_FULL)
         print("heater at full duty")
-        t0 = time.time()
+        t0 = time.monotonic()
         last = None
         crit_at = None
-        while time.time() - t0 < max_s:
+        while time.monotonic() - t0 < max_s:
             time.sleep(1)
             c = cool()
-            t = time.time() - t0
+            t = time.monotonic() - t0
             if crit_at is None:
                 hp = heater_now()
                 why = ("the heater was written by someone else (%d)" % hp if hp != HEATER_FULL
@@ -241,7 +241,7 @@ def main(argv):
             print("no CRITICAL within %d s (upstream %.2f C)" % (max_s, c["up_c"]))
         print("M9 -> %s" % g.cmd("M9"))
         c = session_ended()
-        print("after the session: %s" % row(c, time.time() - t0))
+        print("after the session: %s" % row(c, time.monotonic() - t0))
         result["after_session"] = {k: c.get(k) for k in ("phase", "verdict", "fire_ok", "hold", "reason", "up_c")}
         rc = 0 if crit_at is not None else 1
     finally:

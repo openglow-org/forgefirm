@@ -6,4 +6,4 @@
 /* forgefixture firmware version, reported by GET /. */
 #pragma once
 
-#define FIXTURE_VERSION "1.0.0"
+#define FIXTURE_VERSION "1.1.0"

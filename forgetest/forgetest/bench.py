@@ -89,20 +89,32 @@ TOOLS = [
     {"id": "fire-test", "title": "FIRE drop-timing test (A/B/U)", "script": "fire_test.py",
      "safety": "takeover", "where": "board", "ported": True,
      "args": [_arg("mode", "choice", "A", "A latch locked, B unlocked/unarmed, U true underrun", ["A", "B", "U"])],
-     "desc": "Duty 0 throughout; refuses to unlock if HV reports good. Software witnesses + the PSU-connector LASER_ON scope point."},
+     "desc": "Duty 0 throughout. B and U drive FIRE at duty 0 with HV up (their own run feeds the charge pump), "
+             "so they run only with the remote-interlock loop open (unplug the interlock connector on a Pro, "
+             "pull the J8 jumper on a Basic or Plus) and keep hands off the button: the button latch must read "
+             "set after the unlock, and every sample must read it set, the loop open and LASER_ON off, or the "
+             "latch relocks and the drill fails. Judged as kernel.fire-line judges the same phases; any "
+             "LASER_ON sample fails it. Abort relocks the latch and halts the run. Ends idle with the rail up. "
+             "Software witnesses + the PSU-connector LASER_ON scope point."},
     {"id": "pwm-stream", "title": "LASER_PWM stream-path test", "script": "pwm_stream_test.py",
      "safety": "takeover", "where": "board", "ported": True, "args": [],
      "desc": "Streams power bytes only (no steps, no FIRE, motor_lock=15, latch locked) through /dev/glowforge; "
              "PASS = counters unmoved, idle at the end, no FIRE/emission read back. The scope on LASER_PWM sees the duty steps."},
     {"id": "gate-a-kernel", "title": "Kernel laser-safety drills K1/K2/K3", "script": "gate_a_kernel_drills.py",
      "safety": "takeover", "where": "board", "ported": True,
-     "args": [_arg("drill", "choice", "K1", "K1 stop floor, K2 resume honors latch, K3 mid-ramp unlock", ["K1", "K2", "K3"])],
-     "desc": "Software witnesses (cnc/state, laser_enable, laser_on, interlock bit 3); K3 refuses if HV reports good."},
+     "args": [_arg("drill", "choice", "K1", "K1 stop floor, K2 resume honors latch, K3 mid-run unlock", ["K1", "K2", "K3"])],
+     "desc": "Software witnesses (cnc/state, laser_enable, laser_on, interlock bit 3). K3 unlocks under its own "
+             "run (HV up, FIRE left an input), so it runs only with the remote-interlock loop open (unplug the "
+             "interlock connector on a Pro, pull the J8 jumper on a Basic or Plus) while nothing else feeds the "
+             "charge pump; keep hands off the button: the button latch must read set after the unlock, and "
+             "every sample must read it set, the loop open, and FIRE and LASER_ON off, or the latch relocks "
+             "and K3 fails. Abort relocks the latch and halts the drill's run."},
     {"id": "platform-drills", "title": "Kernel platform drills", "script": "platform_drills.py",
      "safety": "takeover", "where": "board", "ported": True,
-     "args": [_arg("drill", "choice", "decay", "deadman / rmmod / decay / led / all",
-                   ["deadman", "rmmod", "decay", "led", "all"])],
-     "desc": "Dead-man trip readback, rmmod/modprobe cycles under load, decay/microstep readback, LED sequence."},
+     "args": [_arg("drill", "choice", "decay", "deadman / decay / led / all",
+                   ["deadman", "decay", "led", "all"])],
+     "desc": "Dead-man trip readback, decay/microstep readback, LED sequence. The rail stays up; the module "
+             "reload cycles are the debug-kernel lock drills'."},
     # -- cooling ------------------------------------------------------------------
     {"id": "offset-probe", "title": "Coolant-sensor offset probe", "script": "offset_probe.py",
      "safety": "takeover", "where": "board", "ported": True,
@@ -322,8 +334,9 @@ TOOLS = [
      "script": "debug_kernel_drills.py",
      "safety": "takeover", "where": "board", "ported": True, "args": [],
      "desc": "Runs only on the debug-kernel image (kas/forgefirm-glowforge-debug.yml): three glowforge.ko "
-             "load/unload cycles under DEBUG_MUTEXES and a forced -EPROBE_DEFER unwind, each read against "
-             "dmesg for lock splats. Cycles the 40 V rail; works under the takeover (forgectrl stays stopped "
+             "load/unload cycles under DEBUG_MUTEXES with the module's attributes read in a tight loop "
+             "throughout, and a forced -EPROBE_DEFER unwind, each read against dmesg for lock splats and "
+             "oopses. Cycles the 40 V rail; works under the takeover (forgectrl stays stopped "
              "until the takeover starts it); refuses on a non-debug kernel, a non-idle machine, or while "
              "forgectrl, the controller or the cloud client runs."},
 ]
