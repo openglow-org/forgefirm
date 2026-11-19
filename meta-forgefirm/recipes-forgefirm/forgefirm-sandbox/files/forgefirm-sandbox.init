@@ -22,6 +22,15 @@
 #                        from there to the group each package gets. The ffx
 #                        group is idle-class against everything outside it:
 #                        a runnable task in the root group always goes first.
+#                        Its memory.max is what four services may hold
+#                        together (4 x 48 MiB): pages a package's group
+#                        leaves behind when it is removed are charged here
+#                        and go no further. SysV shared memory goes with
+#                        the last process that held it (shm_rmid_forced):
+#                        a segment outlives no package (the services'
+#                        seccomp filter refuses SysV IPC besides). The root
+#                        mount and every mount under it are shared, so that
+#                        an unmount reaches each service's own namespace.
 #   the deny rules       table inet ffx from /etc/forgefirm/ffx.nft: a pool
 #                        uid sends nothing, loopback included.
 #
@@ -51,6 +60,11 @@ start_cgroups () {
   # An idle group's weight is the scheduler's own lowest; the kernel refuses
   # a cpu.weight written on top of it.
   echo 1 > "$CG/ffx/cpu.idle" || return 1
+  echo 201326592 > "$CG/ffx/memory.max" || return 1
+  echo 1 > /proc/sys/kernel/shm_rmid_forced || return 1
+  # Every mount shared: a service's mount namespace holds its copies as
+  # slaves, so the machine's unmounts (an update's slot) reach it.
+  mount --make-rshared / || return 1
 }
 
 start_rules () {
