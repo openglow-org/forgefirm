@@ -142,9 +142,9 @@ class TakeoverPositionTests(MachineFixture, unittest.TestCase):
                            "expected": [0, 0, 0]}])
 
     def test_the_frame_is_read_before_the_controller_goes(self):
-        # found on the bench: forgectrl unlinks the anchor when the
-        # controller exits, so a frame read after the stop never matched
-        # and the check judged nothing. Read before the stop, it does.
+        # forgectrl unlinks the anchor when the controller exits, so a frame
+        # read after the stop would match nothing and the check would judge
+        # nothing: the frame is read before the stop.
         cap = self.cap()
         self._pos(self.mm(10), self.mm(10), 0)
         late, run = self.takeover(cap)

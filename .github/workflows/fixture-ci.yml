@@ -1,8 +1,12 @@
 # forgefixture: the bench actuator's firmware, proven on the host.
 #
-#  - the policy test: the decisions that need no hardware (channel
-#    names, the loop request words, the button pulse clamp, the key
-#    comparison), compiled with gcc and run
+#  - the host tests, compiled with gcc and run: the policy (channel names,
+#    the loop request words, the button pulse clamp, the key comparison),
+#    and the relays against a stand-in GPIO, timer and mutex layer (no
+#    line written high during init, each low before its pin is an output,
+#    the button refused without the
+#    jumper and during a pulse, the pulse's end armed before the line
+#    rises, a release that stops the pulse and drops every line)
 #  - the firmware build: the whole project in the pinned ESP-IDF
 #    container, with a placeholder fixture.env, so a change that does
 #    not compile never reaches a bench
@@ -18,6 +22,7 @@ on:
   pull_request:
     paths:
       - 'fixture/**'
+      - '.github/workflows/fixture-ci.yml'
   workflow_dispatch:
 
 jobs:
@@ -25,8 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - name: Policy host test
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Host tests (the policy, the relays)
         working-directory: fixture
         run: CC=gcc sh test/run.sh
 
@@ -36,7 +41,7 @@ jobs:
     container:
       image: espressif/idf:v5.5.5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Placeholder fixture.env (the build needs one; the values are not used)
         working-directory: fixture
         run: |

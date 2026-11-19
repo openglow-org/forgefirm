@@ -9,39 +9,97 @@
 # Required-Stop:
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
-# Short-Description: ForgeFIRM release acceptance tool (dev image, HTTP :8090)
+# Short-Description: ForgeFIRM release acceptance tool (dev image, HTTP :8090 on the loopback)
 ### END INIT INFO
 
 # Dev-image only. The daemon reads /etc/forgefirm-manifest.json, keeps its
 # state under /data/forgetest, and serves the acceptance + bench pages on
-# port 8090 (FORGETEST_PORT). It starts after forgectrl and stops before
-# the controllers at shutdown; a takeover left behind by a hard stop is
-# recovered at the next start (forgectrl is started again).
+# the loopback, port 8090 (reached over SSH). It starts after forgectrl and
+# stops before the controllers at shutdown; a takeover left behind by a
+# hard stop is recovered at the next start (forgectrl is started again).
+#
+# The daemon starts with no environment but a fixed PATH: a shell's
+# FORGETEST_MANIFEST, GF_SYSFS_ROOT or FORGECTRL_URL would otherwise point
+# every judge at something other than the machine. Its stderr is
+# daemon.log, which /etc/logrotate.d/forgetest keeps to a budget.
 
 PIDFILE=/var/run/forgetest.pid
 DATA=/data/forgetest
 LOG=$DATA/daemon.log
+PYTHON=/usr/bin/python3
+DAEMON_PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# A stop sends TERM and waits this long for the daemon to end, then KILL
+# and this long again.
+STOP_TERM_S=10
+STOP_KILL_S=5
+
+# True while pid $1 runs. A zombie (ended, not yet reaped) does not.
+alive() {
+    s=$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null) || return 1
+    [ -n "$s" ] && [ "${s%% *}" != Z ]
+}
+
+# The daemon's pid: the one the pidfile names, alive and running
+# `python3 -m forgetest`. Nothing for a stale pidfile, or a pid a later
+# process took.
+running() {
+    [ -r "$PIDFILE" ] || return 1
+    p=$(cat "$PIDFILE" 2>/dev/null)
+    case "$p" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    alive "$p" || return 1
+    case "$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)" in
+        *" -m forgetest ") echo "$p" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Wait up to $2 seconds for pid $1 to end; true when it has.
+gone_within() {
+    n=0
+    while alive "$1"; do
+        [ $n -ge "$2" ] && return 1
+        sleep 1
+        n=$((n + 1))
+    done
+    return 0
+}
 
 case "$1" in
   start)
+    if p=$(running); then
+      echo "forgetest is already running ($p)"
+      exit 0
+    fi
     echo "Starting forgetest"
     mkdir -p "$DATA"
+    # Not the daemon: a pidfile left behind names a process that may now be
+    # another program, and start-stop-daemon would take one that runs its
+    # -x (a shell, or any busybox applet) for a running daemon and start
+    # nothing.
+    rm -f "$PIDFILE"
     start-stop-daemon -S -q -p $PIDFILE -m -b -x /bin/sh -- -c \
-      "exec /usr/bin/python3 -m forgetest >> $LOG 2>&1"
+      "exec env -i PATH=$DAEMON_PATH $PYTHON -m forgetest >> $LOG 2>&1"
     ;;
   stop)
     echo "Stopping forgetest"
-    start-stop-daemon -K -q -p $PIDFILE
+    if p=$(running); then
+      kill -TERM "$p" 2>/dev/null
+      if ! gone_within "$p" $STOP_TERM_S; then
+        kill -KILL "$p" 2>/dev/null
+        gone_within "$p" $STOP_KILL_S || echo "forgetest: pid $p did not end"
+      fi
+    fi
     rm -f $PIDFILE
     ;;
   restart)
     $0 stop
-    sleep 1
     $0 start
     ;;
   status)
-    if [ -f $PIDFILE ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
-      echo "forgetest is running"
+    if p=$(running); then
+      echo "forgetest is running ($p)"
       exit 0
     fi
     echo "forgetest is not running"

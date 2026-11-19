@@ -11,4 +11,5 @@ managed_components/
 
 # Host test binaries.
 test/policy_test
+test/relays_test
 test/*.o

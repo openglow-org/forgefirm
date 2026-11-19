@@ -4,6 +4,7 @@
 # SPDX-License-Identifier:    MIT
 
 import contextlib
+import fnmatch
 import glob
 import gzip
 import hashlib
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -108,6 +110,15 @@ def field(out, key):
     return [ln[len(key) + 1:] for ln in out.splitlines() if ln.startswith(key + "=")][0]
 
 
+def no_namespace(case, why):
+    """A layer script that could not be run here: a skip on a workstation,
+    a failure on a hosted runner, which has root through sudo, so a case
+    that did not run there is a broken harness, never a pass."""
+    if os.environ.get("GITHUB_ACTIONS"):
+        case.fail(why)
+    case.skipTest(why)
+
+
 @unittest.skipUnless(os.path.isdir(LAYER) and shutil.which("unshare"), "needs Linux and a forgefirm checkout")
 class MachineNameTests(unittest.TestCase):
     """forgefirm-hostname and forgefirm-banner, the layer's own files."""
@@ -115,7 +126,7 @@ class MachineNameTests(unittest.TestCase):
     def named(self, macs):
         out = run_layer_script("forgefirm-hostname/files/forgefirm-hostname", macs, {"hostname": "forgefirm\n"})
         if out is None:
-            self.skipTest("no namespace can be made here")
+            no_namespace(self, "no namespace can be made here")
         self.assertEqual(field(out, "rc"), "0", out)
         self.assertEqual(field(out, "file"), field(out, "name"), out)
         return field(out, "name")
@@ -130,7 +141,7 @@ class MachineNameTests(unittest.TestCase):
         out = run_layer_script("forgefirm-banner/files/forgefirm-banner", {"wlan0": "02:00:00:00:12:ab"},
                                {"issue": base}, net=True)
         if out is None:
-            self.skipTest("no namespace can be made here")
+            no_namespace(self, "no namespace can be made here")
         self.assertEqual(field(out, "rc"), "0", out)
         issue = out.split("--- issue\n", 1)[1]
         self.assertTrue(issue.startswith(base + "\n"), issue)
@@ -145,7 +156,7 @@ class MachineNameTests(unittest.TestCase):
         out = run_layer_script("forgefirm-banner/files/forgefirm-banner", {"wlan0": "02:00:00:00:12:ab"},
                                {"issue": base}, net=True, held=True)
         if out is None:
-            self.skipTest("no namespace can be made here")
+            no_namespace(self, "no namespace can be made here")
         self.assertEqual(field(out, "rc"), "124", "the banner ran past the lock: " + out)
         self.assertEqual(out.split("--- issue\n", 1)[1], base, out)
 
@@ -275,7 +286,7 @@ class AccountRenderTests(unittest.TestCase):
         if p is None or "rc=" not in p.stdout:
             if p is not None and p.returncode == 97:
                 raise AssertionError("the namespace was made but not set up: %s" % p.stderr.strip())
-            self.skipTest("no namespace can be made here (root through sudo -n)")
+            no_namespace(self, "no namespace can be made here (root through sudo -n)")
         self.assertEqual(field(p.stdout, "rc"), "0", p.stdout + p.stderr)
         return json.loads(field(p.stdout, "files")), json.loads(field(p.stdout, "reach")), p.stdout
 
@@ -368,7 +379,7 @@ class ControllerInitTests(unittest.TestCase):
         if p is None or "rc=" not in p.stdout:
             if p is not None and p.returncode == 97:
                 raise AssertionError("the namespace was made but not set up: %s" % p.stderr.strip())
-            self.skipTest("no namespace can be made here (root through sudo -n)")
+            no_namespace(self, "no namespace can be made here (root through sudo -n)")
         with open(os.path.join(tree, "argv")) as f:
             argv = f.read().splitlines()
         with open(os.path.join(tree, "stdin")) as f:
@@ -376,6 +387,164 @@ class ControllerInitTests(unittest.TestCase):
         self.assertEqual(argv[-1], "http://127.0.0.1:80/controller/start", argv)
         self.assertFalse([a for a in argv if token in a], argv)
         self.assertIn('header = "X-ForgeFIRM-Token: %s"\n' % token, stdin)
+
+
+# A stand-in for `python3 -m forgetest` as the init script starts it: it
+# writes down its environment, notes each TERM, and ends on one unless the
+# tree's mode file says "deaf".
+FORGETEST_STAND_IN = """#!%(python)s
+import json, os, signal, sys, time
+T = %(tree)r
+with open(os.path.join(T, "env.%%d" %% os.getpid()), "w") as f:
+    json.dump(dict(os.environ), f)
+deaf = open(os.path.join(T, "mode")).read().strip() == "deaf"
+def on_term(*_):
+    with open(os.path.join(T, "terms"), "a") as f:
+        f.write("%%d\\n" %% os.getpid())
+    if not deaf:
+        sys.exit(0)
+signal.signal(signal.SIGTERM, on_term)
+while True:
+    time.sleep(0.05)
+"""
+
+
+def alive(pid):
+    """Whether pid runs: a zombie, ended and not yet reaped, does not."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(") ", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def until(cond, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while not cond():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+@unittest.skipUnless(os.path.isdir("/proc/self"), "needs Linux")
+class ForgetestInitTests(unittest.TestCase):
+    """forgetest.init, the dev image's init script for the acceptance
+    daemon, run over a scratch tree: its pidfile, data directory and
+    interpreter moved there, the daemon a stand-in."""
+
+    def setUp(self):
+        sbin = os.pathsep.join([os.environ.get("PATH", ""), "/usr/sbin", "/sbin"])
+        if not shutil.which("start-stop-daemon", path=sbin):
+            no_namespace(self, "no start-stop-daemon here")
+        self.path = sbin
+        self.tree = tempfile.mkdtemp(prefix="forgetest-ftinit.")
+        self.addCleanup(shutil.rmtree, self.tree, ignore_errors=True)
+        self.addCleanup(self.kill_all)
+        with open(os.path.join(self.tree, "mode"), "w") as f:
+            f.write("plain\n")
+        stand_in = os.path.join(self.tree, "python3")
+        with open(stand_in, "w") as f:
+            f.write(FORGETEST_STAND_IN % {"python": sys.executable, "tree": self.tree})
+        os.chmod(stand_in, 0o755)
+        with open(os.path.join(REPO, "forgetest", "forgetest.init")) as f:
+            script = f.read()
+        for old, new in (("PIDFILE=/var/run/forgetest.pid", "PIDFILE=%s/forgetest.pid" % self.tree),
+                         ("DATA=/data/forgetest", "DATA=%s/data" % self.tree),
+                         ("PYTHON=/usr/bin/python3", "PYTHON=" + stand_in)):
+            self.assertIn(old + "\n", script)
+            script = script.replace(old + "\n", new + "\n")
+        self.init_path = os.path.join(self.tree, "forgetest.init")
+        with open(self.init_path, "w") as f:
+            f.write(script)
+
+    def init(self, action, path=None, **env):
+        return subprocess.run(["sh", self.init_path, action], capture_output=True, text=True, timeout=60,
+                              env=dict(os.environ, PATH=path or self.path, **env))
+
+    def daemons(self):
+        """The pids whose command line names the stand-in: the daemon, and
+        a launch on its way to being one."""
+        out = []
+        for d in os.listdir("/proc"):
+            if not d.isdigit() or not alive(int(d)):
+                continue
+            try:
+                with open("/proc/%s/cmdline" % d, "rb") as f:
+                    if (self.tree + "/python3").encode() in f.read():
+                        out.append(int(d))
+            except OSError:
+                pass
+        return out
+
+    def started(self):
+        return sorted(int(n[4:]) for n in os.listdir(self.tree) if n.startswith("env."))
+
+    def kill_all(self):
+        for pid in self.daemons():
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+
+    def test_a_second_start_leaves_the_daemon_alone_and_the_daemon_takes_no_environment(self):
+        p = self.init("start", FORGETEST_MANIFEST="/elsewhere/manifest.json", GF_SYSFS_ROOT="/elsewhere/")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue(until(lambda: self.started()), "the daemon never started")
+        first = self.started()
+        p = self.init("start")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.daemons(), first, "a second start launched a second daemon")
+        with open(os.path.join(self.tree, "env.%d" % first[0])) as f:
+            env = json.load(f)
+        self.assertNotIn("FORGETEST_MANIFEST", env)
+        self.assertNotIn("GF_SYSFS_ROOT", env)
+        self.assertEqual(env.get("PATH"), "/usr/sbin:/usr/bin:/sbin:/bin")
+
+    def test_a_pidfile_naming_another_process_is_not_the_daemon(self):
+        # The daemon ended without a stop and its pid went to another
+        # process, a shell (start-stop-daemon's own -x): a stop leaves that
+        # process alone, and a start launches.
+        other = subprocess.Popen(["/bin/sh", "-c", "sleep 60; :"], start_new_session=True)
+        self.addCleanup(other.wait)
+        self.addCleanup(os.killpg, other.pid, 9)
+        pidfile = os.path.join(self.tree, "forgetest.pid")
+        with open(pidfile, "w") as f:
+            f.write("%d\n" % other.pid)
+        self.assertEqual(self.init("stop").returncode, 0)
+        self.assertTrue(alive(other.pid), "stop signaled a process that is not the daemon")
+        with open(pidfile, "w") as f:
+            f.write("%d\n" % other.pid)
+        p = self.init("start")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue(until(lambda: self.started()), "a start took another process for the daemon")
+        self.assertTrue(alive(other.pid))
+
+    def test_stop_waits_for_the_daemon_and_kills_one_that_does_not_end(self):
+        # The daemon takes no notice of TERM; the script's waits run on a
+        # sleep that returns once the daemon has noted the TERM (1 s at
+        # most), at once after that, and counts its calls. The KILL ends
+        # the daemon, and the one left unreaped, a zombie, has ended too:
+        # the wait after the KILL takes two sleeps at most, of its five.
+        with open(os.path.join(self.tree, "mode"), "w") as f:
+            f.write("deaf\n")
+        fast = os.path.join(self.tree, "bin")
+        os.makedirs(fast)
+        with open(os.path.join(fast, "sleep"), "w") as f:
+            f.write("#!/bin/sh\necho >> %s/sleeps\nn=0\nwhile [ ! -e %s/terms ] && [ $n -lt 100 ]; do\n"
+                    "    /bin/sleep 0.01\n    n=$((n + 1))\ndone\n" % (self.tree, self.tree))
+        os.chmod(os.path.join(fast, "sleep"), 0o755)
+        self.assertEqual(self.init("start").returncode, 0)
+        self.assertTrue(until(lambda: self.started()), "the daemon never started")
+        pid = self.started()[0]
+        p = self.init("stop", path=fast + os.pathsep + self.path)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        with open(os.path.join(self.tree, "terms")) as f:
+            self.assertEqual(f.read().split(), [str(pid)], "TERM was not asked first")
+        self.assertFalse(alive(pid), "stop returned with the daemon still running")
+        self.assertFalse(os.path.exists(os.path.join(self.tree, "forgetest.pid")))
+        with open(os.path.join(self.tree, "sleeps")) as f:
+            self.assertLessEqual(len(f.read().splitlines()), 10 + 2, "the wait after the KILL outlasted the daemon")
 
 
 class NetworkBootTests(unittest.TestCase):
@@ -893,6 +1062,20 @@ class LogTreeTests(unittest.TestCase):
         ours |= set(re.findall(r'^LOG_DIR="%s"$' % self.TREE, text("scripts", "install-forgefirm.sh"), re.M))
         self.assertTrue({"system", "install"} <= ours, ours)
         self.assertEqual(ours - rotated, set(), "no rotation for a directory this repository writes")
+        # forgetest's journal on the dev image, the file its init script appends to
+        init = text("forgetest", "forgetest.init")
+        journal = re.search(r"^DATA=(\S+)$", init, re.M).group(1) + "/" + \
+            re.search(r"^LOG=\$DATA/(\S+)$", init, re.M).group(1)
+        ft_rules = "\n".join(ln for ln in text("forgetest", "forgetest.logrotate").splitlines()
+                             if not ln.lstrip().startswith("#"))
+        self.assertTrue([g for g in re.findall(r"^(/\S+)\s*\{", ft_rules, re.M) if fnmatch.fnmatch(journal, g)],
+                        "no rotation for forgetest's journal %s" % journal)
+        # and the dev image's recipe fetches the rule and installs it where
+        # logrotate.conf reads it
+        recipe = text("meta-forgefirm", "recipes-forgefirm", "forgetest", "forgetest.bb")
+        self.assertIn("file://forgetest/forgetest.logrotate", recipe)
+        self.assertRegex(recipe, r"(?m)^\s*install\s+-Dm\s*0644\s+\$\{WORKDIR\}/forgetest/forgetest\.logrotate\s+"
+                                 r"\$\{D\}\$\{sysconfdir\}/logrotate\.d/\S+\s*$")
         # The loggers themselves are forgectrl's list (it renders their
         # rsyslog rules and makes their directories), with the directories
         # of the tree no logger feeds, read at the pinned revision.
@@ -948,6 +1131,32 @@ class LogTreeTests(unittest.TestCase):
         self.assertEqual([exists(r) for r in ("sensors/sensors.log.1.gz", "sensors/old.log.1.gz",
                                               "sensors/old.log.25.gz", "sensors/old.log.26.gz")],
                          [False, True, True, False], os.listdir(os.path.join(root, "sensors")))
+
+    @unittest.skipUnless(shutil.which("logrotate") or os.environ.get("GITHUB_ACTIONS"), "needs logrotate")
+    def test_forgetests_journal_rotates_under_the_daemon_that_holds_it(self):
+        # The dev image's rule over a scratch tree, the journal held open for
+        # appending as the init script holds it: past 2 MiB it rotates, and
+        # what the daemon writes after lands in the journal, not the copy.
+        root = tempfile.mkdtemp(prefix="forgetest-ftlog.")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        with open(os.path.join(REPO, "forgetest", "forgetest.logrotate"), encoding="utf-8") as f:
+            rules = f.read()
+        self.assertIn("/data/forgetest/", rules)
+        conf = os.path.join(root, "rules")
+        with open(conf, "w") as f:
+            f.write(rules.replace("/data/forgetest/", root + "/"))
+        journal = os.path.join(root, "daemon.log")
+        with open(journal, "ab") as daemon:
+            daemon.write(b"x" * (3 << 20))
+            daemon.flush()
+            p = subprocess.run(["logrotate", "-s", os.path.join(root, "state"), conf],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual((p.returncode, p.stderr), (0, ""))
+            daemon.write(b"after the rotation\n")
+            daemon.flush()
+        self.assertTrue(os.path.exists(journal + ".1.gz"), os.listdir(root))
+        with open(journal, "rb") as f:
+            self.assertEqual(f.read(), b"after the rotation\n")
 
 
 class RootfsLintTests(unittest.TestCase):

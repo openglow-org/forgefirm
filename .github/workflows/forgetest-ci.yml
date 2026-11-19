@@ -15,10 +15,13 @@
 #    a scratch checkout and small images
 #  - the layer's build checks (rootfs-lint.sh, image-check.py) on fixture
 #    trees and images, its boot steps in a private mount namespace, its log
-#    rotation under logrotate; the bench tools' heater-off and settings
-#    restore paths; one fflog in the three pinned components
+#    rotation under logrotate, forgetest's init script; the bench tools'
+#    heater-off and settings restore paths; one fflog in the three pinned
+#    components
 #  - shared UI files: theme.css and the vendored Bootstrap the page
 #    carries are byte-identical to forgectrl's at its pinned revision
+#  - the page's scripts: every script of the acceptance page, assembled
+#    as the daemon serves it, parses as a classic script (node's vm.Script)
 #  - coverage lint: every source path of every component pinned by the
 #    recipes must be selected by some catalog test's coverage globs or by a
 #    host-tested row naming the host test that proves it (the tree manifest
@@ -49,7 +52,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout forgefirm
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: forgefirm
 
@@ -67,21 +70,21 @@ jobs:
           done
 
       - name: Checkout meta-openglow (sibling) at the commit the kas lock names
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: openglow-org/meta-openglow
           ref: ${{ steps.pins.outputs.meta-openglow }}
           path: meta-openglow
 
       - name: Checkout forgectrl at its pin
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: openglow-org/forgectrl
           ref: ${{ steps.pins.outputs.forgectrl }}
           path: forgectrl-pin
 
       - name: Checkout forgeext at its pin
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: openglow-org/forgeext
           ref: ${{ steps.pins.outputs.forgeext }}
@@ -98,7 +101,7 @@ jobs:
         run: ./holds-wire/holds_wire_test
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -122,7 +125,7 @@ jobs:
         # too. pyflakes ends a SIGPIPE with status 1 and no line, and a
         # write to the capture file raises none.
         run: |
-          python -m pip install pyflakes
+          python -m pip install pyflakes==4.1.0
           python -B -m pyflakes --version
           { python -B -m pyflakes forgetest tests || test $? -eq 1; } > pyflakes.txt 2>&1 || { cat pyflakes.txt; exit 1; }
           if grep -E "undefined name|Traceback|^\.\.\. stopped$" pyflakes.txt; then exit 1; fi
@@ -130,6 +133,10 @@ jobs:
       - name: Shared UI files match forgectrl at its pinned revision
         working-directory: forgefirm
         run: python scripts/check-ui-vendor.py
+
+      - name: The acceptance page's scripts parse (each script of the page as served, parsed as a classic script)
+        working-directory: forgefirm
+        run: python -B scripts/check-page-js.py
 
       - name: Coverage lint (enforced)
         working-directory: forgefirm/forgetest

@@ -215,6 +215,17 @@ def run_case(case):
         fail("%s; the rerun was starved too" % e)
 
 
+# A line that asks for motion: a jog, a home, or a line with an axis word.
+MOTION_LINE = re.compile(r"^\$J=|^\$H|(?<![A-Z$])[XYZ][-+]?[\d.]")
+# A status report, and the position in it.
+REPORT = re.compile(r"<([A-Za-z]+)")
+POSITION = re.compile(r"[MW]Pos:([-\d.]+,[-\d.]+,[-\d.]+)")
+# A motion the controller took that shows no sign of running this long into
+# a wait for Idle (no report in another state, the position where it was)
+# is one that had nowhere to go: the wait takes the next Idle.
+MOVE_SEEN_S = 1.5
+
+
 class Sender:
     """The scripted sender: every line it receives is classified, and the
     responses (ok, error:N) are counted apart from everything else."""
@@ -225,6 +236,10 @@ class Sender:
         self.other = []             # messages, reports, the banner
         self.lock = threading.Lock()
         self.closed = False         # the controller closed the socket
+        # A motion line the controller took and no wait has seen run yet,
+        # and the position the last report gave when it was sent.
+        self.pending = False
+        self.pending_from = None
         for _ in range(50):
             try:
                 self.sock = socket.create_connection((host, port), timeout=1)
@@ -270,7 +285,12 @@ class Sender:
 
     def send(self, line, timeout=5.0):
         """Send one line and return its response: the one response that
-        arrives for it."""
+        arrives for it. A motion line answered ok is pending until a wait
+        sees it run (wait_state), from where a fresh poll put the head just
+        before it went: a frame shift or the port's move since the last
+        poll moves the reported position with no motion of this line's."""
+        motion = bool(MOTION_LINE.search(line))
+        before = self.report()[1] if motion else None
         n = self.count()
         self.sock.sendall((line + self.eol).encode())
         end = time.monotonic() + timeout
@@ -278,14 +298,21 @@ class Sender:
             watch_check()
             if self.count() > n:
                 with self.lock:
-                    return self.responses[n]
+                    r = self.responses[n]
+                if motion and r == "ok":
+                    self.pending, self.pending_from = True, before
+                return r
             time.sleep(0.01)
         fail("no response to the sender's %r" % line)
 
     def realtime(self, byte):
+        if byte == b"\x18":
+            self.pending = False        # a reset drops what the planner held
         self.sock.sendall(byte)
 
-    def state(self):
+    def report(self):
+        """The state and the position (None when the report has none) in
+        the answer to a fresh poll."""
         with self.lock:
             n = len(self.other)
         self.sock.sendall(b"?")
@@ -294,21 +321,33 @@ class Sender:
             watch_check()
             with self.lock:
                 for line in self.other[n:]:
-                    m = re.match(r"<([A-Za-z]+)", line)
+                    m = REPORT.match(line)
                     if m:
-                        return m.group(1)
+                        p = POSITION.search(line)
+                        return m.group(1), (p.group(1) if p else None)
             time.sleep(0.01)
         fail("no status report")
 
+    def state(self):
+        return self.report()[0]
+
     def wait_state(self, want, timeout=20.0):
         """The state in the answers to fresh polls. Idle counts in two
-        answers in a row: a block planned and not yet started answers Idle
-        once, and is running by the next."""
-        end = time.monotonic() + timeout
+        answers in a row, and after a motion line the controller took, only
+        once the motion has shown: a report in another state, or the
+        position away from where it stood when the line went, or
+        MOVE_SEEN_S with neither (a move to where the head already is). The
+        Idle a jog answers before it starts is not the jog's end."""
+        start = time.monotonic()
+        end = start + timeout
         need = 2 if want == "Idle" else 1
         seen = 0
         while time.monotonic() < end:
-            seen = seen + 1 if self.state() == want else 0
+            st, pos = self.report()
+            if self.pending and (st != "Idle" or time.monotonic() - start >= MOVE_SEEN_S or
+                                 (pos is not None and self.pending_from is not None and pos != self.pending_from)):
+                self.pending = False
+            seen = seen + 1 if st == want and not (want == "Idle" and self.pending) else 0
             if seen == need:
                 return
             time.sleep(0.1)

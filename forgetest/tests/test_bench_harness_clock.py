@@ -17,7 +17,14 @@ a 2 to 3 s step lands when it falls inside a 2 s wait. The wait must still
 return the answer. The harnesses' own waits are copies of the same loops,
 and no harness names a source of the wall clock: time.time or
 time.time_ns, a name imported from time or the module under another name,
-datetime, or CLOCK_REALTIME."""
+datetime, or CLOCK_REALTIME.
+
+The sender's wait for Idle after a jog it sent waits for the jog: a loaded
+host can leave a jog planned and not yet started for several polls, each
+answering Idle at the old position, and a wait that took those for the
+jog's end sends the next jog into a moving machine. The old position is
+the one a poll gives just before the jog goes, so a frame shift or the
+port's jog since the sender last polled is not taken for the jog."""
 import contextlib
 import importlib.util
 import io
@@ -113,6 +120,58 @@ class StandIn:
         self.srv.close()
 
 
+class LateJog(StandIn):
+    """A controller whose motion starts late: after the ok of a jog ($J=),
+    a home ($H) or a G0 or G1 move, the first LATE polls answer Idle where
+    the head stood, the next two Jog on the way, and the rest Idle at the
+    motion's end, 5 mm on. An M103 line shifts
+    the reported frame 3 mm with no motion, as the tray's mode does, and
+    `x` moved from outside is the port's jog. Answers at once."""
+
+    LATE = 4
+
+    def __init__(self):
+        self.polls_after_jog = None
+        self.x = 0.0                # where the head reads before the jog
+        super().__init__()
+
+    def serve(self):
+        try:
+            conn, _ = self.srv.accept()
+        except OSError:
+            return
+        line = b""
+        with conn:
+            while True:
+                try:
+                    data = conn.recv(4096)
+                except OSError:
+                    return
+                if not data:
+                    return
+                for b in data:
+                    if b == ord("?"):
+                        n = self.polls_after_jog
+                        if n is None or n < self.LATE:
+                            st, x = "Idle", self.x
+                        elif n < self.LATE + 2:
+                            st, x = "Jog", self.x + (n - self.LATE + 1)
+                        else:
+                            st, x = "Idle", self.x + 5.0
+                        if n is not None:
+                            self.polls_after_jog = n + 1
+                        conn.sendall(b"<%s|MPos:%.3f,0.000,0.000|FS:0,0>\r\n" % (st.encode(), x))
+                    elif b == ord("\n"):
+                        if line.startswith(b"M103"):
+                            self.x += 3.0
+                        if line.startswith((b"$J=", b"$H", b"G0 ", b"G1 ")):
+                            self.polls_after_jog = 0
+                        line = b""
+                        conn.sendall(b"ok\r\n")
+                    else:
+                        line += bytes([b])
+
+
 class FakePort:
     """The port's client, its jog ending ANSWER_S after it was made."""
 
@@ -187,6 +246,37 @@ class SharedWaits(unittest.TestCase):
                 later.join()
         watch.thread.join(2)
         self.assertIn("max behind 25.1 ms", str(raised.exception))
+
+
+class JogWaits(unittest.TestCase):
+    def test_the_idle_before_a_jog_starts_is_not_its_end(self):
+        # After the sender's last poll, nothing; a frame shift (M103, no
+        # motion); the port's jog. Each moves the reported position, or
+        # not, before the sender's own jog, whose first polls answer Idle.
+        # And the sender's other motion lines, a G0 move and a home.
+        ct = load_ctlport()
+
+        def frame_shift(sender, peer):
+            self.assertEqual(sender.send("M103 P0", timeout=TIMEOUT_S), "ok")
+
+        def port_move(sender, peer):
+            peer.x += 2.0
+
+        jog = "$J=G91 X5 F600"
+        for name, between, line in (("control", lambda s, p: None, jog), ("frame shift", frame_shift, jog),
+                                    ("port move", port_move, jog), ("g-code move", lambda s, p: None, "G0 X5"),
+                                    ("home", lambda s, p: None, "$H")):
+            with self.subTest(name):
+                peer = LateJog()
+                self.addCleanup(peer.close)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    sender = ct.Sender(peer.port)
+                self.addCleanup(sender.close)
+                sender.state()                              # where the head stands
+                between(sender, peer)
+                self.assertEqual(sender.send(line, timeout=TIMEOUT_S), "ok")
+                sender.wait_state("Idle", timeout=TIMEOUT_S)
+                self.assertGreater(peer.polls_after_jog, LateJog.LATE + 2, "the wait ended before the jog ran")
 
 
 class NoWallClock(unittest.TestCase):

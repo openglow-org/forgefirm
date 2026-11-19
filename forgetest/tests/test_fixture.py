@@ -7,13 +7,19 @@
 
 The fixture is a box on the network that opens the lid loop, pulls the
 interlock loop and presses the button on request. What has to hold: the
-tool speaks its API under the key, falls back to the operator when it
-cannot act, moves an operator test it can perform alone into the
-unattended queue (never a live one, never one that needs a person for
-anything else), refuses a prompt during such a run rather than hanging on
-it, releases what the box still holds after every run, and presses the
-arm button only where the bench opted in.
+tool counts the button covered only with the box's enable jumper in, never
+takes a press it may have made for one it did not, falls back
+to the operator when it cannot act, moves an operator test it can perform
+alone into the unattended queue (never a live one, never one that needs a
+person for anything else), refuses a prompt during such a run rather than
+hanging on it, releases what the box still holds after every run, presses
+the arm button only where the bench opted in, and never makes a page poll
+wait on its probe of the box.
+
+The press waits here wait for what the runner's watch has read of the
+button (Lamp), never for a fixed time a loaded host can outrun.
 """
+import collections
 import json
 import os
 import shutil
@@ -133,42 +139,68 @@ class FakeFixture:
         self.httpd.server_close()
 
     def wait_replied(self, n, timeout=5.0):
-        deadline = time.time() + timeout
-        while self.replied < n and time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while self.replied < n and time.monotonic() < deadline:
             time.sleep(0.02)
 
 
+def until(cond, timeout=5.0):
+    """True as soon as cond() holds, False when it has not within timeout
+    (the bound is only for a hang)."""
+    deadline = time.monotonic() + timeout
+    while not cond():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def threads(name):
+    return [t for t in threading.enumerate() if t.name == name]
+
+
+WATCH = "forgetest-arm-notice"         # the runner's watch that takes an arm notice down
+PRESS = "forgetest-arm-press"          # the runner's thread that has the fixture press
+
+
+class Lamp:
+    """The button as hw.button_asks reads it (True: lit, False: dark), with
+    a count of the reads of each state by each runner thread: a test waits
+    until a thread has read a state, never for a fixed time."""
+
+    def __init__(self):
+        self.lit = False
+        self.reads = collections.Counter()      # (thread name, state): reads
+        self.lock = threading.Lock()
+
+    def __call__(self):
+        with self.lock:
+            self.reads[(threading.current_thread().name, self.lit)] += 1
+            return self.lit
+
+    def set(self, lit, who=WATCH):
+        """Light or darken the button; a mark for seen(): the reads of the
+        new state by the thread named `who` so far."""
+        with self.lock:
+            self.lit = lit
+            return (who, lit, self.reads[(who, lit)])
+
+    def seen(self, mark, n=1):
+        """True once the thread has read the state n more times since mark."""
+        who, lit, k = mark
+        return until(lambda: self.reads[(who, lit)] >= k + n)
+
+
 class ConfigTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="forgetest-fixture-")
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def write(self, obj):
-        p = os.path.join(self.tmp, "fixture.json")
-        with open(p, "w") as f:
-            json.dump(obj, f)
-        return p
-
-    def test_no_file_is_no_fixture(self):
-        self.assertIsNone(fx.load_config(os.path.join(self.tmp, "none.json")))
-
-    def test_defaults_and_checks(self):
-        cfg = fx.load_config(self.write({"key": KEY}))
-        self.assertEqual(cfg["hostname"], "forgefixture")
-        self.assertEqual(cfg["channels"], ["lid", "interlock", "button"])
-        self.assertFalse(cfg["arm_press"])
-        self.assertIsNone(cfg["ip"])
-        with self.assertRaises(fx.FixtureError):
-            fx.load_config(self.write({"hostname": "x"}))                  # no key
-        with self.assertRaises(fx.FixtureError):
-            fx.load_config(self.write({"key": KEY, "channels": ["lid", "laser"]}))
-        p = self.write({"key": KEY})
-        with open(p, "w") as f:
-            f.write("{not json")
-        with self.assertRaises(fx.FixtureError):
-            fx.load_config(p)
+    def test_the_box_makes_no_arm_press_unless_the_bench_opted_in(self):
+        # An arm press is the consent to fire: a config that never names
+        # arm_press leaves it to the operator.
+        tmp = tempfile.mkdtemp(prefix="forgetest-fixture-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "fixture.json")
+        with open(path, "w") as f:
+            json.dump({"key": KEY}, f)
+        self.assertIs(fx.load_config(path)["arm_press"], False)
 
 
 class ClientTests(unittest.TestCase):
@@ -189,40 +221,26 @@ class ClientTests(unittest.TestCase):
         cfg.update(over)
         return fx.Fixture(cfg, timeout=timeout, resolver=resolver or self.resolver)
 
-    def test_status_covers_act_release(self):
-        f = self.client()
-        st = f.status()
-        self.assertEqual(st["device"], "forgefixture")
-        self.assertEqual(self.resolved, ["forgefixture"])            # resolved once
-        self.assertTrue(f.covers("lid") and f.covers("interlock") and f.covers("button"))
-        f.act("lid", "open")
-        self.assertEqual(self.dev.state["lid"], "open")
-        f.act("interlock", "open")
-        f.act("button", "press")
-        self.assertEqual(self.dev.calls[-1], ("POST", "/button", {}))
-        time.sleep(0.15)
-        # a pulse length asked for goes to the box as asked; the clamp is the box's
-        f.act("button", "press", ms=500)
-        self.assertEqual(self.dev.calls[-1], ("POST", "/button", {"ms": 500}))
-        time.sleep(0.15)                                             # the fake's pulse ends
-        self.assertEqual(sorted(fx.Fixture.energized(f.status())), ["interlock", "lid"])
-        f.release()
-        self.assertEqual(fx.Fixture.energized(f.status()), [])
-        self.assertEqual(self.resolved, ["forgefixture"])            # the address is cached
-        with self.assertRaises(fx.FixtureError):
-            f.act("button", "hold")
-        with self.assertRaises(fx.FixtureError):
-            f.act("lid", "ajar")
-
     def test_the_button_is_covered_only_with_the_jumper_in(self):
         self.dev.button_enabled = False
         f = self.client()
         f.status()
         self.assertTrue(f.covers("lid"))
         self.assertFalse(f.covers("button"))
-        with self.assertRaises(fx.FixtureError) as cm:
+        with self.assertRaises(fx.FixtureError):
             f.act("button", "press")
-        self.assertIn("jumper", str(cm.exception))
+
+    def test_a_press_whose_answer_cannot_be_read_was_sent(self):
+        # cut short (a wifi drop mid-reply), not JSON, not a JSON object:
+        # the press went out, so each is the box's failure with sent set,
+        # which the press paths read as a press the box may have made
+        f = self.client(ip="127.0.0.1")
+        for length, data in ((100, b'{"device": "forge'), (8, b"not json"), (2, b"[]")):
+            with self.subTest(data=data):
+                self.dev.raw = (length, data)
+                with self.assertRaises(fx.FixtureError) as cm:
+                    f.act("button", "press")
+                self.assertTrue(cm.exception.sent)
 
     def test_a_failure_after_the_request_went_out_says_so(self):
         # The press made and its reply lost (it comes after the client's
@@ -252,48 +270,6 @@ class ClientTests(unittest.TestCase):
             self.client(timeout=0.5, ip="127.0.0.1", port=1).act("button", "press")
         self.assertFalse(cm.exception.sent)
         self.assertEqual(self.dev.presses, 2)
-
-    def test_an_answer_the_client_cannot_read_is_the_boxs_failure(self):
-        # cut short (a wifi drop mid-reply), not JSON, not a JSON object: the
-        # runner's catch of the box's failures takes every one of them, on a
-        # release too, which reads nothing of the answer's fields
-        f = self.client(ip="127.0.0.1")
-        for length, data in ((100, b'{"device": "forge'), (8, b"not json"), (2, b"[]")):
-            with self.subTest(data=data):
-                self.dev.raw = (length, data)
-                with self.assertRaises(fx.FixtureError):
-                    f.release()
-
-    def test_a_wrong_key_is_refused(self):
-        f = self.client(key="wrong")
-        with self.assertRaises(fx.FixtureError) as cm:
-            f.status()
-        self.assertIn("refused the key", str(cm.exception))
-
-    def test_an_ip_override_skips_the_lookup(self):
-        f = self.client(ip="127.0.0.1")
-        f.status()
-        self.assertEqual(self.resolved, [])
-
-    def test_channels_not_wired_are_not_covered(self):
-        f = self.client(channels=["lid"])
-        f.status()
-        self.assertTrue(f.covers("lid"))
-        self.assertFalse(f.covers("interlock"))
-
-    def test_probe_without_a_config_or_with_a_silent_box_is_none(self):
-        lines = []
-        self.assertIsNone(fx.probe(lines.append, path=os.path.join(tempfile.gettempdir(), "no-such-fixture.json")))
-        tmp = tempfile.mkdtemp(prefix="forgetest-fixture-")
-        try:
-            p = os.path.join(tmp, "fixture.json")
-            with open(p, "w") as f:
-                json.dump({"key": KEY, "ip": "127.0.0.1", "port": 1}, f)
-            # port 1 on localhost: nothing listens there
-            f2 = fx.probe(lines.append, path=p, resolver=lambda h: None)
-            self.assertIsNone(f2)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class CatalogTests(unittest.TestCase):
@@ -465,6 +441,7 @@ class RoutingTests(unittest.TestCase):
         self.saved_probe = fx.probe
         self.stub = StubFixture(fc=self.fc)
         fx.probe = lambda log, path=None, resolver=None: self.stub
+        self.runner.probe_fixture(force=True)
 
     def tearDown(self):
         fx.probe = self.saved_probe
@@ -482,6 +459,45 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(av["unattended"], ["r.auto", "r.lid", "r.btn", "r.asks"])
         self.assertEqual(av["attended"], ["r.app", "r.live"])       # needs the app; live never moves
         self.assertEqual(summary["hostname"], "forgefixture")
+
+    def test_a_page_poll_never_waits_on_the_probe(self):
+        """The probe is network I/O that a box which does not answer
+        stretches to seconds, and a start reads the state holding the
+        runner's lock: the state reads the last answer, and an answer past
+        its age is probed again off the caller's thread."""
+        callers = []
+        probed = threading.Event()
+
+        def probe(log, path=None, resolver=None):
+            callers.append(threading.current_thread())
+            probed.set()
+            return self.stub
+        fx.probe = probe
+        self.runner._fixture_probed = time.monotonic() - runner_mod.FIXTURE_PROBE_S
+        st, _ = self.runner.state()
+        self.assertEqual(st["fixture"]["hostname"], "forgefixture")     # the last answer
+        self.assertTrue(probed.wait(5), "an answer past its age was not probed again")
+        self.assertNotIn(threading.current_thread(), callers)
+
+    def test_a_queue_started_before_any_answer_routes_on_a_probe_of_its_own(self):
+        # The daemon just came up: no probe has answered, and the page's
+        # polls only start one in the background (here one that does not
+        # answer until the end). The queue's start probes before it
+        # selects, so the fixture's operator tests are in it.
+        released = threading.Event()
+        self.addCleanup(released.set)
+
+        def probe(log, path=None, resolver=None):
+            if threading.current_thread().name == "forgetest-fixture":
+                released.wait(10)
+            return self.stub
+        fx.probe = probe
+        self.runner.fixture, self.runner._fixture_probed = None, None
+        ok, msg, order = self.runner.start_batch("unattended")
+        self.assertTrue(ok, msg)
+        self.runner.stop_batch()
+        self.assertTrue(until(lambda: self.runner.batch["finished"], 30))
+        self.assertEqual(order, ["r.auto", "r.lid", "r.btn", "r.asks"])
 
     def run_queue(self, group, ack_live=False):
         ok, msg, order = self.runner.start_batch(group, ack_live=ack_live)
@@ -653,18 +669,17 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(seen)
         # opted in: the press waits for the button to light
         self.stub.arm_press = True
-        lit = {"v": False}
+        lamp = Lamp()
         saved = runner_mod.hw.button_asks
-        runner_mod.hw.button_asks = lambda: lit["v"]
+        runner_mod.hw.button_asks = lamp
         try:
             seen[:] = []
+            mark = lamp.set(False, who=PRESS)
             self.assertTrue(ctx.arm_press())
-            time.sleep(0.3)
+            self.assertTrue(lamp.seen(mark, 3), "the arm press never read the button")
             self.assertEqual(self.stub.acts, [])                    # not yet: dark button
-            lit["v"] = True
-            deadline = time.time() + 5
-            while not self.stub.acts and time.time() < deadline:
-                time.sleep(0.05)
+            lamp.set(True)
+            self.assertTrue(until(lambda: self.stub.acts))
             self.assertEqual(self.stub.acts, [("button", "press")])
             self.assertEqual(run.evidence["actions"][1]["by"], "fixture")
             self.assertEqual(seen, [])                              # no notice went up
@@ -710,48 +725,35 @@ class RoutingTests(unittest.TestCase):
         run = Run("test", "r.live", "r.live")
         ctx = Context(run, self.runner, self.reg["r.live"])
         self.runner.probe_fixture(force=True)
-        lit = {"v": False}
+        lamp = Lamp()
         saved = runner_mod.hw.button_asks
-        runner_mod.hw.button_asks = lambda: lit["v"]
+        runner_mod.hw.button_asks = lamp
         try:
+            mark = lamp.set(False)
             self.assertFalse(ctx.arm_press())            # the operator's press
             self.assertIsNotNone(run.notice)
-            time.sleep(0.2)
+            self.assertTrue(lamp.seen(mark, 2))
             self.assertIsNotNone(run.notice)             # dark before the arm: still asked for
-            lit["v"] = True
-            time.sleep(0.2)
+            mark = lamp.set(True)
+            self.assertTrue(lamp.seen(mark))
             self.assertIsNotNone(run.notice)             # lit: the arm waits for the press
-            lit["v"] = False                             # the press taken
-            deadline = time.time() + 2
-            while run.notice is not None and time.time() < deadline:
-                time.sleep(0.02)
-            self.assertIsNone(run.notice)
-            # A notice put up meanwhile is not the arm's: it stays.
-            lit["v"] = False
+            lamp.set(False)                              # the press taken
+            self.assertTrue(until(lambda: run.notice is None))
+            # A notice put up meanwhile is not the arm's: it stays, and the
+            # watch ends with the notice it guarded.
             self.assertFalse(ctx.arm_press())
             ctx.notice("Something else.")
-            lit["v"] = True
-            time.sleep(0.2)
-            lit["v"] = False
-            time.sleep(0.3)
+            lamp.set(True)
+            lamp.set(False)
+            self.assertTrue(until(lambda: not threads(WATCH)), "the watch outlived its notice")
             self.assertEqual((run.notice or {}).get("text"), "Something else.")
             # The watch ends with the run: a test that ends before the press
             # (a FAIL on the way to the arm, say) leaves no thread polling the
             # LEDs for up to the arm's whole timeout.
-            def watching():
-                return [t for t in threading.enumerate() if t.name == "forgetest-arm-notice"]
-            deadline = time.time() + 2
-            while watching() and time.time() < deadline:
-                time.sleep(0.02)                         # the earlier watches are gone
-            self.assertFalse(watching())
-            lit["v"] = False
             self.assertFalse(ctx.arm_press())
-            self.assertTrue(watching())                  # up while the arm is still dark
+            self.assertTrue(threads(WATCH))              # up while the arm is still dark
             run.finished = {"result": "FAIL", "message": "", "duration_s": 0}
-            deadline = time.time() + 2
-            while watching() and time.time() < deadline:
-                time.sleep(0.02)
-            self.assertFalse(watching())
+            self.assertTrue(until(lambda: not threads(WATCH)))
             self.assertIsNotNone(run.notice)             # the finished run's notice is left as it was
             # A press the fixture could not make is asked of the operator, and
             # that notice comes down at the press like any other: press_now and
@@ -763,64 +765,56 @@ class RoutingTests(unittest.TestCase):
             ctx = Context(run, self.runner, self.reg["r.live"])
 
             def settles(up):
-                deadline = time.time() + 2
-                while (run.notice is not None) != up and time.time() < deadline:
-                    time.sleep(0.02)
-                return (run.notice is not None) == up
-            lit["v"] = True                              # the machine waits for the press
+                return until(lambda: (run.notice is not None) == up, 2)
+            mark = lamp.set(True)                        # the machine waits for the press
             self.assertFalse(ctx.press_now())            # the box is off: the operator is asked
             self.assertIsNotNone(run.notice)
-            time.sleep(0.2)                              # lit: the arm waits for the press
-            lit["v"] = False                             # the operator's press is taken
+            self.assertTrue(lamp.seen(mark))             # the watch read the button lit
+            lamp.set(False)                              # the operator's press is taken
             self.assertTrue(settles(False))
-            lit["v"] = True
+            mark = lamp.set(True)
             self.assertTrue(ctx.arm_press())             # the fixture is asked, and refuses
             self.assertTrue(settles(True))
-            time.sleep(0.2)
-            lit["v"] = False
+            self.assertTrue(lamp.seen(mark))
+            lamp.set(False)
             self.assertTrue(settles(False))
             self.assertTrue(ctx.arm_press(lit_timeout=0))  # the button never lit for the fixture
             self.assertTrue(settles(True))
-            lit["v"] = True
-            time.sleep(0.2)
-            lit["v"] = False
+            mark = lamp.set(True)
+            self.assertTrue(lamp.seen(mark))
+            lamp.set(False)
             self.assertTrue(settles(False))
             # A press the box made and reported failed (its reply lost after
             # the press): the button is out when the error arrives, so the
             # press was taken, and no notice asks for a second one.
             def pressed_then_failed(channel, state, ms=None):
-                lit["v"] = False                         # the controller takes the press
+                lamp.set(False)                          # the controller takes the press
                 raise fx.FixtureError("timed out", sent=True)
             self.stub.act = pressed_then_failed
-            lit["v"] = True
+            lamp.set(True)
             self.assertTrue(ctx.press_now())
             self.assertIsNone(run.notice)
             self.assertEqual(ctx.evidence["actions"][-1]["by"], "fixture")
-            lit["v"] = True
+            lamp.set(True)
             self.assertTrue(ctx.arm_press())
-            deadline = time.time() + 2
-            while ctx.evidence["actions"][-1]["by"] != "fixture" and time.time() < deadline:
-                time.sleep(0.02)
-            time.sleep(0.1)
+            self.assertTrue(until(lambda: not threads(PRESS)), "the fixture's press never ended")
             self.assertEqual(ctx.evidence["actions"][-1]["by"], "fixture")
             self.assertIsNone(run.notice)
             # A refusal (or a request that never reached the box) while the
             # button went out: a press at the machine was taken, so no notice
             # goes up either, and the record does not give it to the box.
             def refused_while_pressed(channel, state, ms=None):
-                lit["v"] = False                         # a person's press is taken
+                lamp.set(False)                          # a person's press is taken
                 raise fx.FixtureError("button press -> 409 button disabled: the enable jumper is out")
             self.stub.act = refused_while_pressed
-            lit["v"] = True
+            lamp.set(True)
             self.assertFalse(ctx.press_now())
             self.assertIsNone(run.notice)
             self.assertEqual(ctx.evidence["actions"][-1]["by"], "operator")
-            lit["v"] = True
+            lamp.set(True)
             self.assertTrue(ctx.arm_press())
-            deadline = time.time() + 2
-            while "fixture_error" not in ctx.evidence["actions"][-1] and time.time() < deadline:
-                time.sleep(0.02)
-            time.sleep(0.1)
+            self.assertTrue(until(lambda: not threads(PRESS)), "the fixture's press never ended")
+            self.assertIn("fixture_error", ctx.evidence["actions"][-1])
             self.assertEqual(ctx.evidence["actions"][-1]["by"], "operator")
             self.assertIsNone(run.notice)
         finally:

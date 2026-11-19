@@ -14,7 +14,8 @@
 # set; a pass writes the set in one transaction; and the init script's
 # start, status and stop run the watcher, a second start leaves one, and
 # no watcher process survives the stop. The
-# runner's nft is the version the image carries or newer; the
+# runner's nft must be the version the image carries (poky scarthgap's
+# nftables 1.0.9) or newer, and the nft step prints and compares it; the
 # kernel side is the image's own business and is proven on the machine
 # (image.health).
 
@@ -35,10 +36,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: nft
-        run: sudo apt-get update && sudo apt-get install -y nftables
+      - name: nft, the image's version (1.0.9) or newer
+        run: |
+          sudo apt-get update && sudo apt-get install -y nftables
+          v=$(nft --version | sed -n 's/^nftables v\([0-9][0-9.]*\).*/\1/p')
+          echo "nft $v"
+          dpkg --compare-versions "$v" ge 1.0.9
 
       - name: The inbound filter on real traffic
         run: |

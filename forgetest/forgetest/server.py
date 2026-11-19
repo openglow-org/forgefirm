@@ -5,7 +5,10 @@
 
 """HTTP: the page, the JSON API, and the access rules.
 
-Access follows forgectrl's panel (auth.c): the Host header must be an
+The daemon listens on the loopback (__main__.py): the page embeds the
+token, so a client that can read the page can do anything the page does,
+and only the machine itself and an SSH session reach it. On top of that,
+access follows forgectrl's panel (auth.c): the Host header must be an
 address literal or localhost (no DNS names - the rebinding vehicle), a
 cross-site Sec-Fetch-Site is refused, an Origin must itself be a literal,
 and every state-changing call needs the bearer token that is generated on
@@ -342,11 +345,12 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(500, "%s: %s" % (type(e).__name__, e))
 
 
-def make_server(app, host="::", port=8090):
+def make_server(app, host="127.0.0.1", port=8090):
     handler = type("ForgetestHandler", (Handler,), {"app": app})
     ThreadingHTTPServer.allow_reuse_address = True
-    # An IPv6 bind address (the default "::") gives one dual-stack socket
-    # that serves IPv4 clients too; a dotted address keeps the IPv4 family.
+    # An IPv6 bind address ("::1", or "::" for a dual-stack socket that
+    # serves IPv4 clients too) takes the IPv6 family; a dotted address
+    # keeps the IPv4 one.
     server_cls = ThreadingHTTPServer
     if ":" in host:
         server_cls = type("ForgetestServer6", (ThreadingHTTPServer,),

@@ -1,0 +1,19 @@
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
+#
+# forgetest's journal on the dev image: the daemon's stderr, which its init
+# script appends to daemon.log, rotated with the logging tree's rules by
+# forgefirm-logging. The daemon holds the file open and writes no other, so
+# the rotation copies it and truncates it in place: the daemon's appends go
+# on at the start of the emptied file, never into the rotated copy.
+/data/forgetest/*.log {
+    size 2M
+    rotate 3
+    nodateext
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

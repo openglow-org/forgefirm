@@ -23,6 +23,7 @@ SRC_URI = " \
     file://forgetest/LICENSE \
     file://forgetest/forgetest/ \
     file://forgetest/forgetest.init \
+    file://forgetest/forgetest.logrotate \
     file://scripts/bench/ \
 "
 
@@ -43,7 +44,8 @@ inherit python3-dir update-rc.d forgefirm-manifest
 # acceptance code or bench tools records no result that can be inherited.
 FORGEFIRM_MANIFEST_SRC = "${WORKDIR}/forgetest/forgetest"
 FORGEFIRM_MANIFEST_DIRTY_TREES := "${THISDIR}/../../../forgetest/forgetest \
-    ${THISDIR}/../../../forgetest/forgetest.init ${THISDIR}/../../../scripts/bench"
+    ${THISDIR}/../../../forgetest/forgetest.init ${THISDIR}/../../../forgetest/forgetest.logrotate \
+    ${THISDIR}/../../../scripts/bench"
 
 # The standard-library packages the tool imports (the page server, the
 # catalog, the bench scripts), not the python3 meta-package: the dev image
@@ -98,6 +100,8 @@ do_install() {
         install -m 0755 $f ${D}${datadir}/forgetest/bench/
     done
     install -Dm 0755 ${WORKDIR}/forgetest/forgetest.init ${D}${sysconfdir}/init.d/forgetest
+    # daemon.log to a budget, rotated by forgefirm-logging's logrotate runs
+    install -Dm 0644 ${WORKDIR}/forgetest/forgetest.logrotate ${D}${sysconfdir}/logrotate.d/forgetest
 }
 
 FILES:${PN} += "${PYTHON_SITEPACKAGES_DIR}/forgetest ${datadir}/forgetest"

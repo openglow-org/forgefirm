@@ -423,9 +423,10 @@ class BaselineTests(BaselineFixture, unittest.TestCase):
         # head 1000 counts out: the hand-back stands the machine down to
         # empty the ring, and only refuses the return jog when the bytes
         # are still there afterwards (they are here: no daemon to restart
-        # a controller)
+        # a controller, whose wait runs on a clock that moves when it sleeps)
         self._pos_bytes(1000, 0, 0, 100, 140)
-        left = b.enforce("post", captured=cap)
+        with mock.patch.object(baseline, "time", helpers.Clock()):
+            left = b.enforce("post", captured=cap)
         items = {x.item: x for x in left}
         self.assertIn("pulse ring", items)
         self.assertEqual(items["pulse ring"].found, "40 unplayed bytes")
@@ -625,7 +626,9 @@ class BaselineTests(BaselineFixture, unittest.TestCase):
                     json.dump({"ts": "old", "sysfs": {"cnc/motor_lock": "0", "cnc/step_freq": "10000",
                                                          "cnc/y_mode": "1"}}, f)
                 baseline.uptime_s = lambda up=up: up
-                ref = baseline.boot_reference(self.lines.append, self.tmp)
+                # the retake's settle wait, with no daemon, on a clock that moves when it sleeps
+                with mock.patch.object(baseline, "time", helpers.Clock()):
+                    ref = baseline.boot_reference(self.lines.append, self.tmp)
                 if fresh:
                     self.assertTrue(any("retaking" in l for l in self.lines), self.lines)
                     self.assertNotEqual(ref["ts"], "old")
@@ -825,9 +828,7 @@ class CloudOwnedSysfsTests(unittest.TestCase):
 class PositionDeadbandTests(unittest.TestCase):
     """The counters count steps and a controller's own return lands within
     a few hundredths of a millimeter, not on the step: a difference that
-    small is quantization, not a leftover. Found on the bench reference,
-    where motion.lid-cancel-home returned the head twice, each within
-    0.04 mm, and failed the hand-back on the four steps left over."""
+    small is quantization, not a leftover."""
 
     def test_past_the_dead_band_is_a_leftover(self):
         over = int(baseline.POSITION_DEADBAND_MM * baseline.XY_STEPS_PER_MM) + 2
@@ -1743,7 +1744,8 @@ class BaselineModeTests(BaselineFixture, unittest.TestCase):
     def test_a_switch_to_grbl_sets_no_marker(self):
         seen = self.nohunt_marker()
         self.cloud()
-        ok, detail = self.bl().switch_mode("grbl")
+        with mock.patch.object(baseline, "GRBL_PORT_S", 0):
+            ok, detail = self.bl().switch_mode("grbl")
         self.assertFalse(ok)              # the fake has no Grbl port: the switch itself happened
         self.assertEqual(seen, [("/mode", {"controller": "grbl"}, False)])
         self.assertFalse(os.path.exists(baseline.NOHUNT_MARKER))

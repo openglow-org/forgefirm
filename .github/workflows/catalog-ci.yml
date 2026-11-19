@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout forgefirm
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: forgefirm
 
@@ -42,14 +42,14 @@ jobs:
           echo "forgectrl=$rev" >> "$GITHUB_OUTPUT"
 
       - name: Checkout forgefirm-extensions-catalog (sibling)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: openglow-org/forgefirm-extensions-catalog
           ref: ${{ (github.ref_name == 'next' || github.base_ref == 'next') && 'next' || 'main' }}
           path: forgefirm-extensions-catalog
 
       - name: Checkout forgectrl at its pin
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: openglow-org/forgectrl
           ref: ${{ steps.pins.outputs.forgectrl }}

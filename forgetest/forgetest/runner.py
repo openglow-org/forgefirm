@@ -84,8 +84,10 @@ BATCH_GROUPS = {
 }
 
 # A bench actuator (fixture.py) moves an operator test whose actions it
-# covers into the unattended queue. The probe that decides is one GET;
-# it is repeated at most this often, and before every run.
+# covers into the unattended queue. The probe that decides is network I/O
+# (an mDNS lookup and a GET, seconds when a configured box does not
+# answer); it is repeated at most this often, off the page's polls, and
+# before every run and queue.
 FIXTURE_PROBE_S = 30.0
 
 
@@ -1089,7 +1091,7 @@ class Runner:
         self.last = None
         self.batch = None
         self.fixture = None       # the bench actuator, when one is up (fixture.py)
-        self._fixture_probed = 0.0
+        self._fixture_probed = None   # time.monotonic() of the last probe's end
         self._fixture_lock = threading.Lock()
         self._fixture_said = None
         self.boot_ref = None
@@ -1116,17 +1118,21 @@ class Runner:
             r.log(msg)
 
     # -- the bench actuator ------------------------------------------------
+    def _fixture_fresh(self):
+        return self._fixture_probed is not None and time.monotonic() - self._fixture_probed < FIXTURE_PROBE_S
+
     def probe_fixture(self, force=False):
         """The fixture, up and answering, or None; re-probed at most every
         FIXTURE_PROBE_S unless forced (before a run). A probe that finds
         it gone, or a config that appeared, changes the queues' routing
         from then on. One probe at a time, and the probe counts from its
         completion: a caller that arrives while another's probe is in
-        flight (a page poll and a queue start right after the daemon
-        came up) waits for its answer instead of reading the stale
-        fixture, which routed the fixture's tests to nobody."""
+        flight (a queue start right after the daemon came up) waits for
+        its answer instead of reading the stale fixture, which would route
+        the fixture's tests to nobody. A page poll never calls this on its
+        own thread (cached_fixture)."""
         with self._fixture_lock:
-            if not force and time.time() - self._fixture_probed < FIXTURE_PROBE_S:
+            if not force and self._fixture_fresh():
                 return self.fixture
             had = self.fixture
             # a box that is not there is said once, not every probe
@@ -1141,13 +1147,23 @@ class Runner:
             if fx is None and had is not None:
                 self._note("fixture: %s no longer answers - running without it" % had.hostname)
             self.fixture = fx
-            self._fixture_probed = time.time()
+            self._fixture_probed = time.monotonic()
             return fx
 
+    def cached_fixture(self):
+        """The fixture as the last probe found it, never a probe on the
+        caller's thread: the state a page polls, and a start computes under
+        the runner's lock, must not wait out a box that does not answer.
+        An answer older than FIXTURE_PROBE_S starts one probe in the
+        background, and a later poll reads what it found."""
+        if not self._fixture_fresh() and not self._fixture_lock.locked():
+            threading.Thread(target=self.probe_fixture, daemon=True, name="forgetest-fixture").start()
+        return self.fixture
+
     def fixture_channels(self):
-        """The channels the fixture covers right now (the button only
-        with its enable jumper in)."""
-        fx = self.probe_fixture()
+        """The channels the fixture covers as the last probe found it (the
+        button only with its enable jumper in)."""
+        fx = self.cached_fixture()
         if fx is None:
             return ()
         return tuple(c for c in fx.channels if fx.covers(c))
@@ -1475,6 +1491,9 @@ class Runner:
             return False, "a queue is already running", None
         if self.busy():
             return False, "a run is in progress", None
+        # The queue's routing on an answer no older than FIXTURE_PROBE_S,
+        # probed here, outside the runner's lock, when the last is older.
+        self.probe_fixture()
         order = self.batch_selection(group)
         if not order:
             return False, "nothing to run: every %s test is already satisfied" % group, None

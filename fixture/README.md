@@ -118,5 +118,5 @@ sees two presses and not one long one.
 ## Layout
 
     main/         the firmware: main.c, wifi.c, api.c, relays.c, policy.c (the pure decisions)
-    test/         the host test of policy.c (./fixture.sh test)
+    test/         the host tests of policy.c and relays.c (./fixture.sh test)
     fixture.env.example, sdkconfig.defaults, dependencies.lock

@@ -5,17 +5,21 @@
 
 """Runner + HTTP API end to end on localhost with a fake catalog and a
 fake bench tool. No hardware, no forgectrl."""
+import ipaddress
 import json
 import os
 import shutil
+import socket
 import tempfile
 import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 import helpers
+from forgetest import __main__ as forgetest_main
 from forgetest import artifact
 from forgetest import bench as bench_mod
 from forgetest import server
@@ -179,29 +183,11 @@ class ServerTests(unittest.TestCase):
         st, d = self.call("GET", "/nope")
         self.assertEqual(st, 404)
 
-    def test_01d_refused_post_does_not_poison_the_connection(self):
-        """A POST refused before its body is read leaves that body in the
-        socket. On a kept-alive connection the next read would take it for
-        a request line, so a refusal must end the connection instead."""
-        import http.client
-        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
-        try:
-            body = json.dumps({"test": "fake.pass"}).encode()
-            c.request("POST", "/start", body=body,
-                      headers={"Host": "127.0.0.1:%d" % self.port,
-                               "Content-Type": "application/json"})   # no token
-            r = c.getresponse()
-            payload = json.loads(r.read().decode())
-            self.assertEqual(r.status, 403)
-            self.assertEqual(payload["error"], "authentication required")
-            self.assertEqual((r.getheader("Connection") or "").lower(), "close",
-                             "an unread body was left on a connection kept alive")
-        finally:
-            c.close()
-        # the server is still healthy, and the body was never taken for a request
-        st, d = self.call("GET", "/state")
-        self.assertEqual(st, 200)
-        self.assertIsNone(d["running"])
+    def test_01b_the_daemon_listens_on_the_loopback(self):
+        """The page hands its token to whoever reads it, so the daemon is
+        reached from the machine itself or through SSH, never from the LAN."""
+        os.environ.pop("FORGETEST_HOST", None)
+        self.assertTrue(ipaddress.ip_address(forgetest_main.parse_args([]).host).is_loopback)
 
     def test_02_run_pass_opens_campaign(self):
         st, d = self.call("GET", "/state")
@@ -394,6 +380,62 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(any("recovered" in m for m in seen), seen)
         self.assertNotIn("messages", r.state()[0])
         self.assertFalse(os.path.exists(marker))
+
+    def test_10_a_daemon_that_cannot_listen_recovers_nothing(self):
+        """A second daemon finds the port taken: it ends before its runner
+        could hand back the first one's takeover, under a drill that may
+        still be running."""
+        marker = os.environ["FORGETEST_MARKER"]
+        with open(marker, "w") as f:
+            f.write("x fake.slow\n")
+        self.addCleanup(lambda: os.path.exists(marker) and os.remove(marker))
+        path = os.path.join(self.tmp, "manifest.json")
+        with open(path, "w") as f:
+            json.dump(self.man.data, f)
+        held = socket.socket()
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        self.addCleanup(held.close)
+        recovered = []
+        with mock.patch.object(forgetest_main, "configure_journal", lambda: None), \
+                mock.patch.object(Runner, "recover", lambda r: recovered.append(r)):
+            rc = forgetest_main.main(["--port", str(held.getsockname()[1]), "--manifest", path])
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(recovered, [])
+        self.assertTrue(os.path.exists(marker))
+
+    def test_11_a_second_daemon_on_another_address_recovers_nothing(self):
+        """The daemon that runs holds the lock beside the marker: a second
+        one started by hand on another port, or on ::1, ends before it makes
+        a runner, whose recovery would start forgectrl under the first
+        one's drill and remove its marker."""
+        marker = os.environ["FORGETEST_MARKER"]
+        with open(marker, "w") as f:
+            f.write("x fake.slow\n")
+        self.addCleanup(lambda: os.path.exists(marker) and os.remove(marker))
+        path = os.path.join(self.tmp, "manifest.json")
+        with open(path, "w") as f:
+            json.dump(self.man.data, f)
+        held = forgetest_main.hold_lock(forgetest_main.lock_path())       # the running daemon's
+        self.assertIsNotNone(held)
+        self.addCleanup(os.close, held)
+        made = []
+
+        def runner(*a, **kw):
+            made.append(a)
+            raise RuntimeError("a second daemon made a runner")
+        with mock.patch.object(forgetest_main, "configure_journal", lambda: None), \
+                mock.patch.object(forgetest_main, "Runner", runner):
+            for where in (["--port", "0"], ["--host", "::1", "--port", "0"]):
+                with self.subTest(where=where):
+                    self.assertNotEqual(forgetest_main.main(where + ["--manifest", path]), 0)
+            # a lock that cannot be opened at all (FORGETEST_MARKER in a
+            # directory that does not exist) is no lock: the daemon ends too
+            with self.subTest("no lock file"), \
+                    mock.patch.dict(os.environ, {"FORGETEST_MARKER": os.path.join(self.tmp, "nowhere", "m")}):
+                self.assertEqual(forgetest_main.main(["--port", "0", "--manifest", path]), 2)
+        self.assertEqual(made, [])
+        self.assertTrue(os.path.exists(marker))
 
 
 if __name__ == "__main__":

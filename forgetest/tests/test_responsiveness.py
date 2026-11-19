@@ -5,12 +5,12 @@
 
 """The caches behind the page's state.
 
-Every poll used to re-read and re-parse the whole result log and recompute
-every test's domain fingerprint; a result record carries its run log, so
-the file reaches megabytes over a campaign. Both are now kept between
-polls, and a stale cache would misjudge the gate: the log cache picks up
-what is appended or replaced and never counts a partial line, and the
-fingerprint cache never serves a changed manifest or one it cannot key.
+A result record carries its run log, so the result log reaches megabytes
+over a campaign: the parsed log and every test's domain fingerprint are
+kept between polls, and a stale cache would misjudge the gate. The log
+cache picks up what is appended or replaced and never counts a partial
+line, and the fingerprint cache never serves a changed manifest or one it
+cannot key.
 """
 import os
 import shutil
