@@ -7,8 +7,11 @@
 
 Every test record is redacted before it enters the artifact (redact.py), so
 the committed file carries no identity of the machine that ran the campaign.
-It happens inside build(), ahead of the self-hash and the signature. The
-gate reads none of the redacted fields.
+It happens inside build(), ahead of the self-hash and the signature, with
+one Redactor for the whole export (redact()), which also redacts the
+reason typed for the last invalidate-all. The gate reads none of the
+redacted fields: what it reads is kept by its place (_KEEP_RECORD,
+_KEEP_OTHER, _KEEP_TOP).
 
 The exporter serializes the campaign state with, for every catalog test,
 the winning result record (same-campaign PASS or inherited PASS, with its
@@ -47,8 +50,8 @@ from . import VERSION
 from . import campaign as _campaign
 from . import manifest as _manifest
 from . import provenance as _provenance
+from . import redact as _redact
 from .log import data_dir, now_ts
-from .redact import scrub
 
 FORMAT = 2
 SIGN_PRINCIPAL = "forgetest-bench"
@@ -63,6 +66,18 @@ _RESULT_KEYS = ("ts", "seq", "boot", "campaign", "test", "result", "fingerprint"
 _OTHER_KEYS = ("ts", "seq", "boot", "campaign", "result", "message", "needs_disposition",
                "fixture_error", "not_run", "not_recorded", "found_before", "found_after", "found_during",
                "leftovers", "safety", "carried")
+# The places in an exported record, and in a result beside it, whose values
+# the gate reads or recomputes (verify): kept as recorded, never redacted.
+# A key of the same name deeper inside a record, in a test's own evidence,
+# is redacted like any other (redact.py). None stands for any list index.
+_KEEP_RECORD = (("ts",), ("seq",), ("campaign",), ("result",), ("fingerprint",), ("manifest_sha",),
+                ("provenance", "clean"))
+_KEEP_OTHER = (("seq",), ("result",), ("needs_disposition",), ("safety",), ("leftovers", None, "item"),
+               ("disposition", "seq"))
+# Of the last invalidate-all and its epoch: the record's type, its time and
+# its place in the log, which the gate judges every PASS by. The reason the
+# operator typed is redacted.
+_KEEP_TOP = (("t",), ("ts",), ("seq",), ("boot",))
 
 
 def _record(rec, keys=_RESULT_KEYS):
@@ -75,10 +90,38 @@ def body_sha(art):
     return _manifest.sha256_text(_manifest.canonical(body))
 
 
-def build(state, tests, manifest, records, catalog_hash):
+def redact(entries, identity=None, top=None):
+    """Redact, in place, each test entry's record and the results beside
+    it, with one Redactor for the whole artifact (redact.py), and return
+    `top` (a dict of the artifact's own values: the last invalidate-all and
+    its epoch) redacted by the same one. It is seeded with `identity`, the
+    names of the machine the export runs on (redact.machine_identity()
+    when None), and taught every value any of them holds under an
+    identifying key before any is redacted: a name one record holds goes
+    from every other, and each value keeps one number throughout. The
+    places the gate reads (_KEEP_RECORD, _KEEP_OTHER, _KEEP_TOP) are kept
+    as recorded."""
+    r = _redact.Redactor(_redact.machine_identity() if identity is None else identity)
+    top = dict(top or {})
+    for e in entries:
+        r.learn(e.get("record"), _KEEP_RECORD)
+        for o in e.get("others") or ():
+            r.learn(o, _KEEP_OTHER)
+    for v in top.values():
+        r.learn(v, _KEEP_TOP)
+    for e in entries:
+        if e.get("record") is not None:
+            e["record"] = r.value(e["record"], _KEEP_RECORD)
+        if isinstance(e.get("others"), list):
+            e["others"] = [r.value(o, _KEEP_OTHER) for o in e["others"]]
+    return {k: r.value(v, _KEEP_TOP) for k, v in top.items()}
+
+
+def build(state, tests, manifest, records, catalog_hash, identity=None):
     """The artifact dict (self-hash included, unsigned). records: the full
     log, used to find the winning record for each test, the other results
-    on its fingerprint, and the dispositions."""
+    on its fingerprint, and the dispositions. identity: the names redact()
+    is seeded with (the machine this runs on when None)."""
     records = list(records)
     pos = _campaign.positions(records)
     disposals = {(r.get("test"), r.get("fingerprint"), pos[id(r)]): r
@@ -129,11 +172,12 @@ def build(state, tests, manifest, records, catalog_hash):
             "fingerprint": st["fingerprint"],
             "satisfied": st["satisfied"],
             "inherited": st["status"] == "inherited",
-            "record": scrub(placed(rec)) if rec else None,
+            "record": placed(rec) if rec else None,
             # every result on this fingerprint that is not a PASS
-            "others": scrub(others),
+            "others": others,
         })
         tests_out.append(entry)
+    top = redact(tests_out, identity, {"invalidate": state["invalidate"], "invalidate_epoch": state.get("epoch")})
 
     art = {
         "format": FORMAT,
@@ -144,8 +188,8 @@ def build(state, tests, manifest, records, catalog_hash):
         "identity_sha": manifest.identity_sha(),
         "catalog_hash": catalog_hash,
         "campaign": state["campaign"],
-        "invalidate": state["invalidate"],
-        "invalidate_epoch": state.get("epoch"),
+        "invalidate": top["invalidate"],
+        "invalidate_epoch": top["invalidate_epoch"],
         "authorized": state["authorized"],
         "counts": state["counts"],
         "unclean": state.get("unclean", []),
