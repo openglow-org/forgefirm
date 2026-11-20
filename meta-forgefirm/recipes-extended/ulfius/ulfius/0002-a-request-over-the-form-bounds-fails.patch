@@ -1,0 +1,93 @@
+A request over the form bounds fails, and is never cut
+
+Upstream's post iterator keeps every non-file field of a form body in
+the request's map before any endpoint runs: max_post_param_size cuts a
+longer field to its length, and nothing bounds the number of fields or
+their total. A cut value can still read as a valid one, every new field
+is a scan of the map, and the memory is held for as long as the body
+takes. With this change a field over max_post_param_size (a key sent
+more than once counts as its values joined, as the map keeps them),
+fields that together pass max_post_body_size, or more than ULFIUS_MAX_POST_FIELDS
+(256) fields make the iterator refuse the body, and a body the post
+processor refuses ends the request (the dispatcher answers MHD_NO): no
+endpoint runs on the fields that were kept.
+
+Upstream-Status: Pending
+Signed-off-by: Scott Wiederhold <s.e.wiederhold@gmail.com>
+
+diff --git a/src/ulfius.c b/src/ulfius.c
+index 45c04c8..30551e7 100644
+--- a/src/ulfius.c
++++ b/src/ulfius.c
+@@ -34,6 +34,11 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++/** The most form fields one request may hold **/
++#ifndef ULFIUS_MAX_POST_FIELDS
++#define ULFIUS_MAX_POST_FIELDS 256
++#endif
++
+ /** Define mock yder functions when yder is disabled **/
+ #ifdef U_DISABLE_YDER
+ int y_init_logs(const char * app, const unsigned long init_mode, const unsigned long init_level, const char * init_log_file, const char * message) {
+@@ -369,14 +374,38 @@ static int mhd_iterate_post_data (void * coninfo_cls, enum MHD_ValueKind kind, c
+         }
+       }
+       
+-      if (con_info->max_post_param_size && off > con_info->max_post_param_size) {
++      /* A field over max_post_param_size fails the request: it is never
++       * cut, since a cut value can still read as a valid one. A key sent
++       * more than once is one field, its values joined by commas as the
++       * map keeps them. So does a request whose fields together pass
++       * max_post_body_size, or that holds more than
++       * ULFIUS_MAX_POST_FIELDS of them: each new field is a scan of the
++       * map, and the fields are kept in memory before any endpoint runs. */
++      if (con_info->max_post_param_size &&
++          (u_map_has_key((struct _u_map *)con_info->request->map_post_body, key) ?
++           (uint64_t)u_map_get_length((struct _u_map *)con_info->request->map_post_body, key) + (off ? 0 : 1) : off) +
++          size > con_info->max_post_param_size) {
++        ret = MHD_NO;
+         break;
+       }
+-      
+-      if (con_info->max_post_param_size && off + size > con_info->max_post_param_size) {
+-        data_size = (size_t)(con_info->max_post_param_size - off);
++      if (!u_map_has_key((struct _u_map *)con_info->request->map_post_body, key) &&
++          u_map_count((struct _u_map *)con_info->request->map_post_body) >= ULFIUS_MAX_POST_FIELDS) {
++        ret = MHD_NO;
++        break;
+       }
+-      
++      if (con_info->u_instance->max_post_body_size) {
++        const struct _u_map * fields = con_info->request->map_post_body;
++        size_t total = size;
++        int i;
++        for (i = 0; i < fields->nb_values; i++) {
++          total += o_strlen(fields->keys[i]) + fields->lengths[i];
++        }
++        if (total > con_info->u_instance->max_post_body_size) {
++          ret = MHD_NO;
++          break;
++        }
++      }
++
+       if (filename != NULL) {
+         filename_param = msprintf("%s_filename", key);
+         if (!u_map_has_key((struct _u_map *)con_info->request->map_post_body, filename_param) && u_map_put((struct _u_map *)con_info->request->map_post_body, filename_param, filename) != U_OK) {
+@@ -570,7 +599,14 @@ static int ulfius_webservice_dispatcher (void * cls,
+         const char * content_type = u_map_get_case(con_info->request->map_header, ULFIUS_HTTP_HEADER_CONTENT);
+         if (0 == o_strncmp(MHD_HTTP_POST_ENCODING_FORM_URLENCODED, content_type, o_strlen(MHD_HTTP_POST_ENCODING_FORM_URLENCODED)) ||
+             0 == o_strncmp(MHD_HTTP_POST_ENCODING_MULTIPART_FORMDATA, content_type, o_strlen(MHD_HTTP_POST_ENCODING_MULTIPART_FORMDATA))) {
+-          MHD_post_process (con_info->post_processor, upload_data, *upload_data_size);
++          /* A body the post processor refused (a bound passed, a file
++           * callback that failed) ends the request: no endpoint runs on
++           * the fields it kept. */
++          if (con_info->has_post_processor &&
++              MHD_post_process (con_info->post_processor, upload_data, *upload_data_size) != MHD_YES) {
++            y_log_message(Y_LOG_LEVEL_DEBUG, "Ulfius - the post processor refused the body");
++            return MHD_NO;
++          }
+         }
+         *upload_data_size = 0;
+         return MHD_YES;

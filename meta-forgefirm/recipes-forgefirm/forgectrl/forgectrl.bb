@@ -18,9 +18,10 @@ S = "${WORKDIR}/git"
 
 inherit cmake update-rc.d forgefirm-manifest
 
-# jansson (settings, API bodies) and gnutls (the panel certificate) are
-# linked directly, not only through ulfius.
-DEPENDS += "ulfius jpeg jansson gnutls libxcrypt"
+# jansson (settings, API bodies), gnutls (the panel certificate) and
+# libmicrohttpd (the listeners' connection callback) are linked directly,
+# not only through ulfius.
+DEPENDS += "ulfius libmicrohttpd jpeg jansson gnutls libxcrypt"
 # media-ctl (a package of its own) and v4l2-ctl (v4l-utils) configure the
 # imx-media pipeline at runtime; the update manager drives ffboot + fwup
 # and verifies against the shipped keyring; release checks and downloads

@@ -22,6 +22,13 @@ SRCREV = "a0603447d3ed63c0880db396b9c395fb4bf6b559"
 # report channel reads the mapped address bytes that lie beyond it.
 SRC_URI += "file://0001-client_address-carries-the-whole-peer-sockaddr.patch"
 
+# A form body over its bounds fails, and is never cut: a field longer
+# than max_post_param_size, fields that together pass max_post_body_size,
+# or more than 256 fields end the request before any endpoint runs.
+# Upstream cuts a long field and bounds neither the count nor the total,
+# and keeps the fields in memory before forgectrl's guards run.
+SRC_URI += "file://0002-a-request-over-the-form-bounds-fails.patch"
+
 S = "${WORKDIR}/git"
 
 inherit cmake pkgconfig
