@@ -125,6 +125,11 @@ The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
 overrides the emission harness uses, and the switches are driven through
 the file-backed test source (GF_SWITCH_FILE: the EV_SW word as an integer).
+Each session's work folder (the controller's state folder GF_STATE_DIR
+with it) is on tmpfs when /dev/shm is one, as the state folder is on the
+machine: the controller publishes its status file there on the protocol
+thread, and on a disk that write can block the thread long enough to
+split a block in the stream.
 
 A case stops at once when its controller logs the armed clamp (the host
 kept the producer off the CPU past its lead, so the stream faulted the run
@@ -410,13 +415,26 @@ def wait_for_new(log, needle, n_before, timeout, sock=None):
     return False
 
 
+def tmpfs_dir():
+    """/dev/shm when it is a tmpfs this process can write, else None (the
+    default temp folder): where a session's work folder goes. The mount in
+    force at /dev/shm is the last one /proc/mounts lists there."""
+    try:
+        with open("/proc/mounts") as f:
+            types = [line.split()[2] for line in f if line.split()[1:2] == ["/dev/shm"]]
+    except OSError:
+        types = []
+    on_tmpfs = types[-1:] == ["tmpfs"]
+    return "/dev/shm" if on_tmpfs and os.access("/dev/shm", os.W_OK | os.X_OK) else None
+
+
 class Session:
     """One controller process with the lifecycle overrides applied."""
 
     def __init__(self, name, fire_ok=True, disarm_s=2, switches=None, conf_extra="",
                  armed_ack=True, ack_after_s=0.0, dump=False, attr_log=False):
         self.name = name
-        self.workdir = tempfile.mkdtemp(prefix="laser-lifecycle-")
+        self.workdir = tempfile.mkdtemp(prefix="laser-lifecycle-", dir=tmpfs_dir())
         # The stream the controller ships, when the case reads it.
         self.dump = os.path.join(self.workdir, "stream") if dump else None
         # The sysfs writes the hardware would get, when the case reads them.

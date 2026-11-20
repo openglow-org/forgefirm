@@ -170,10 +170,21 @@ over TCP, then checks the dumps against the kernel feeder contract:
  The sessions of rules 30 to 35 judge their idle gaps (rule 8) and their
  end (rule 7) as well
 
-A session that did not ask for a stall (GFSINK_STALL_MS of the producer,
-GFSINK_WRITE_STALL_MS of the sink's write; a session that asks for one
-judges a clamp by its own checks) stops at once when the controller logs
-the armed clamp: the host kept the
+Each session's work folder (the stream dump, the controller's state
+folder GF_STATE_DIR, the verdict file) is on tmpfs when /dev/shm is one,
+as the state folder is on the machine (/run/forgefirm). The controller
+publishes its status file there on the protocol thread at every change
+of state; on a disk that write can block that thread for longer than the
+core has segments prepared at a block's start, the planner runs dry
+mid-block, and the stream restarts with a whole preload, which the rules
+here would count as a move, a hold or a fire span too many.
+
+A session that did not ask for a stall of the producer (GFSINK_STALL_MS;
+a session that asks for one judges a clamp by its own checks) stops at
+once when the controller logs the armed clamp. That holds for the
+session that stalls the sink's write (GFSINK_WRITE_STALL_MS) too: a
+write stall cannot clamp by itself (rule 29), so a clamp there once is
+the host's, and one in the rerun as well fails the harness. The host kept the
 producer off the CPU past its lead, the stream faulted the run on purpose,
 and the rule did not run. A session whose moves stand on the lens
 reference (session Z, the canned cycles), whose controller logged the
@@ -451,6 +462,19 @@ JOB_NEXT = [
 ]
 
 
+def tmpfs_dir():
+    """/dev/shm when it is a tmpfs this process can write, else None (the
+    default temp folder): where a session's work folder goes. The mount in
+    force at /dev/shm is the last one /proc/mounts lists there."""
+    try:
+        with open("/proc/mounts") as f:
+            types = [line.split()[2] for line in f if line.split()[1:2] == ["/dev/shm"]]
+    except OSError:
+        types = []
+    on_tmpfs = types[-1:] == ["tmpfs"]
+    return "/dev/shm" if on_tmpfs and os.access("/dev/shm", os.W_OK | os.X_OK) else None
+
+
 def fail(msg):
     # A check that fails in a session the host starved fails on the fault:
     # the starve is the session's verdict. So is a check of a session's
@@ -704,9 +728,11 @@ def run_session(name, steps, conf=None, workdir=None, keep=False,
 
     A session the host starved (HostStarved) runs once more, from a new
     controller; a second starve fails the harness. No other failure runs
-    a session again, and a session that asks for a stall
-    (GFSINK_STALL_MS, GFSINK_WRITE_STALL_MS) is never judged starved: its
-    own checks judge a clamp, with no rerun. needs_reference: the
+    a session again, and a session that asks for a stall of the producer
+    (GFSINK_STALL_MS) is never judged starved: its own checks judge a
+    clamp, with no rerun. A stall of the sink's write
+    (GFSINK_WRITE_STALL_MS) clamps nothing by itself, so that session is
+    judged starved like any other. needs_reference: the
     session's moves stand on the lens reference, so a dropped homing
     reference is a starve too when a check fails after it, in the session
     or in judge, which takes the dump and runs inside the rerun."""
@@ -737,7 +763,7 @@ def run_session_once(name, steps, conf, workdir, keep, arm_required, env_extra, 
     global WATCH, DROPPED
     DROPPED = None
     if workdir is None:
-        workdir = tempfile.mkdtemp(prefix="laser-test-")
+        workdir = tempfile.mkdtemp(prefix="laser-test-", dir=tmpfs_dir())
     dump = os.path.join(workdir, "stream.bin")
     verdict = os.path.join(workdir, "cooling.state")
     latch_log = os.path.join(workdir, "latch.log")
@@ -769,11 +795,12 @@ def run_session_once(name, steps, conf, workdir, keep, arm_required, env_extra, 
 
     proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=workdir, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    # A stall the session asks for itself, of the producer or of the sink's
-    # write: its own checks judge a clamp (rules 28 and 29), with no rerun.
-    # One the caller's environment carries is the host's as far as the
-    # session knows.
-    stall_asked = any((env_extra or {}).get(k) for k in ("GFSINK_STALL_MS", "GFSINK_WRITE_STALL_MS"))
+    # A stall of the producer the session asks for itself: its own checks
+    # judge the clamp it forces (rule 28), with no rerun. A stall of the
+    # sink's write clamps nothing by itself (rule 29), so a clamp in that
+    # session is the host's, as in any other. One the caller's environment
+    # carries is the host's as far as the session knows.
+    stall_asked = bool((env_extra or {}).get("GFSINK_STALL_MS"))
     watch = WATCH = StderrWatch(proc, name, stall_asked, needs_reference)
     try:
         sock = None
