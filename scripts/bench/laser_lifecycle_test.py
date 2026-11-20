@@ -120,6 +120,18 @@ reported messages:
      window through the hold (no unlit close, no disarm), and the
      button's resume and the cleared verdict's resume run it on with no
      press
+ 28. feed hold cannot be turned off in laser mode: M53 P0 answers
+     error 20, and the job's next lines answer it too (until a $ line or
+     an empty line), with no FIRE tick shipped; after it, the sender's !
+     still holds an armed cut
+ 29. a resume inside a verdict's hold is refused: a ~, a button press and
+     a ~ in a pause-tier hold, inside the grace, are each answered that
+     the job stays held, and the head does not move; the window closes
+     laser_disarm_s after the verdict, and when the verdict clears the
+     job stays held, with no FIRE tick shipped, until a press
+ 30. a cut that starts under a pause-tier verdict is dark: the verdict
+     turns while the armed job sits at Idle with M3 on, and the job's
+     next cut is held with no FIRE tick shipped
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -135,7 +147,7 @@ A case stops at once when its controller logs the armed clamp (the host
 kept the producer off the CPU past its lead, so the stream faulted the run
 on purpose and the case did not run). It runs once more from new
 controllers, and a second starve fails the harness. The cases that send a
-byte inside the grace of a hold (rules 24 and 26) treat a hold not reached
+byte inside the grace of a hold (rules 24, 26 and 29) treat a hold not reached
 within 6 s, or a window the grace closed before their byte, the same way:
 a host too slow for the case, never a pass; so does rule 27, for its hold.
 No other failure runs a case again.
@@ -1771,6 +1783,133 @@ def test_a_resume_inside_the_grace_is_not_delayed_past_it():
         s.close()
 
 
+def test_m53_p0_is_refused():
+    """Rule 28: M53 P0 from a sender, which would make the core skip every
+    feed hold, the cooling verdict's pause among them. In laser mode it
+    answers error 20, and so do the job's next lines (after an error the
+    core refuses a job's lines until a $ line or an empty line): no
+    prompt, no motion, no FIRE tick from them. After it the sender's !
+    still holds an armed cut."""
+    tag = "m53-refused"
+    s = Session(tag, disarm_s=60, switches=SW_CLOSED, dump=True)
+    try:
+        if send_line(s.sock, "M53 P0", s.log, tolerate_error=True) != "error" or \
+                "error:20" not in "".join(s.log):
+            fail("[%s] M53 P0 was taken" % tag)
+        for line in ("M3 S100", "G1 X5 F600"):
+            if send_line(s.sock, line, s.log, tolerate_error=True) != "error":
+                fail("[%s] the job's line %r after the refused M53 P0 was taken" % (tag, line))
+        read_avail(s.sock, s.log, 0.5)
+        x = s.mpos_x()
+        if s.count(PROMPT) or s.armed_count() or x is None or abs(x) > 0.001 or s.fire_ticks():
+            fail("[%s] the refused job ran: %d prompts, armed %d, MPos X %s, %d FIRE ticks"
+                 % (tag, s.count(PROMPT), s.armed_count(), x, s.fire_ticks()))
+        send_line(s.sock, "$G", s.log)                  # a $ line: the next job
+        arm_by_press(s, tag, line="M3 S100")
+        send_line(s.sock, "G1 X30 F60", s.log)          # 30 s of motion
+        if s.wait_state("Run", 3) is None:
+            fail("[%s] the armed move did not start (state %s)" % (tag, s.state()))
+        time.sleep(0.5)
+        s.sock.sendall(b"!")
+        if s.wait_state("Hold", 3) is None:
+            fail("[%s] the sender's ! did not hold the armed cut (state %s)" % (tag, s.state()))
+        s.sock.sendall(b"\x18")
+        print("PASS [%s]: M53 P0 and the job's lines after it answered error 20 with nothing run, "
+              "and the sender's ! then held an armed cut" % tag)
+    finally:
+        s.close()
+
+
+def test_a_resume_in_a_verdict_hold_is_refused():
+    """Rule 29: a ~, a button press and a ~ inside the grace of a hold the
+    cooling verdict's pause tier took. Each is refused, the job held where
+    it stopped; the grace runs on from the verdict, so the window closes
+    laser_disarm_s after the hold, the last ~ well inside it, and when
+    the verdict clears the job stays held with nothing shipped lit until
+    a press."""
+    tag = "verdict-hold-resumes"
+    grace_s = 3
+    s = Session(tag, disarm_s=grace_s, switches=SW_CLOSED, dump=True)
+    try:
+        arm_by_press(s, tag, line="M3 S100")
+        send_line(s.sock, "G1 X30 F60", s.log)          # 30 s of motion
+        time.sleep(1.0)
+        s.set_verdict("OVERTEMP", fire_ok=False, hold=True, resume_ok=False)
+        held_in_time(s, tag)
+        t_held = time.monotonic()                       # the grace counts from no later than this
+        time.sleep(0.3)
+        x_held = s.mpos_x()
+        refused = s.count(STAYS_HELD)
+        window_still_open(s, tag, "the ~")
+        s.sock.sendall(b"~")                            # inside the grace
+        read_avail(s.sock, s.log, 0.4)
+        window_still_open(s, tag, "the press")
+        s.press_button()                                # inside the grace
+        read_avail(s.sock, s.log, 0.6)
+        # The last ~ 0.7 s before the grace ends: a refusal that started
+        # the grace over would hold the window open past the bound below.
+        read_avail(s.sock, s.log, max(0.0, t_held + grace_s - 0.7 - time.monotonic()))
+        window_still_open(s, tag, "the last ~")
+        s.sock.sendall(b"~")
+        read_avail(s.sock, s.log, 0.3)
+        window_still_open(s, tag, "the last ~'s answer")
+        x = s.mpos_x()
+        if s.count(STAYS_HELD) - refused != 3 or x is None or x_held is None or \
+                abs(x - x_held) > 0.001 or not s.state().startswith("Hold"):
+            fail("[%s] the ~, the press and the ~ in the verdict's hold were not each refused with the "
+                 "job held (%d refusals, MPos X %s -> %s, state %s)"
+                 % (tag, s.count(STAYS_HELD) - refused, x_held, x, s.state()))
+        if not wait_for(s.log, DISARMED, grace_s + 3, s.sock):
+            fail("[%s] the grace did not close the window in the verdict's hold" % tag)
+        closed_after = time.monotonic() - t_held
+        if closed_after > grace_s + 1.0:
+            fail("[%s] the window closed %.1f s after the hold, past laser_disarm_s (%d s) + 1 s: "
+                 "a refusal started the grace over" % (tag, closed_after, grace_s))
+        mark = s.dump_size()
+        s.set_verdict()                                 # the verdict clears
+        read_avail(s.sock, s.log, 3.0)
+        lit = s.fire_ticks(mark)
+        if lit:
+            fail("[%s] the cleared verdict resumed the job with no press: %d FIRE ticks shipped"
+                 % (tag, lit))
+        if s.disarmed_count() != 1 or s.count(RESUME_PROMPT) != 1 or not s.state().startswith("Hold"):
+            fail("[%s] the window closed %d times, or the clear did not ask for the button (%d "
+                 "prompts, state %s)" % (tag, s.disarmed_count(), s.count(RESUME_PROMPT), s.state()))
+        s.sock.sendall(b"\x18")
+        print("PASS [%s]: a ~, a press and a ~ in the verdict's hold were refused with the job held; "
+              "the window closed %.1f s after the hold, and the clear asked for the button with 0 FIRE "
+              "ticks shipped" % (tag, closed_after))
+    finally:
+        s.close()
+
+
+def test_a_cut_that_starts_under_a_pause_verdict_is_dark():
+    """Rule 30: the verdict turns to its pause tier while the armed job
+    sits at Idle with M3 on, between two of its cuts. The next cut starts
+    under the verdict: it is held, and it ships nothing lit, since no cut
+    was in progress for a lit deceleration to finish."""
+    tag = "verdict-idle-start"
+    s = Session(tag, disarm_s=60, switches=SW_CLOSED, dump=True)
+    try:
+        arm_by_press(s, tag, line="M3 S100")
+        send_line(s.sock, "G1 X2 F600", s.log)
+        wait_idle(s.sock, s.log)
+        s.set_verdict("OVERTEMP", fire_ok=False, hold=True, resume_ok=False)
+        time.sleep(1.6)                                 # past one publish and one read
+        mark = s.dump_size()
+        s.send_raw("G1 X30 F600")                       # the job's next cut
+        if s.wait_state("Hold:0", 4) is None:
+            fail("[%s] the cut that started under OVERTEMP was not held (state %s)" % (tag, s.state()))
+        lit = s.fire_ticks(mark)
+        if lit or s.disarmed_count() != 0:
+            fail("[%s] the cut that started under OVERTEMP shipped %d FIRE ticks (disarms %d)"
+                 % (tag, lit, s.disarmed_count()))
+        s.sock.sendall(b"\x18")
+        print("PASS [%s]: a cut that started under OVERTEMP was held with 0 FIRE ticks shipped" % tag)
+    finally:
+        s.close()
+
+
 def test_manual_home_closes_the_window():
     """Rule 22: a manual home runs at Idle, so the poll's homing-state
     close never sees it; the home itself closes the window."""
@@ -1924,6 +2063,9 @@ def main():
                  test_a_verdict_hold_with_63_typed_closes_its_window,
                  test_an_m6_parks_no_job,
                  test_a_resume_inside_the_grace_is_not_delayed_past_it,
+                 test_m53_p0_is_refused,
+                 test_a_resume_in_a_verdict_hold_is_refused,
+                 test_a_cut_that_starts_under_a_pause_verdict_is_dark,
                  test_sender_change_during_rearm_cancels,
                  test_status_files,
                  test_laser_keys_reload,

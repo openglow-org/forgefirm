@@ -11,7 +11,9 @@ never takes them typed: $100/$101, the machine tick, and the kernel stop
 ramp. This harness drives the native grblHAL_glowforge binary in
 null-sink mode (no hardware, no root) over TCP, one process per config:
 
-  1. no key: x32, $100/$101 = 213.333, and $110 stands
+  1. no key: x32, $100/$101 = 213.333, and $110 stands; a $120 below
+     its floor is refused, one at it taken, and a G65 P1 write of $121
+     below its floor is held at it
   2. xy_microsteps = 16: 106.667; a typed $100 is overwritten on the
      spot; $110 is left alone under a tick that carries it
   3. GFSINK_RATE lowered under the mode's tick: $110/$111 are held at
@@ -161,6 +163,17 @@ def case_default():
         rate = s.setting("$110")
         check(near(rate, 12000.0), "$110=%.0f stands at x32" % rate,
               "$110 is %.3f at x32, want 12000" % rate)
+        # $120-$122 have a floor (and $110-$112 a cap): a $ write past it
+        # is refused, one at it is taken, and a G65 P1 write past it, which
+        # no $ line carries, is held at it.
+        reply = s.send("$120=349")
+        check("error:52" in reply, "$120=349 is refused", "$120=349 was not refused (%r)" % reply)
+        s.write_setting("$120=350")
+        print("ok   $120=350 is taken")
+        reply = s.send("G65 P1 Q121 S2")
+        got = s.setting("$121")
+        check("ok" in reply and near(got, 295.0), "a G65 P1 write of $121=2 is held at %.3f" % got,
+              "a G65 P1 write of $121=2 left $121 at %.3f (%r)" % (got, reply))
     finally:
         s.close()
 

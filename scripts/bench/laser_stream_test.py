@@ -98,10 +98,10 @@ over TCP, then checks the dumps against the kernel feeder contract:
      lit to the stop, as a feed hold's does (the segments already planned
      at speed would otherwise play dark and leave a gap in the cut), and
      the stream engine's per-tick gate masks the stream from the stop on,
-     so the stationary stretch of each hold ships no FIRE;
+     so the stationary stretch of the hold ships no FIRE;
      a ~ under that verdict, which is what a button press or a sender
-     does, moves the head dark for at most one client poll before the
-     client holds it again and says so; the clean verdict then resumes
+     does, is refused: the job stays held where it stopped, and says so;
+     the clean verdict then resumes
      the hold the client took with no new press, and the rest of the line
      cuts lit. The latch is never written by a pause (a lock sets the
      hardware button latch, which only a press clears): the latch
@@ -1895,12 +1895,12 @@ def main():
     # One long line at 50 mm/s. Mid-move the engine's verdict goes to its
     # pause tier (OVERTEMP: hold, fire blocked, no resume): the client
     # takes the feed hold, and the stream's gate darkens the deceleration
-    # into it; the latch is not written. A ~ then resumes the job under
-    # the standing verdict, which is what a button press or a sender
-    # does; the client must hold it again within its poll, saying so,
-    # and the stretch it moved in between ships dark. The clean verdict
-    # then resumes the hold the client took, and the rest of the line
-    # cuts lit; M2 closes the window and locks.
+    # into it; the latch is not written. A ~ under the standing verdict,
+    # which is what a button press or a sender does, is refused at the
+    # resume gate: the job stays held where it stopped, one hold in the
+    # stream, and the refusal says so. The clean verdict then resumes the
+    # hold the client took, and the rest of the line cuts lit; M2 closes
+    # the window and locks.
     TICK_HZ = MACHINE_TICK_HZ
     steps = ["G90", "G21", "M3 S500", "G1 X150 F3000", ("sleep", 0.7),
              ("verdict", "hold"), ("wait_state", "Hold:0"), ("sleep", 0.5),
@@ -1910,8 +1910,8 @@ def main():
     data = run_session("verdict-rehold", steps, conf=DENSITY_CONF_FLOORED)
     check_fire_gaps("verdict-rehold", data)
     text = run_session.text
-    if "held again" not in text:
-        fail("[verdict-rehold] the client did not say it held the job again")
+    if "the job stays held" not in text or "held again" in text:
+        fail("[verdict-rehold] the ~ under the standing verdict was not refused with the job held")
     if "resuming" not in text:
         fail("[verdict-rehold] the client did not resume its own hold once the verdict cleared")
     if "fire masked, job held" not in text:
@@ -1928,22 +1928,14 @@ def main():
     step = [1 if t & 0x05 else 0 for t in ticks]
     last = len(step) - 1 - step[::-1].index(1)
     holds = holds_in(ticks)
-    if len(holds) != 2:
-        fail("[verdict-rehold] expected two holds in the stream, found %d: %s"
+    if len(holds) != 1:
+        fail("[verdict-rehold] expected one hold in the stream (the ~ refused), found %d: %s"
              % (len(holds), holds))
-    (_h1s, h1e), (h2s, h2e) = holds
     lit_lead = check_decel_lit("verdict-rehold", ticks, holds[0],
                                "a pause keeps the beam through its first deceleration")
-    held = [check_hold_dark("verdict-rehold", ticks, h, "the pause tier masks FIRE while it holds")
-            for h in holds]
-    between = sum(fire[h1e:h2s])
-    if between:
-        fail("[verdict-rehold] FIRE while resumed under the hold verdict: %d fire ticks "
-             "between the holds" % between)
-    if h2s - h1e > TICK_HZ:
-        fail("[verdict-rehold] the second hold came late: %d ticks (%.2f s) of motion under "
-             "the verdict" % (h2s - h1e, (h2s - h1e) / float(TICK_HZ)))
-    lit_after = sum(fire[h2e:last + 1])
+    held = check_hold_dark("verdict-rehold", ticks, holds[0],
+                           "the pause tier masks FIRE while it holds")
+    lit_after = sum(fire[holds[0][1]:last + 1])
     if lit_after < 50:
         fail("[verdict-rehold] the resume after the clean verdict ran dark (%d fire ticks)"
              % lit_after)
@@ -1951,10 +1943,9 @@ def main():
     if seq != ["unlock", "lock"]:
         fail("[verdict-rehold] latch ownership sequence %s, expected unlock (arm) and lock "
              "(program end) only: a pause must not write the latch" % seq)
-    print("PASS [verdict-rehold]: held lit to %d ticks before the stop, dark while held (%d and "
-          "%d ticks), resumed dark for %d ticks (%.2f s), held again, lit after the clear (%d fire "
-          "ticks), latch %s"
-          % (lit_lead, held[0], held[1], h2s - h1e, (h2s - h1e) / float(TICK_HZ), lit_after, seq))
+    print("PASS [verdict-rehold]: held lit to %d ticks before the stop, dark while held (%d "
+          "ticks), the ~ refused with the job held, lit after the clear (%d fire ticks), latch %s"
+          % (lit_lead, held, lit_after, seq))
 
     # --- rule 25: the verdict's fail tier --------------------------------
     # The same line; mid-move the verdict goes to AIRFLOW. The job ends:
