@@ -81,6 +81,7 @@ class Session:
         env = dict(os.environ, GF_STATE_DIR=self.workdir, FFLOG_STDERR="1")
         for key in ("GFSINK", "GF_SWITCH_FILE", "GF_VERDICT_FILE"):
             env.pop(key, None)
+        env["FORGECTRL_PORT"] = str(free_port())     # no report listener here: a closed port of its own
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)],
                                      cwd=self.workdir, env=env,
                                      stdout=subprocess.DEVNULL,

@@ -410,11 +410,13 @@ def expect_late_pair():
     run's logged count of late events (each an X microstep here): a count
     in [8, 31] owes X a full step at x8 and under one at x32, so x8 must
     drop X and Y and x32 must keep them. A count outside it proves nothing
-    about the pair, which runs once more."""
-    jog = "$J=G91 G21 X2 F60"
+    about the pair, which runs once more. The x32 jog runs at a quarter of
+    the x8 jog's feed, so both step at one microstep rate and the stall
+    past the lead (a time) makes the same count in both: the pair is judged
+    on the threshold alone, whatever the host's overshoot of the stall."""
     for attempt in (1, 2):
-        r8 = late_steps(STALL_MODE_MS, jog, "late-x8", mode=8)
-        r32 = late_steps(STALL_MODE_MS, jog, "late-x32", mode=32)
+        r8 = late_steps(STALL_MODE_MS, "$J=G91 G21 X2 F60", "late-x8", mode=8)
+        r32 = late_steps(STALL_MODE_MS, "$J=G91 G21 X0.5 F15", "late-x32", mode=32)
         if all(8 <= r["count"] <= 31 for r in (r8, r32)):
             judge_late(r8, "late-x8", (True, False))
             judge_late(r32, "late-x32", (False, False))
@@ -462,8 +464,9 @@ def test_late_steps():
     # then a longer one, cut short by a reset at the drop.
     expect_lens_drop("run")
     expect_lens_drop("reset")
-    # X at 1 mm/s, 290 ms past the lead: about 14 late steps at x8, over
-    # its full step of eight; about 18 at x32, under its thirty-two.
+    # X at 1 mm/s at x8 and 0.25 mm/s at x32 (one microstep rate), 90 ms
+    # past the lead: about 14 late microsteps each, over x8's full step of
+    # eight and under x32's thirty-two.
     expect_late_pair()
     late_fault()
     print("PASS [late-steps]: late steps that owed X a full step dropped X and Y alone, ones that owed the "

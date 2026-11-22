@@ -141,6 +141,7 @@ class Session:
         if referenced:
             with open(os.path.join(self.workdir, "lens.home"), "w") as f:
                 f.write("edge 0 3 3\n")
+        env["FORGECTRL_PORT"] = str(free_port())     # no report listener here: a closed port of its own
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)],
                                      cwd=self.workdir, env=env,
                                      stdout=subprocess.DEVNULL,

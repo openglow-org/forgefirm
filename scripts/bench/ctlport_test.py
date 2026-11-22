@@ -29,12 +29,21 @@ job after it.
   6. the status hook survives a soft reset (the core puts its own report
      handlers back at every reset)
   7. the port's client is the dead-man: closing it cancels its jog
-  8. every port operation ships dark. Under an open armed window, with M3
-     modal and S above zero, a port jog, a canceled port jog, the refused
-     jogs, and the panel operations (the tray's mode among them) add steps
-     to the shipped stream and not one FIRE tick; a refused motor release
-     says so. The window stays open through every one of them up to the
-     home, and the home closes it
+  8. every port operation ships dark, and no port jog runs under an open
+     armed window. Under an open window, with M3 modal and S above zero,
+     every port jog is refused (busy:armed) and moves nothing; the panel
+     operations (the tray's mode among them) add not one FIRE tick, and a
+     refused motor release says so. The window stays open through every
+     one of them up to the home, the home closes it, and the jog after it
+     runs dark
+ 11. the port's panel operations (release, energize, home, the tray's
+     mode) and "envelope open" take the jog's sender checks: refused
+     (busy:sender) while a line of the sender's runs (a dwell) and within
+     0.3 s of its last line, and refused (busy:mcode) while a job waits at
+     a package's M-code
+ 12. a reply goes to the client that asked: a client that hangs up with a
+     manual home outstanding (its jog to the origin running) gets none,
+     and the client that connects meanwhile gets only its own replies
   9. "sender out" keeps senders from the network out, and only on an idle
      machine with a quiet sender: it is refused while a sender line runs
      (a dwell), within 2 s of the sender's last line, and while a program
@@ -43,13 +52,9 @@ job after it.
      is one that connects to this host's own address rather than the
      loopback; one turned away while senders are kept out is serial_test.c's
      (grblHAL-glowforge)
- 10. a canceled port jog leaves no fire behind it. Under an open armed
-     window with M3 S500 modal, a port jog canceled by the sender's next
-     line, by the port's cancel, and by the port's client dropping, each
-     followed by a sender rapid and by a sender S0 move, ships not one
-     FIRE tick, and a cut after them is lit. A port jog refused under the
-     window leaves nothing to cancel, and the moves after it are judged
-     the same
+ 10. (no case here) a canceled port jog cannot leave fire behind it: no
+     port jog runs under an open window (rule 8), and a jog canceled by
+     the sender's line or the hold is laser_stream_test.py's rule 31
 
 A case stops at once when its controller logs the armed clamp (the host
 kept the producer off the CPU past its lead, so the stream faulted the run
@@ -224,6 +229,9 @@ POSITION = re.compile(r"[MW]Pos:([-\d.]+,[-\d.]+,[-\d.]+)")
 # a wait for Idle (no report in another state, the position where it was)
 # is one that had nowhere to go: the wait takes the next Idle.
 MOVE_SEEN_S = 1.5
+# How long a status poll waits for its report, the '?' sent again every 2 s
+# meanwhile (Sender.report): past a host's pause of a few seconds.
+REPORT_WAIT_S = 8.0
 
 
 class Sender:
@@ -312,12 +320,17 @@ class Sender:
 
     def report(self):
         """The state and the position (None when the report has none) in
-        the answer to a fresh poll."""
+        the answer to a fresh poll. A '?' with no answer in 2 s is sent
+        again, for up to REPORT_WAIT_S in all: a reset drops a '?' in
+        flight, and a shared host can stop the controller's process for
+        seconds (measured: 3.5 s, its watchdogs recording nothing), which is
+        no fault of the controller's."""
         with self.lock:
             n = len(self.other)
         self.sock.sendall(b"?")
-        end = time.monotonic() + 2.0
-        while time.monotonic() < end:
+        start = time.monotonic()
+        asked = start
+        while time.monotonic() - start < REPORT_WAIT_S:
             watch_check()
             with self.lock:
                 for line in self.other[n:]:
@@ -325,8 +338,11 @@ class Sender:
                     if m:
                         p = POSITION.search(line)
                         return m.group(1), (p.group(1) if p else None)
+            if time.monotonic() - asked >= 2.0:
+                asked = time.monotonic()
+                self.sock.sendall(b"?")
             time.sleep(0.01)
-        fail("no status report")
+        fail("no status report in %.0f s" % REPORT_WAIT_S)
 
     def state(self):
         return self.report()[0]
@@ -440,6 +456,7 @@ class Session:
             self.pub = threading.Thread(target=publish_verdicts, args=(verdict, self.stop),
                                         daemon=True)
             self.pub.start()
+        env["FORGECTRL_PORT"] = str(free_port())     # no report listener here: a closed port of its own
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=self.workdir, env=env,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.watch = WATCH = StderrWatch(self.proc, name, homed)
@@ -577,33 +594,33 @@ def test_sender_wins(s):
 
 
 def test_sender_wins_queued(s):
-    """The window the read gate exists for. The core reads a line's bytes
-    in one pass and polls the stream only at the end of line, so a sender
-    line that sits in the ring right behind the port's jog line is read
-    while the jog it follows is still running, with no poll in between to
-    cancel it. A dwell opens the window on purpose: the port's line is
-    queued during it, and the sender streams its next line behind that."""
+    """A port jog never queues behind a line of the sender's: during the
+    sender's dwell (a line of its own running, Idle to the core) the jog is
+    refused, busy:sender, and the sender's dwell and the line it streams
+    next each get their ok, the head moved by the sender alone."""
     s.sender.wait_state("Idle")
     s.sender.send("G91")
+    x0 = s.port.state()["mpos"][0]
     n = s.sender.count()
     s.sender.sock.sendall(("G4 P1.5" + s.sender.eol).encode())   # no ok until the dwell ends
     s.quiet()
-    s.port.sock.sendall(b"jog G91 X300 F6000\n")                  # queued behind the dwell
+    port_reply = s.port.request("jog G91 X300 F6000")
     time.sleep(0.2)
-    s.sender.sock.sendall(("G0 X1" + s.sender.eol).encode())      # streamed behind the port's line
+    s.sender.sock.sendall(("G0 X1" + s.sender.eol).encode())
     end = time.monotonic() + 10.0
     while time.monotonic() < end and s.sender.count() < n + 2:
         time.sleep(0.02)
     got = s.sender.responses[n:n + 2]
-    port_reply = s.port.reply()
-    if port_reply != "ok":
-        fail("[sender-wins-queued] the queued port jog got %r, not ok" % port_reply)
+    if port_reply != "busy:sender":
+        fail("[sender-wins-queued] a port jog during the sender's dwell got %r, not busy:sender" % port_reply)
     if got != ["ok", "ok"]:
-        fail("[sender-wins-queued] the sender's dwell and the line behind the port jog got %r, "
-             "not two ok" % got)
+        fail("[sender-wins-queued] the sender's dwell and the line after it got %r, not two ok" % got)
     s.sender.wait_state("Idle")
-    print("PASS [sender-wins-queued]: a sender line queued right behind the port's jog line "
-          "waited for the cancel and got ok")
+    moved = s.port.state()["mpos"][0] - x0
+    if abs(moved - 1.0) > 0.01:
+        fail("[sender-wins-queued] X moved %.3f mm, not the sender's 1 mm" % moved)
+    print("PASS [sender-wins-queued]: a port jog during the sender's dwell was refused, and the "
+          "sender's lines got their ok")
 
 
 class NewlinePoller(threading.Thread):
@@ -733,6 +750,71 @@ def test_refusals(s):
           "characters, the core's error for G1 and for S/M3, busy:state during a program")
 
 
+PANEL_OPS = ("release", "energize", "home", "tray in", "envelope open")
+
+
+def test_panel_refusals(s):
+    """Rule 11: the panel operations and "envelope open" wait for the
+    sender as a jog does, and never run inside a job held at an M-code."""
+    s.sender.wait_state("Idle")
+    s.quiet()
+    n = s.sender.count()
+    s.sender.sock.sendall(b"G4 P1.5\n")                # a line of the sender's runs
+    time.sleep(0.4)
+    got = {op: s.port.request(op) for op in PANEL_OPS + ("jog G91 X1 F600",)}
+    if any(r != "busy:sender" for r in got.values()):
+        fail("[panel-refusals] during the sender's dwell: %r, wanted busy:sender for each" % got)
+    end = time.monotonic() + 5                          # a dwell is Idle: its ok is its end
+    while s.sender.count() <= n and time.monotonic() < end:
+        time.sleep(0.02)
+    if s.sender.count() <= n:
+        fail("[panel-refusals] the dwell was never answered")
+    got = {}
+    for op in PANEL_OPS:
+        s.sender.send("G90")
+        got[op] = s.port.request(op)
+    if any(r != "busy:sender" for r in got.values()):
+        fail("[panel-refusals] inside 0.3 s of the sender's line: %r, wanted busy:sender for each" % got)
+    s.quiet()
+    if s.port.request("mcodes 160") != "ok":
+        fail("[panel-refusals] the M-code table was refused")
+    s.sender.sock.sendall(b"M160\n")
+    end = time.monotonic() + 5
+    while s.port.state().get("mcode") is None and time.monotonic() < end:
+        time.sleep(0.05)
+    seq = (s.port.state().get("mcode") or {}).get("seq")
+    if seq is None:
+        fail("[panel-refusals] the job never waited at its M-code")
+    got = {op: s.port.request(op) for op in PANEL_OPS[:4]}
+    if any(r != "busy:mcode" for r in got.values()):
+        fail("[panel-refusals] with a job at its M-code: %r, wanted busy:mcode for each" % got)
+    if s.port.request("mcode_result %d ok" % seq) != "ok":
+        fail("[panel-refusals] the M-code's answer was refused")
+    s.sender.wait_state("Idle")
+    s.port.request("mcodes -")
+    s.quiet()
+    print("PASS [panel-refusals]: release, energize, home, the tray and envelope open refused during a "
+          "dwell and inside the quiet interval (busy:sender), and at a job's M-code (busy:mcode)")
+
+
+def test_reply_to_asker():
+    """Rule 12: a reply goes to the client that asked."""
+    s = Session(name="asker", conf_extra="manual_home_x = 100\n")
+    try:
+        s.quiet()
+        s.port.sock.sendall(b"home\n")                  # its jog to the origin: about a second
+        time.sleep(0.2)
+        s.port.close()
+        s.port = PortClient(s.path)
+        r = s.port.request("state")
+        if not (r or "").startswith("{"):
+            fail("[asker] the client that connected got %r for its state: the gone client's reply" % r)
+        s.port_idle()
+        print("PASS [asker]: the gone client's home was answered to no one, and the next client got its own state")
+    finally:
+        s.close()
+
+
 def test_single_client(s):
     second = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     second.settimeout(3.0)
@@ -780,16 +862,14 @@ def test_port_dark():
         replies = {}
         replies["state"] = s.port.request("state")
         replies["jog"] = s.port.request("jog G91 X8 F1200")
-        s.port_idle()
         replies["jog-long"] = s.port.request("jog G91 X200 F6000")
-        time.sleep(0.4)
         replies["cancel"] = s.port.request("cancel")
-        s.port_idle()
         for words in ("G1 X5 F600", "G91 X5 F600 S900 M3", "G91 X5 F600 M4", "G91 G2 X5 I2 F600"):
             replies["jog " + words] = s.port.request("jog " + words)
         replies["release"] = s.port.request("release")      # refused: a laser job is armed
         replies["energize"] = s.port.request("energize")
         time.sleep(0.3)
+        steps_jogs, _ = s.ticks()
         closed_before_home = s.sender.saw("laser disarmed")
         replies["home"] = s.port.request("home")            # manual: declares X0 Y0, moves nothing
         replies["tray out"] = s.port.request("tray out")    # the Z frame moves, the head does not
@@ -799,8 +879,15 @@ def test_port_dark():
         time.sleep(0.5)
 
         steps1, fire1 = s.ticks()
-        if replies["jog"] != "ok" or replies["jog-long"] != "ok" or replies["jog-after-home"] != "ok":
-            fail("[dark] a port jog under the open window was refused: %r" % replies)
+        # A job sits at Idle with its window open (the grace after its last
+        # move): a port jog would move the head under its next cut, so every
+        # one is refused before the core sees it, and nothing moves.
+        refused = [k for k in replies if k.startswith("jog") and k != "jog-after-home"]
+        if any(replies[k] != "busy:armed" for k in refused) or steps_jogs != steps0:
+            fail("[dark] a port jog under the open window was not refused (%d steps): %r"
+                 % (steps_jogs - steps0, replies))
+        if replies["jog-after-home"] != "ok":
+            fail("[dark] the port jog after the home closed the window was refused: %r" % replies)
         if not (replies["release"] or "").startswith("error:"):
             fail("[dark] the motor release under the armed window got %r, not a refusal: %r"
                  % (replies["release"], replies))
@@ -817,75 +904,6 @@ def test_port_dark():
                  % (fire1 - fire0, replies))
         print("PASS [dark]: under an open armed window with M3 S500, %d port operations shipped "
               "%d steps and no FIRE tick" % (len(replies), steps1 - steps0))
-    finally:
-        s.close()
-
-
-def test_port_cancel_dark():
-    s = Session(laser=True, name="cancel-dark")
-    try:
-        s.sender.send("G90")
-        s.sender.send("M3 S500")
-        s.sender.send("G1 X10 F1500")
-        s.sender.wait_state("Idle")
-        if not s.sender.saw("laser armed"):
-            fail("[cancel-dark] the laser line did not arm: the case would prove nothing")
-        steps0, fire0 = s.ticks()
-        if fire0 == 0:
-            fail("[cancel-dark] the armed G1 shipped no FIRE tick: the dump cannot see emission")
-
-        replies = []
-
-        def jog():
-            s.quiet()
-            replies.append(s.port.request("jog G91 X30 F1000"))    # 1.8 s if nothing stops it
-            time.sleep(0.4)
-
-        def drop_client():
-            s.port.close()                      # the client is the dead-man
-            s.sender.wait_state("Idle")
-            s.port = PortClient(s.path)
-
-        def port_cancel():
-            s.port.request("cancel")
-            s.port_idle()
-
-        moves = ("G0 X0", "G1 X0 S0 F3000")
-        for move in moves:                      # the sender's next line cancels the jog
-            jog()
-            if s.sender.send(move, timeout=10.0) != "ok":
-                fail("[cancel-dark] the sender's %r during a port jog was not ok" % move)
-            s.sender.wait_state("Idle")
-        s.sender.send("S500")
-        for cancel in (port_cancel, drop_client):
-            for move in moves:
-                jog()
-                cancel()
-                if s.sender.send(move) != "ok":
-                    fail("[cancel-dark] the sender's %r after a canceled port jog was not ok" % move)
-                s.sender.wait_state("Idle")
-            s.sender.send("S500")
-        time.sleep(0.5)
-        steps1, fire1 = s.ticks()
-        if steps1 <= steps0:
-            fail("[cancel-dark] the moves shipped no step: the case would prove nothing")
-        if fire1 != fire0:
-            fail("[cancel-dark] a canceled port jog under an open window with M3 S500 left %d FIRE "
-                 "ticks on the moves after it (port replies %r)" % (fire1 - fire0, replies))
-
-        s.sender.send("G91")
-        s.sender.send("G1 X5 F600")             # the witness cut, at the S in force
-        s.sender.wait_state("Idle")
-        time.sleep(0.5)
-        _, fire2 = s.ticks()
-        if fire2 <= fire1 or s.sender.saw("laser armed") != 1:
-            fail("[cancel-dark] the cut after the moves ran dark or armed again (%d fire ticks, "
-                 "armed %d times): the window had closed, so the case proves nothing"
-                 % (fire2 - fire1, s.sender.saw("laser armed")))
-        print("PASS [cancel-dark]: under an open armed window with M3 S500, port jogs canceled by the "
-              "sender's line, by the port's cancel and by the client's drop (replies %s) left no FIRE "
-              "tick on the rapids and S0 moves after them; the cut after is lit (%d fire ticks)"
-              % (sorted(set(replies)), fire2 - fire1))
     finally:
         s.close()
 
@@ -1013,7 +1031,7 @@ def main():
     if not os.path.exists(BIN):
         fail("no controller binary at %s" % BIN)
     run_case(test_shared_session)
-    for case in (test_poll_crlf, test_port_dark, test_port_cancel_dark, test_sender_out):
+    for case in (test_poll_crlf, test_port_dark, test_reply_to_asker, test_sender_out):
         run_case(case)
     print("ALL PASS")
 
@@ -1028,6 +1046,7 @@ def test_shared_session():
         test_sender_wins(s)
         test_sender_wins_queued(s)
         test_refusals(s)
+        test_panel_refusals(s)
         test_single_client(s)
         test_reset_keeps_hook(s)
         test_dead_man(s)

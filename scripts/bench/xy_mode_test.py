@@ -74,6 +74,7 @@ class Session:
             f.write(conf or "")
         env["GFHOME_CONF"] = conf_path
         env.update(env_extra or {})
+        env["FORGECTRL_PORT"] = str(free_port())     # no report listener here: a closed port of its own
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)],
                                      cwd=self.workdir, env=env,
                                      stdout=subprocess.DEVNULL,

@@ -796,6 +796,7 @@ def run_session_once(name, steps, conf, workdir, keep, arm_required, env_extra, 
     pub = threading.Thread(target=publish_verdicts, args=(verdict, stop), daemon=True)
     pub.start()
 
+    env["FORGECTRL_PORT"] = str(free_port())     # no report listener here: a closed port of its own
     proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=workdir, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     # A stall of the producer the session asks for itself: its own checks
@@ -1254,16 +1255,36 @@ def check_mask(analog, density):
     """Rule 13: same motion, and density fire is a subset of analog fire.
     The two sessions are compared move by move, each move on its own ticks
     and the fire-gap limit around them: the idle gaps between moves are
-    wall time, and two sessions never match there."""
+    wall time, and two sessions never match there. The moves are found in
+    step order, not in each session's own gaps: a move begins at a step
+    whose gap from the step before is longer than RUN_GAP_TICKS in either
+    session. A host's pause between two moves that meet at rest (the
+    sender's next line late, the planner run dry there) leaves an idle gap
+    in one session where the other has a short one; split at the same step
+    in both, the two moves still compare tick for tick. The margins around
+    a move are the fire-gap limit, or half the gap to the move beside it in
+    either session where that is shorter."""
     ta, td = tick_bytes(analog), tick_bytes(density)
-    ra, rd = motion_runs(ta), motion_runs(td)
-    if len(ra) != len(rd):
-        fail("[mask] %d moves under analog, %d under density: the two runs are not the "
-             "same motion" % (len(ra), len(rd)))
+    pa = [i for i, b in enumerate(ta) if b & 0x25]
+    pd = [i for i, b in enumerate(td) if b & 0x25]
+    if len(pa) != len(pd):
+        fail("[mask] %d step ticks under analog, %d under density: the two runs are not the "
+             "same motion" % (len(pa), len(pd)))
+    starts = [0] + [j for j in range(1, len(pa))
+                    if pa[j] - pa[j - 1] > RUN_GAP_TICKS or pd[j] - pd[j - 1] > RUN_GAP_TICKS]
+    bounds = starts + [len(pa)]
     fire_a = fire_d = 0
-    for k, ((a0, a1), (d0, d1)) in enumerate(zip(ra, rd)):
-        lo = min(FIRE_GAP_LIMIT_TICKS, a0, d0)
-        hi = min(FIRE_GAP_LIMIT_TICKS, len(ta) - 1 - a1, len(td) - 1 - d1)
+    for k in range(len(starts)):
+        j0, j1 = bounds[k], bounds[k + 1] - 1
+        a0, a1, d0, d1 = pa[j0], pa[j1], pd[j0], pd[j1]
+        if j0 > 0:
+            lo = min(FIRE_GAP_LIMIT_TICKS, (a0 - pa[j0 - 1]) // 2, (d0 - pd[j0 - 1]) // 2)
+        else:
+            lo = min(FIRE_GAP_LIMIT_TICKS, a0, d0)
+        if j1 + 1 < len(pa):
+            hi = min(FIRE_GAP_LIMIT_TICKS, (pa[j1 + 1] - a1 - 1) // 2, (pd[j1 + 1] - d1 - 1) // 2)
+        else:
+            hi = min(FIRE_GAP_LIMIT_TICKS, len(ta) - 1 - a1, len(td) - 1 - d1)
         sa, sd = ta[a0 - lo:a1 + hi + 1], td[d0 - lo:d1 + hi + 1]
         if len(sa) != len(sd):
             fail("[mask] move %d is %d ticks under analog, %d under density: the two runs "

@@ -132,6 +132,36 @@ reported messages:
  30. a cut that starts under a pause-tier verdict is dark: the verdict
      turns while the armed job sits at Idle with M3 on, and the job's
      next cut is held with no FIRE tick shipped
+ 31. grblHAL's stop byte (0x19) mid-cut closes the window at the stop:
+     its deceleration ships no FIRE tick (GFSINK_DUMP), the latch locks
+     (GFSINK_LATCH_LOG), and the next M3 arms afresh; a ^X mid-cut has
+     the latch locked before its alarm reaches the sender; and a stop
+     while the button breathes ends the arm dark (the core's stop aborts
+     the wait's pump): no alarm, the latch locked, the parser at M5, and
+     the next M4 asks for its own press (test_a_stop_in_the_button_wait)
+ 32. with lid_policy = hold the lid closes the window of the job it
+     parks, and the cycle start after it asks for the press
+     (test_lid_policy_hold); a lid or loop that opens at Idle under an
+     open window is switches_test.c's (grblHAL-glowforge)
+ 33. a web-service home started inside an open window has the latch
+     locked before its runner starts
+ 34. the window's acknowledgment is its own, end to end: with a
+     stand-in for the engine's report channel (it takes a report that
+     opens a window in 0.7 s, longer than the controller's 500 ms between
+     verdict reads, the acknowledgment off the file before its answer,
+     and gives the acknowledgment back 1 s later), the window opens only
+     once its own acknowledgment is on file; a controller that takes the
+     one on file opens inside the 0.7 s on every run. The rule's unit
+     cases are cooling_test.c's, but for the window recorded at its
+     answer, which only this case proves; that every close reports its
+     change is laser_arm_test.c's (grblHAL-glowforge)
+ 35. a pause wins over a resume in the same read: a held job with its
+     window open, "~!" in one packet, stays held, with no FIRE tick
+     shipped (on rule 36's resumed cut, in its session)
+ 36. an operator's pause inside a cooling hold is the operator's: a lit
+     cut held by a pause-tier verdict, the sender's !, then the verdict
+     clears, and the job stays held, with no FIRE tick shipped, until
+     the operator's ~ (test_an_operator_pause_outlives_a_cooling_hold)
 
 The disarm grace is shortened via a temp config (GFHOME_CONF), the
 cooling verdict is published hermetically (GF_VERDICT_FILE), the same
@@ -383,9 +413,30 @@ def wait_idle(sock, log):
     fail("controller never returned to Idle")
 
 
-def publish_verdicts(path, stop, verdict):
+def write_verdict(path, verdict, t0):
+    """One verdict document from the session's live dict, written whole and
+    renamed into place, as the engine writes it."""
+    v = dict(verdict)
+    now = time.monotonic()
+    acked = v["armed_ack"] and now - t0 >= v["ack_after_s"] and now >= v.get("grant_at", 0.0)
+    body = ('{"ts_mono":%.3f,"fire_ok":%s,"verdict":"%s","hold":%s,'
+            '"resume_ok":%s,"armed":%s,"reason":"%s"}'
+            % (time.clock_gettime(time.CLOCK_MONOTONIC),
+               "true" if v["fire_ok"] else "false", v["name"],
+               "true" if v["hold"] else "false",
+               "true" if v["resume_ok"] else "false",
+               "true" if acked else "false",
+               "" if v["fire_ok"] else "harness: %s" % v["name"]))
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(body)
+    os.replace(tmp, path)
+
+
+def publish_verdicts(path, stop, verdict, lock):
     """Stand in for the cooling engine. `verdict` is the session's live
-    dict: fire_ok, hold, resume_ok, name, armed_ack, ack_after_s. "armed"
+    dict: fire_ok, hold, resume_ok, name, armed_ack, ack_after_s, and
+    grant_at (the report channel's stand-in, Engine, sets it). "armed"
     is the engine's acknowledgment that it has taken the controller's
     armed window and applied the run airflow; the controller refuses to
     fire on a verdict that lacks it, so an engine that never
@@ -393,24 +444,76 @@ def publish_verdicts(path, stop, verdict):
     emission. ack_after_s withholds the acknowledgment for that long
     first, which is the real engine's case: it answers on its next
     tick, and the controller has to see the refreshed verdict to get
-    past the arm."""
-    t0 = time.monotonic()
+    past the arm. With no report channel (no Engine) the controller takes
+    a refused report as answered, so it reads this file as it stands."""
+    t0 = verdict["t0"]
     while not stop.is_set():
-        v = dict(verdict)
-        acked = v["armed_ack"] and time.monotonic() - t0 >= v["ack_after_s"]
-        body = ('{"ts_mono":%.3f,"fire_ok":%s,"verdict":"%s","hold":%s,'
-                '"resume_ok":%s,"armed":%s,"reason":"%s"}'
-                % (time.clock_gettime(time.CLOCK_MONOTONIC),
-                   "true" if v["fire_ok"] else "false", v["name"],
-                   "true" if v["hold"] else "false",
-                   "true" if v["resume_ok"] else "false",
-                   "true" if acked else "false",
-                   "" if v["fire_ok"] else "harness: %s" % v["name"]))
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(body)
-        os.replace(tmp, path)
+        with lock:
+            write_verdict(path, verdict, t0)
         stop.wait(0.5)
+
+
+class Engine:
+    """The cooling engine's report channel, for a case that needs it: an
+    HTTP listener for the controller's POST /cool/state. A report that
+    opens a window (armed=1 after armed=0) is taken in TAKE_S: the
+    acknowledgment comes off the verdict file and then the report is
+    answered, as forgectrl does, and the acknowledgment comes back grant_s
+    later. A report that closes one
+    takes nothing off: the case then shows that the controller does not
+    take the last window's acknowledgment for the next."""
+
+    # How long a report that opens a window takes to be taken, the
+    # acknowledgment withdrawn and the report answered: longer than the
+    # controller's 500 ms between verdict reads, so a read always lands
+    # while the last window's acknowledgment is still on file, and must not
+    # take it; longer too than the controller's 250 ms wait for the answer,
+    # so that report counts as unanswered and the window waits for the next
+    # one, answered at once.
+    TAKE_S = 0.7
+
+    def __init__(self, grant_s):
+        import http.server
+        self.grant_s = grant_s
+        self.sess = None
+        self.armed = False
+        self.opens = 0
+        engine = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                q = self.path.split("?", 1)[1] if "?" in self.path else ""
+                armed = "armed=1" in q.split("&")
+                s = engine.sess
+                if s is not None and armed and not engine.armed:
+                    time.sleep(Engine.TAKE_S)
+                if s is not None:
+                    with s.vlock:
+                        if armed and not engine.armed:
+                            engine.opens += 1
+                            s.verdict["grant_at"] = time.monotonic() + engine.grant_s
+                            write_verdict(s.verdict_path, s.verdict, s.verdict["t0"])
+                        engine.armed = armed
+                body = b'{"ok":true}'
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass                # the controller stopped waiting: TAKE_S
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
 
 
 def wait_for_new(log, needle, n_before, timeout, sock=None):
@@ -444,13 +547,16 @@ class Session:
     """One controller process with the lifecycle overrides applied."""
 
     def __init__(self, name, fire_ok=True, disarm_s=2, switches=None, conf_extra="",
-                 armed_ack=True, ack_after_s=0.0, dump=False, attr_log=False):
+                 armed_ack=True, ack_after_s=0.0, dump=False, attr_log=False, latch_log=False,
+                 engine=None):
         self.name = name
         self.workdir = tempfile.mkdtemp(prefix="laser-lifecycle-", dir=tmpfs_dir())
         # The stream the controller ships, when the case reads it.
         self.dump = os.path.join(self.workdir, "stream") if dump else None
         # The sysfs writes the hardware would get, when the case reads them.
         self.attr_log = os.path.join(self.workdir, "attr.log") if attr_log else None
+        # Every latch write the controller makes, when the case reads them.
+        self.latch_log = os.path.join(self.workdir, "latch.log") if latch_log else None
         conf = os.path.join(self.workdir, "forgefirm.conf")
         with open(conf, "w") as f:
             # The fan grace at 0 keeps the arm's acknowledgment budget at its
@@ -464,10 +570,16 @@ class Session:
         env.pop("GF_SWITCH_FILE", None)
         env.pop("GFSINK_DUMP", None)
         env.pop("GFSINK_ATTR_LOG", None)
+        env.pop("GFSINK_LATCH_LOG", None)
+        env["FORGECTRL_PORT"] = str(free_port())     # no report listener unless an Engine: a closed port
         if self.dump:
             env["GFSINK_DUMP"] = self.dump
         if self.attr_log:
             env["GFSINK_ATTR_LOG"] = self.attr_log
+        if self.latch_log:
+            env["GFSINK_LATCH_LOG"] = self.latch_log
+        if engine is not None:
+            env["FORGECTRL_PORT"] = str(engine.port)
         self.switch_file = None
         if switches is not None:
             self.switch_file = os.path.join(self.workdir, "switches")
@@ -475,9 +587,14 @@ class Session:
             env["GF_SWITCH_FILE"] = self.switch_file
         self.stop = threading.Event()
         self.verdict = {"fire_ok": fire_ok, "hold": False, "resume_ok": True, "name": "OK",
-                        "armed_ack": armed_ack, "ack_after_s": ack_after_s}
+                        "armed_ack": armed_ack, "ack_after_s": ack_after_s, "grant_at": 0.0,
+                        "t0": time.monotonic()}
+        self.verdict_path = verdict
+        self.vlock = threading.Lock()
+        if engine is not None:
+            engine.sess = self
         self.pub = threading.Thread(target=publish_verdicts,
-                                    args=(verdict, self.stop, self.verdict),
+                                    args=(verdict, self.stop, self.verdict, self.vlock),
                                     daemon=True)
         self.pub.start()
         global WATCH
@@ -609,6 +726,15 @@ class Session:
         except OSError:
             return 0
         return sum(1 for b in data if not b & 0x80 and b & 0x10)
+
+    def latch_last(self):
+        """The controller's last latch write ("lock", "unlock", ...), or ""."""
+        try:
+            with open(self.latch_log) as f:
+                lines = f.read().split()
+        except OSError:
+            return ""
+        return lines[-1] if lines else ""
 
     def armed_count(self):
         return "".join(self.log).count(ARMED)
@@ -1395,25 +1521,40 @@ def test_lid_cancel_from_hold():
 
 
 def test_lid_policy_hold():
-    """lid_policy = hold keeps stock grblHAL behavior: the lid parks the job
-    in Door and a cycle start resumes it once closed."""
+    """lid_policy = hold: the lid parks the job in Door, and the window
+    closes with the lid (rule 32: the lid set the hardware button latch,
+    which only a press clears). Once the lid is closed a cycle start asks
+    for the press, and the press re-arms the job and resumes it; the job
+    never runs on with the latch set."""
     s = Session("lid-hold", disarm_s=60, switches=SW_CLOSED, conf_extra="lid_policy = hold\n")
     try:
         start_armed_move(s, "lid-hold", gcode="G1 X20 F60")
         time.sleep(0.5)
+        disarmed = s.disarmed_count()
         s.set_switches(SW_LID_OPEN)
         if not s.wait_state("Door", 3):
             fail("[lid-hold] the lid open did not park the job in Door (state %s)" % s.state())
         read_avail(s.sock, s.log, 1.0)
         if "job canceled" in "".join(s.log):
             fail("[lid-hold] the hold policy canceled the job")
+        if s.disarmed_count() != disarmed + 1:
+            fail("[lid-hold] the lid left the window open over the button latch it set")
         s.set_switches(SW_CLOSED)
         time.sleep(0.5)
+        prompts, armed = s.count(RESUME_PROMPT), s.armed_count()
         s.sock.sendall(b"~")
+        if not wait_for_new(s.log, RESUME_PROMPT, prompts, 5, s.sock):
+            fail("[lid-hold] the cycle start did not ask for the press (state %s)" % s.state())
+        if s.wait_state("Door", 2) is None and s.wait_state("Hold", 1) is None:
+            fail("[lid-hold] the job moved before the press (state %s)" % s.state())
+        s.press_button()
+        if not wait_for_new(s.log, ARMED, armed, 10, s.sock):
+            fail("[lid-hold] the press did not re-arm the held job")
         if not s.wait_state("Run", 3):
-            fail("[lid-hold] cycle start did not resume the held job (state %s)" % s.state())
+            fail("[lid-hold] the re-armed job did not resume (state %s)" % s.state())
         s.sock.sendall(b"\x18")
-        print("PASS [lid-hold]: with lid_policy=hold the lid parked the job in Door and ~ resumed it")
+        print("PASS [lid-hold]: with lid_policy=hold the lid parked the job in Door and closed the "
+              "window; ~ asked for the press, and the press re-armed and resumed it")
     finally:
         s.close()
 
@@ -2050,10 +2191,224 @@ def test_an_unfired_window_survives_its_hold():
           "hold and a verdict hold, and each resume ran on with no press")
 
 
+def test_stop_byte_disarms():
+    """Rule 31: grblHAL's stop byte (0x19) in the middle of a cut closes
+    the window at the stop: the stop's deceleration ships no FIRE tick, the
+    latch locks, and the next laser-on arms afresh. And a ^X in the middle
+    of a cut has the latch locked before the alarm reaches the sender."""
+    s = Session("stop-byte", disarm_s=60, dump=True, latch_log=True)
+    try:
+        armed = s.armed_count()
+        send_line(s.sock, "M3 S1000", s.log)
+        if s.armed_count() != armed + 1:
+            fail("[stop-byte] M3 did not arm")
+        s.send_raw("G1 X150 F6000")
+        if not s.wait_state("Run", 5):
+            fail("[stop-byte] the cut never reported Run")
+        time.sleep(0.6)
+        mark = s.dump_size()
+        disarmed = s.disarmed_count()
+        s.sock.sendall(b"\x19")
+        if not wait_for_new(s.log, DISARMED, disarmed, 5, s.sock):
+            fail("[stop-byte] the stop byte left the window open")
+        wait_idle(s.sock, s.log)
+        lit = s.fire_ticks(mark)
+        # What shipped between the mark and the controller reading the byte
+        # can be lit (a few ms); the stop's own deceleration is ~170 ms of
+        # FIRE ticks at this feed when it plays lit.
+        check(lit < 1000, "[stop-byte] the stop's deceleration shipped %d FIRE ticks" % lit)
+        check(s.latch_last() == "lock", "[stop-byte] the latch is not locked after the stop (%r)" % s.latch_last())
+        armed = s.armed_count()
+        send_line(s.sock, "M3 S1000", s.log)
+        if s.armed_count() != armed + 1:
+            fail("[stop-byte] the next M3 did not arm afresh: the window outlived the stop")
+
+        s.send_raw("G1 X0 F6000")
+        if not s.wait_state("Run", 5):
+            fail("[stop-byte] the second cut never reported Run")
+        time.sleep(0.3)
+        s.sock.sendall(b"\x18")
+        if read_avail(s.sock, s.log, 5.0, until=("ALARM:",)) != "ALARM:":
+            fail("[stop-byte] ^X mid-cut raised no alarm")
+        at_alarm = s.latch_last()
+        check(at_alarm == "lock", "[stop-byte] the latch was %r when the alarm reached the sender" % at_alarm)
+        if not s.wait_state("Alarm", 5):
+            fail("[stop-byte] the reset did not land in Alarm (state %s)" % s.state())
+        send_line(s.sock, "$X", s.log, tolerate_error=True)
+        print("PASS [stop-byte]: the stop byte closed the window (%d FIRE ticks after it), the next "
+              "M3 armed afresh, and a ^X had the latch locked before its alarm" % lit)
+    finally:
+        s.close()
+
+
+def test_a_stop_in_the_button_wait():
+    """Rule 31, inside an arm: grblHAL's stop while the button breathes
+    ends the arm dark through the wait's own abort (the core's stop aborts
+    the pump): no alarm, the latch locked, the parser at M5, and the next
+    laser-on asks for its own press."""
+    tag = "stop-in-arm"
+    s = Session(tag, disarm_s=60, switches=SW_CLOSED, latch_log=True)
+    try:
+        prompts = s.count(PROMPT)
+        s.send_raw("M4 S100")
+        if not wait_for_new(s.log, PROMPT, prompts, 5, s.sock):
+            fail("[%s] the M4 did not ask for the press" % tag)
+        s.sock.sendall(b"\x19")
+        wait_idle(s.sock, s.log)
+        check("ALARM" not in "".join(s.log), "[%s] the stop raised an alarm" % tag)
+        check(s.latch_last() == "lock", "[%s] the latch is %r after the stop" % (tag, s.latch_last()))
+        mark = len(s.log)
+        send_line(s.sock, "$G", s.log)
+        gc = "".join(s.log[mark:])
+        check(" M5" in gc, "[%s] the parser kept the job's laser-on after the stop: %r" % (tag, gc.strip()))
+        prompts, armed = s.count(PROMPT), s.armed_count()
+        s.send_raw("M4 S100")
+        if not wait_for_new(s.log, PROMPT, prompts, 3, s.sock):
+            fail("[%s] the next M4 did not ask for its own press" % tag)
+        check(s.armed_count() == armed, "[%s] the next M4 armed before its press" % tag)
+        s.press_button()
+        if not wait_for_new(s.log, ARMED, armed, 5, s.sock):
+            fail("[%s] the press did not arm the next job" % tag)
+        send_line(s.sock, "M5", s.log)
+        print("PASS [%s]: a stop in the button wait ended the arm dark with no alarm, and the next "
+              "M4 asked for its own press" % tag)
+    finally:
+        s.close()
+
+
+def test_an_operator_pause_outlives_a_cooling_hold():
+    """Rule 36: an operator's pause inside a cooling hold is the
+    operator's. A lit cut held by a pause-tier verdict, the sender's !
+    while it is held, then the verdict clears: the job stays held, dark,
+    and the operator's ~ resumes it. Then rule 35 on the resumed cut, its
+    window open: held again, "~!" in one packet leaves it held, dark (the
+    core reads a cycle start and a feed hold that come together in a held
+    job as a resume; the controller withdraws the pending start when the
+    hold comes)."""
+    tag = "pause-in-cooling-hold"
+    s = Session(tag, disarm_s=60, switches=SW_CLOSED, dump=True)
+    try:
+        arm_by_press(s, tag)
+        send_line(s.sock, "G1 X5 F60", s.log)
+        time.sleep(1.0)
+        s.set_verdict("OVERTEMP", fire_ok=False, hold=True, resume_ok=False)
+        end = time.monotonic() + 6
+        while time.monotonic() < end and not s.state().startswith("Hold:0"):
+            time.sleep(0.1)
+        if not s.state().startswith("Hold:0"):
+            fail("[%s] the verdict never completed its hold (state %s)" % (tag, s.state()))
+        s.sock.sendall(b"!")
+        read_avail(s.sock, s.log, 0.5)
+        mark = s.dump_size()
+        s.set_verdict()
+        read_avail(s.sock, s.log, 1.2)
+        st, lit = s.state(), s.fire_ticks(mark)
+        check(st.startswith("Hold") and lit == 0,
+              "[%s] the clean verdict resumed the job the operator paused: state %s, %d FIRE ticks"
+              % (tag, st, lit))
+        s.sock.sendall(b"~")
+        end = time.monotonic() + 3
+        while time.monotonic() < end and s.state().startswith("Hold"):
+            read_avail(s.sock, s.log, 0.1)
+        check(not s.state().startswith("Hold"),
+              "[%s] the operator's ~ did not resume the job (state %s)" % (tag, s.state()))
+        # Rule 35 on the resumed cut, its window open: held again, then
+        # "~!" in one packet leaves it held, dark.
+        s.sock.sendall(b"!")
+        end = time.monotonic() + 5
+        while time.monotonic() < end and not s.state().startswith("Hold:0"):
+            time.sleep(0.1)
+        if not s.state().startswith("Hold:0"):
+            fail("[pause-wins] the job never completed its hold (state %s)" % s.state())
+        mark = s.dump_size()
+        s.sock.sendall(b"~!")
+        read_avail(s.sock, s.log, 1.0)
+        st, lit = s.state(), s.fire_ticks(mark)
+        check(st.startswith("Hold") and lit == 0,
+              "[pause-wins] '~!' in one packet resumed the held job: state %s, %d FIRE ticks" % (st, lit))
+        s.sock.sendall(b"\x18")
+        print("PASS [%s]: the clean verdict left the operator's pause standing (0 FIRE ticks), and ~ "
+              "resumed the job" % tag)
+        print("PASS [pause-wins]: '~!' in one packet left the held job held (%s, 0 FIRE ticks)" % st)
+    finally:
+        s.close()
+
+
+def test_web_home_disarms_before_the_runner():
+    """Rule 33: a web-service home started inside an open window closes the
+    window before its runner starts: the runner finds the latch locked."""
+    tag = "web-home-disarms"
+    work = tempfile.mkdtemp(prefix="laser-lifecycle-home-", dir=tmpfs_dir())
+    seen = os.path.join(work, "latch-at-start")
+    s = Session(tag, disarm_s=60, latch_log=True, conf_extra="homing_mode = gfcloud\n")
+    try:
+        cmd = "tail -n 1 %s > %s; exit 1" % (s.latch_log, seen)
+        with open(os.path.join(s.workdir, "forgefirm.conf"), "a") as f:
+            f.write("gfcloud_home_cmd = %s\n" % cmd)
+        send_line(s.sock, "M3 S100", s.log)
+        check(s.latch_last() == "unlock", "[%s] the window did not unlock the latch" % tag)
+        s.send_raw("$H")
+        end = time.monotonic() + 8
+        while not os.path.exists(seen) and time.monotonic() < end:
+            read_avail(s.sock, s.log, 0.2)
+        if not os.path.exists(seen):
+            fail("[%s] the homing runner never started" % tag)
+        time.sleep(0.2)
+        with open(seen) as f:
+            at_start = f.read().strip()
+        check(at_start == "lock", "[%s] the runner started with the latch %r" % (tag, at_start))
+        read_avail(s.sock, s.log, 1.0)
+        print("PASS [%s]: the web-service home's runner started with the latch locked" % tag)
+    finally:
+        s.close()
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_the_acknowledgment_is_the_windows_own():
+    """Rule 34: the window's acknowledgment is its own, end to end. With
+    the report channel's stand-in (Engine), which takes the acknowledgment
+    off at a report that opens a window and gives it back 1 s later, the
+    window opens only once the engine has given it its own acknowledgment,
+    never on the one on file when it was reported."""
+    tag = "own-ack"
+    grant = 1.0
+    engine = Engine(grant)
+    s = Session(tag, disarm_s=30, engine=engine)
+    took = []
+
+    def arm_time(start, what):
+        armed = s.armed_count()
+        t0 = time.monotonic()
+        start()
+        if not wait_for_new(s.log, ARMED, armed, 8, s.sock):
+            fail("[%s] %s: the window never opened" % (tag, what))
+        took.append((what, time.monotonic() - t0))
+        # The engine gives the acknowledgment back TAKE_S + grant after the
+        # report; a window on the last one opens at the first verdict read.
+        check(took[-1][1] >= Engine.TAKE_S + 0.5 * grant,
+              "[%s] %s: the window opened %.2f s after its laser-on, before the engine's "
+              "acknowledgment of it (%.1f s)" % (tag, what, took[-1][1], Engine.TAKE_S + grant))
+
+    try:
+        arm_time(lambda: s.send_raw("M3 S100"), "the first window")
+        wait_idle(s.sock, s.log)
+        send_line(s.sock, "M5", s.log)
+        print("PASS [%s]: the window waited for its own acknowledgment: %s"
+              % (tag, ", ".join("%s %.2f s" % (w, t) for w, t in took)))
+    finally:
+        s.close()
+        engine.close()
+
+
 def main():
     if not os.path.isfile(BIN):
         fail("controller binary not found at %s" % BIN)
-    for case in (test_an_unfired_window_survives_its_hold,
+    for case in (test_stop_byte_disarms,
+                 test_a_stop_in_the_button_wait,
+                 test_an_operator_pause_outlives_a_cooling_hold,
+                 test_web_home_disarms_before_the_runner,
+                 test_the_acknowledgment_is_the_windows_own,
+                 test_an_unfired_window_survives_its_hold,
                  test_stalled_job_does_not_run_on_dark,
                  test_manual_home_closes_the_window,
                  test_window_does_not_outlive_its_job,

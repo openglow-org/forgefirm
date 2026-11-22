@@ -103,6 +103,7 @@ class Session:
         """A controller, its stderr read by ctlport_test's watch: the cases
         stand on a home, so a dropped homing reference is a starve when a
         check fails after it; the armed clamp is one at every wait."""
+        self.env["FORGECTRL_PORT"] = str(free_port())     # no report listener here: a closed port of its own
         self.proc = subprocess.Popen([BIN, "-p", str(PORT)], cwd=self.workdir, env=self.env,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.watch = ct.WATCH = ct.StderrWatch(self.proc, "manual-home", homed=True)
