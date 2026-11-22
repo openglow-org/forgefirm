@@ -127,9 +127,10 @@ over TCP, then checks the dumps against the kernel feeder contract:
  28. a scheduling stall of the step producer (GFSINK_STALL_MS: the
      producer is kept off the CPU longer than its lead) maps events
      behind the ship cursor. Inside an armed window that is a fault:
-     ALARM:17, the window closed, the stream ended dark, and no step
-     burst shipped (the clamped events are never compressed onto later
-     bytes). Unarmed it is a warning in the log and the move completes
+     ALARM:17, the window closed, the stream ended dark, no step burst
+     shipped (the clamped events are never compressed onto later bytes),
+     and no FIRE on the ticks the stalled producer had not reached (rule
+     8 over the session). Unarmed it is a warning in the log and the move completes
      with every step in the stream, compressed
  29. a stall of the kernel write (GFSINK_WRITE_STALL_MS: the sink holds
      the write the way a full ring holds it) stalls nothing but the
@@ -2078,6 +2079,9 @@ def main():
     if burst > BURST_LIMIT:
         fail("[stall-armed] %d steps in a 100-tick window (planned %.1f): the clamped events "
              "were shipped as a burst" % (burst, PLANNED_PER_100))
+    # The ticks the stalled producer had not reached ship dark: no FIRE on
+    # the stepless stretch the stall leaves (the head may have stopped).
+    check_fire_gaps("stall-armed", data)
     check_termination("stall-armed", data)
     seq = latch_transitions(run_session.latch)
     if seq != ["unlock", "lock"]:
