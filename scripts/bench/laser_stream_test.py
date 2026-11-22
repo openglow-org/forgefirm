@@ -92,11 +92,13 @@ over TCP, then checks the dumps against the kernel feeder contract:
      the default gamma of 2 than at gamma 1, and the cruise middle
      renders the same - the exponent shapes only the velocity-scaled
      rolloff, never the programmed level
- 24. the verdict's pause tier: with the engine's verdict at a pause
-     (OVERTEMP: hold, fire blocked, no resume) the client holds the job
-     under the open window; the deceleration into that first hold runs
+ 24. the verdict's pause tier, on an M4 cut: with the engine's verdict at
+     a pause (OVERTEMP: hold, fire blocked, no resume) the client holds the
+     job under the open window; the deceleration into that first hold runs
      lit to the stop, as a feed hold's does (the segments already planned
-     at speed would otherwise play dark and leave a gap in the cut), and
+     at speed would otherwise play dark and leave a gap in the cut), which
+     under M4 needs both the per-tick gate and every segment's laser update
+     to pass the pause, and
      the stream engine's per-tick gate masks the stream from the stop on,
      so the stationary stretch of the hold ships no FIRE;
      a ~ under that verdict, which is what a button press or a sender
@@ -118,10 +120,10 @@ over TCP, then checks the dumps against the kernel feeder contract:
      the consent it rode on
  27. a verdict that goes stale (the engine stops publishing mid-cut)
      holds the job the moment the client's cache expires, on its own
-     clock between two of its file reads, lit to the stop like rule 24:
-     no dark cut runs out while the client waits for its next read; the
-     hold's stationary stretch ships no FIRE; the engine's return resumes
-     the cut lit
+     clock between two of its file reads, and strips fire at once: with
+     the engine gone nothing vouches for the airflow, so the deceleration
+     runs dark; the hold's stationary stretch ships no FIRE; the engine's
+     return resumes the cut lit
  28. a scheduling stall of the step producer (GFSINK_STALL_MS: the
      producer is kept off the CPU longer than its lead) maps events
      behind the ship cursor. Inside an armed window that is a fault:
@@ -1892,17 +1894,20 @@ def main():
               % (mode, decel, dlen, accel))
 
     # --- rule 24: the verdict's pause tier -------------------------------
-    # One long line at 50 mm/s. Mid-move the engine's verdict goes to its
-    # pause tier (OVERTEMP: hold, fire blocked, no resume): the client
-    # takes the feed hold, and the stream's gate darkens the deceleration
-    # into it; the latch is not written. A ~ under the standing verdict,
+    # One long line at 50 mm/s, under M4. Mid-move the engine's verdict
+    # goes to its pause tier (OVERTEMP: hold, fire blocked, no resume): the
+    # client takes the feed hold, and the deceleration into it stays lit to
+    # the stop. Under M4 the core updates the power on every segment of the
+    # ramp, so the cut proves both gates the pause holds open: the per-tick
+    # gate and the per-segment update (under M3 only the first). The
+    # stationary stretch is dark; the latch is not written. A ~ under the standing verdict,
     # which is what a button press or a sender does, is refused at the
     # resume gate: the job stays held where it stopped, one hold in the
     # stream, and the refusal says so. The clean verdict then resumes the
     # hold the client took, and the rest of the line cuts lit; M2 closes
     # the window and locks.
     TICK_HZ = MACHINE_TICK_HZ
-    steps = ["G90", "G21", "M3 S500", "G1 X150 F3000", ("sleep", 0.7),
+    steps = ["G90", "G21", "M4 S500", "G1 X150 F3000", ("sleep", 0.7),
              ("verdict", "hold"), ("wait_state", "Hold:0"), ("sleep", 0.5),
              ("rt", b"~"), ("sleep", 1.2), ("wait_state", "Hold:0"),
              ("sleep", 0.5), ("verdict", "clean"), WAIT_IDLE, "M5", "M2",
@@ -2005,9 +2010,12 @@ def main():
     # --- rule 27: a stale verdict holds the moment the cache expires -----
     # The engine stops publishing mid-cut. The client reads the file
     # every 500 ms and its cache expires on its own clock between two
-    # reads: the hold must land at the expiry, not at the next read, and
-    # the deceleration runs lit to the stop like rule 24's, so no dark
-    # cut runs out in between. The engine's return resumes the cut lit.
+    # reads: the hold must land at the expiry, not at the next read. With
+    # the engine gone nothing vouches for the airflow, so fire is stripped
+    # at once and the deceleration runs dark. The session runs under M3,
+    # where FIRE needs only the per-tick gate: a gate left open shows here,
+    # where under M4 the per-segment update could hide it. The engine's
+    # return resumes the cut lit.
     steps = ["G90", "G21", "M3 S500", "G1 X150 F3000", ("sleep", 0.7),
              ("verdict", "stale"), ("wait_state", "Hold:0", 6.0), ("sleep", 0.5),
              ("verdict", "clean"), WAIT_IDLE, "M5", "M2", ("expect_text", "laser disarmed")]
@@ -2022,8 +2030,8 @@ def main():
     holds = holds_in(ticks)
     if len(holds) != 1:
         fail("[verdict-stale] expected one hold in the stream, found %d: %s" % (len(holds), holds))
-    lit_lead = check_decel_lit("verdict-stale", ticks, holds[0],
-                               "the hold must land at the cache's expiry, lit to the stop")
+    dark = check_decel_dark("verdict-stale", ticks, holds[0],
+                            "a stale verdict strips fire at once: its deceleration runs dark")
     held = check_hold_dark("verdict-stale", ticks, holds[0], "a stale verdict masks FIRE while it holds")
     fire = [1 if t & 0x10 else 0 for t in ticks]
     step = [1 if t & 0x05 else 0 for t in ticks]
@@ -2035,9 +2043,9 @@ def main():
     if seq != ["unlock", "lock"]:
         fail("[verdict-stale] latch ownership sequence %s, expected unlock (arm) and lock "
              "(program end) only" % seq)
-    print("PASS [verdict-stale]: the expired cache held the job lit to %d ticks (%.0f ms) "
+    print("PASS [verdict-stale]: the expired cache held the job dark from %d ticks (%.0f ms) "
           "before the stop, dark while held (%d ticks), lit after the return (%d fire ticks), "
-          "latch %s" % (lit_lead, lit_lead * 1e3 / MACHINE_TICK_HZ, held, lit_after, seq))
+          "latch %s" % (dark, dark * 1e3 / MACHINE_TICK_HZ, held, lit_after, seq))
 
     # --- rules 28 and 29: the stalls -------------------------------------
     # The step density the job plans: F3000 at 53.333 steps/mm is 2667
