@@ -414,9 +414,9 @@ class ReleaseGateTests(unittest.TestCase):
                            "forgefirm-release.pub"), base64.b64encode(raw).decode() + "\n")
 
     @staticmethod
-    def set_installer_key(repo, raw):
+    def set_installer_key(repo, raw, tag_line="RELEASE_TAG=''\n"):
         write(os.path.join(repo, "scripts", "install-forgefirm.sh"),
-              "#!/bin/sh\nPUBKEY='%s'\n" % "".join("\\x%02x" % b for b in raw), 0o755)
+              "#!/bin/sh\n%sPUBKEY='%s'\n" % (tag_line, "".join("\\x%02x" % b for b in raw)), 0o755)
 
     @classmethod
     def case_at(cls, name):
@@ -457,6 +457,22 @@ class ReleaseGateTests(unittest.TestCase):
         # the copies the gates judged and the request do not travel
         self.assertFalse(os.path.exists(self.passed.staged("sign")))
         self.assertFalse(os.path.exists(self.passed.staged("SIGN-REQUEST")))
+        # the installer goes out as an asset, stamped with the release's tag
+        self.assertIn("install-forgefirm.sh", self.passed_request.get("assets", "").split())
+        with open(self.passed.staged("install-forgefirm.sh"), encoding="utf-8") as f:
+            self.assertIn("RELEASE_TAG='v%s'\n" % VERSION, f.read())
+        # the notes print the release key as the installer prints it: hex in groups of eight
+        key = self.release_raw.hex()
+        with open(self.passed.staged("notes.md"), encoding="utf-8") as f:
+            self.assertIn(" ".join(key[i:i + 8] for i in range(0, 64, 8)), f.read())
+
+    def test_an_installer_with_no_tag_line_to_stamp_stops_the_release(self):
+        c = self.case()
+        self.set_installer_key(c.repo, self.release_raw, tag_line="")
+        c.commit()
+        p = c.run(VERSION)
+        self.assertStoppedBeforeTheBuild(c, p)
+        self.assertIn("RELEASE_TAG", p.stdout + p.stderr)    # stopped by this gate, not another
 
     # ---------------------------------------------------------------- keys
 
@@ -477,13 +493,17 @@ class ReleaseGateTests(unittest.TestCase):
         self.set_trusted_key(c.repo, raw)
         self.set_installer_key(c.repo, raw)
         c.commit()
-        self.assertStoppedBeforeTheBuild(c, c.run(VERSION))
+        p = c.run(VERSION)
+        self.assertStoppedBeforeTheBuild(c, p)
+        self.assertIn("does not hold a 32-byte public key", p.stdout + p.stderr)   # this gate, not a later one
 
     def test_the_installer_must_embed_the_key_the_image_trusts(self):
         c = self.case()
         self.set_installer_key(c.repo, os.urandom(32))
         c.commit()
-        self.assertStoppedBeforeTheBuild(c, c.run(VERSION))
+        p = c.run(VERSION)
+        self.assertStoppedBeforeTheBuild(c, p)
+        self.assertIn("embedded pubkey is not the release key", p.stdout + p.stderr)   # this gate, not a later one
 
     def test_a_dev_key_that_is_the_release_key_is_refused_in_both_modes(self):
         c = self.case_at("dev-is-release-dev")

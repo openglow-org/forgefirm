@@ -12,8 +12,16 @@
 # The flip writes all four variables in one fw_setenv -s transaction and
 # read-back verifies them, retrying with the classic u-boot-tools script
 # format ("name value") if the libubootenv format ("name=value") did not
-# take, and per-variable calls as a last resort. A switch target must
-# pass a content probe (rootfs mounts, kernel present) unless forced.
+# take; there is no variable-by-variable fallback, which could leave one
+# slot's kernel over another slot's root. A switch target must pass a
+# content probe (rootfs mounts, kernel present) unless forced, and is
+# refused while an update left it marked incomplete (forced or not) or
+# holds the update lock.
+
+# The data directory: the update lock, and each slot's incomplete-write
+# mark (slot-<name>.incomplete), which forgectrl and the installer write
+# before a slot write and remove once the written slot verified.
+DATA_DIR="/data/forgefirm"
 
 usage () {
   cat <<END
@@ -25,8 +33,9 @@ usage: ffboot -l | -s|-e[<partition>] [-n] [-f]
      2: eMMC slot 2 (factory image 2)
      4: legacy OpenGlow/ForgeFIRM partition
      Default: factory image with the most recent firmware
-  -n: No reboot
-  -f: Force - skip the target content probe
+  -n: No reboot (without it, the machine reboots once the switch is made)
+  -f: Force - skip the target content probe (never a slot an update left
+      marked incomplete)
 END
 }
 
@@ -42,6 +51,42 @@ fi
 
 BOOTED_ROOT=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline)
 
+# first_line <file>: a version file's first line, printable ASCII only,
+# at most 64 characters: one inventory line, whatever the file holds.
+first_line () {
+  head -n 1 "$1" 2>/dev/null | tr -cd ' -~' | cut -c1-64
+}
+
+# part_exists <device> / part_mount <device> <dir>: the partition is
+# there, and mounted read-only with no journal replay. A fresh mount is
+# explicit -t ext4 - letting mount iterate types provokes a cosmetic
+# kernel "Can't open blockdev" for each foreign-type claim against an
+# already-mounted device.
+part_exists () {
+  [ -b "$1" ]
+}
+
+part_mount () {
+  mount -o ro,noload -t ext4 "$1" "$2" 2>/dev/null
+}
+
+# slot_of <device>: the slot's name (sd, a, b, legacy), "" for none.
+slot_of () {
+  case "$1" in
+    /dev/mmcblk1p1) echo sd ;;
+    /dev/mmcblk2p1) echo a ;;
+    /dev/mmcblk2p2) echo b ;;
+    /dev/mmcblk2p4) echo legacy ;;
+  esac
+}
+
+# slot_marked <device>: true while an update's mark says the slot's write
+# did not complete.
+slot_marked () {
+  S=$(slot_of "$1")
+  [ -n "$S" ] && [ -e "$DATA_DIR/slot-$S.incomplete" ]
+}
+
 # --- partition probe ---------------------------------------------------------
 # probe_part <device>
 # Sets: P_PRESENT P_STATE(ok|empty|unreadable) P_TYPE(forgefirm|factory|unknown)
@@ -50,20 +95,18 @@ probe_part () {
   P_PRESENT=no; P_STATE=unreadable; P_TYPE=unknown
   P_VERSION=""; P_DATE=""; P_KERNEL=no
   P_MOUNTED=""
-  [ -b "$1" ] || return 1
+  part_exists "$1" || return 1
   P_PRESENT=yes
   if [ "$1" = "$BOOTED_ROOT" ]; then
     ROOT_DIR=""
   else
     # Reuse an existing mount (the dev image keeps the factory slots
-    # mounted under /factory); a fresh mount is explicit -t ext4 - letting mount
-    # iterate types provokes a cosmetic kernel "Can't open blockdev" for
-    # each foreign-type claim against an already-mounted device.
+    # mounted under /factory).
     ROOT_DIR=$(sed -n "s|^$1 \([^ ]*\).*|\1|p" /proc/mounts | head -n 1)
     if [ -z "$ROOT_DIR" ]; then
       P_MOUNTED=yes
       ROOT_DIR=$(mktemp -d /tmp/ffboot.probe.XXXXXX) || return 1
-      if ! mount -o ro,noload -t ext4 "$1" "$ROOT_DIR" 2>/dev/null; then
+      if ! part_mount "$1" "$ROOT_DIR"; then
         rmdir "$ROOT_DIR" 2>/dev/null
         return 1
       fi
@@ -71,15 +114,15 @@ probe_part () {
   fi
   if [ -f "$ROOT_DIR/etc/forgefirm-version" ]; then
     P_TYPE=forgefirm; P_STATE=ok
-    P_VERSION=$(cat "$ROOT_DIR/etc/forgefirm-version")
+    P_VERSION=$(first_line "$ROOT_DIR/etc/forgefirm-version")
   elif [ -f "$ROOT_DIR/etc/version" ]; then
     P_TYPE=factory; P_STATE=ok
     # The build datetime orders releases reliably (used by -e); the
     # semantic FIRMWARE_VERSION in /etc/build is what the factory calls
     # the release and what we display (fall back to the datetime).
-    P_DATE=$(cat "$ROOT_DIR/etc/version")
+    P_DATE=$(first_line "$ROOT_DIR/etc/version")
     FV=$(sed -n 's/^FIRMWARE_VERSION[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' \
-         "$ROOT_DIR/etc/build" 2>/dev/null)
+         "$ROOT_DIR/etc/build" 2>/dev/null | head -n 1 | tr -cd ' -~' | cut -c1-63)
     if [ -n "$FV" ]; then
       P_VERSION="v$FV"
     else
@@ -118,6 +161,7 @@ inventory () {
     echo "slot.$NAME.type=$P_TYPE"
     echo "slot.$NAME.version=$P_VERSION"
     echo "slot.$NAME.kernel=$P_KERNEL"
+    slot_marked "$DEV" && echo "slot.$NAME.incomplete=yes"
     [ "$DEV" = "$BOOTED_ROOT" ] && echo "slot.$NAME.booted=yes"
     [ "$DEV" = "$E_ROOT" ] && echo "slot.$NAME.next=yes"
   done
@@ -140,97 +184,119 @@ set_env () {
   printf 'mmcdev %s\nmmchwpart %s\nmmcpart %s\nmmcroot %s\n' "$1" "$2" "$3" "$4" > "$SCRIPT"
   fw_setenv -c "$FWCONFIG" -s "$SCRIPT" 2>/dev/null
   rm -f "$SCRIPT"
-  if env_verify "$1" "$2" "$3" "$4"; then return 0; fi
-  # last resort: per-variable
-  fw_setenv -c "$FWCONFIG" mmcdev "$1"    && \
-  fw_setenv -c "$FWCONFIG" mmchwpart "$2" && \
-  fw_setenv -c "$FWCONFIG" mmcpart "$3"   && \
-  fw_setenv -c "$FWCONFIG" mmcroot "$4"
   env_verify "$1" "$2" "$3" "$4"
 }
 
-# --- argument parsing --------------------------------------------------------
-REBOOT=1
-FORCE=0
-MODE=""
+# take_lock: the update lock, held for the rest of the switch, not waited
+# for: 1 while a slot write (forgectrl's) holds it. Where the system has no
+# flock (the factory firmware, which runs no update of ForgeFIRM's) or no
+# data directory, there is no lock to take.
+take_lock () {
+  command -v flock >/dev/null 2>&1 && [ -d "$DATA_DIR" ] || return 0
+  exec 9>>"$DATA_DIR/update.lock" || return 1
+  flock -n 9
+}
 
-for ARG in "$@"; do
-  case "$ARG" in
-    -l) MODE=list ;;
-    -n) REBOOT=0 ;;
-    -f) FORCE=1 ;;
-    -s|-e|-e1|-e2|-e4)
-      [ -z "$MODE" ] || { usage; exit 2; }
-      MODE="$ARG" ;;
-    *) usage; exit 2 ;;
+main () {
+  REBOOT=1
+  FORCE=0
+  MODE=""
+
+  for ARG in "$@"; do
+    case "$ARG" in
+      -l) MODE=list ;;
+      -n) REBOOT=0 ;;
+      -f) FORCE=1 ;;
+      -s|-e|-e1|-e2|-e4)
+        [ -z "$MODE" ] || { usage; return 2; }
+        MODE="$ARG" ;;
+      *) usage; return 2 ;;
+    esac
+  done
+  [ -n "$MODE" ] || { usage; return 2; }
+
+  if [ ! -f "$FWCONFIG" ]; then
+    echo "ERROR: $FWCONFIG not found; cannot access the U-Boot environment" >&2
+    return 1
+  fi
+
+  if [ "$MODE" = "list" ]; then
+    inventory
+    return 0
+  fi
+
+  if ! take_lock; then
+    echo "ERROR: an update holds the update lock ($DATA_DIR/update.lock): wait for it to end" >&2
+    return 1
+  fi
+
+  # --- resolve the switch target --------------------------------------------
+  case "$MODE" in
+    -s)
+      MMCDEV=0; MMCPART=1 ;;
+    -e)
+      # Pick the factory slot with the newest firmware; a slot occupied by
+      # ForgeFIRM, or one an update left marked incomplete, is not a
+      # factory-restore target.
+      MMCDEV=1; MMCPART=""
+      BEST=0
+      for CAND in 1 2; do
+        slot_marked "/dev/mmcblk2p$CAND" && continue
+        probe_part "/dev/mmcblk2p$CAND" || continue
+        [ "$P_TYPE" = "factory" ] || continue
+        # Order by the build datetime (monotonic), not the semantic
+        # version string.
+        V=$(echo "$P_DATE" | tr -cd '0-9')
+        [ -n "$V" ] || V=0
+        if [ -z "$MMCPART" ] || [ "$V" -gt "$BEST" ]; then
+          MMCPART=$CAND; BEST=$V
+        fi
+      done
+      [ -n "$MMCPART" ] || {
+        echo "ERROR: no factory image found in eMMC slot 1 or 2." >&2
+        echo "Use -e1/-e2/-e4 to select a slot explicitly." >&2
+        return 1
+      } ;;
+    -e1) MMCDEV=1; MMCPART=1 ;;
+    -e2) MMCDEV=1; MMCPART=2 ;;
+    -e4) MMCDEV=1; MMCPART=4 ;;
   esac
-done
-[ -n "$MODE" ] || { usage; exit 2; }
 
-if [ ! -f "$FWCONFIG" ]; then
-  echo "ERROR: $FWCONFIG not found; cannot access the U-Boot environment" >&2
-  exit 1
-fi
+  MMCROOT="/dev/mmcblk$((MMCDEV + 1))p$MMCPART"
 
-if [ "$MODE" = "list" ]; then
-  inventory
-  exit 0
-fi
-
-# --- resolve the switch target ----------------------------------------------
-case "$MODE" in
-  -s)
-    MMCDEV=0; MMCPART=1 ;;
-  -e)
-    # Pick the factory slot with the newest firmware; a slot occupied by
-    # ForgeFIRM is not a factory-restore target.
-    MMCDEV=1; MMCPART=""
-    BEST=0
-    for CAND in 1 2; do
-      probe_part "/dev/mmcblk2p$CAND" || continue
-      [ "$P_TYPE" = "factory" ] || continue
-      # Order by the build datetime (monotonic), not the semantic
-      # version string.
-      V=$(echo "$P_DATE" | tr -cd '0-9')
-      [ -n "$V" ] || V=0
-      if [ -z "$MMCPART" ] || [ "$V" -gt "$BEST" ]; then
-        MMCPART=$CAND; BEST=$V
-      fi
-    done
-    [ -n "$MMCPART" ] || {
-      echo "ERROR: no factory image found in eMMC slot 1 or 2." >&2
-      echo "Use -e1/-e2/-e4 to select a slot explicitly." >&2
-      exit 1
-    } ;;
-  -e1) MMCDEV=1; MMCPART=1 ;;
-  -e2) MMCDEV=1; MMCPART=2 ;;
-  -e4) MMCDEV=1; MMCPART=4 ;;
-esac
-
-MMCROOT="/dev/mmcblk$((MMCDEV + 1))p$MMCPART"
-
-# --- target sanity probe -----------------------------------------------------
-if [ "$FORCE" -eq 0 ]; then
-  if ! probe_part "$MMCROOT"; then
-    echo "ERROR: $MMCROOT is missing or unreadable (use -f to override)" >&2
-    exit 1
+  # A slot an update left half-written is never selected, -f or not: only
+  # a write of it that verifies clears the mark.
+  if slot_marked "$MMCROOT"; then
+    echo "ERROR: $MMCROOT holds an update that did not complete ($DATA_DIR/slot-$(slot_of "$MMCROOT").incomplete): write it again first" >&2
+    return 1
   fi
-  if [ "$P_STATE" != "ok" ] || [ "$P_KERNEL" != "yes" ]; then
-    echo "ERROR: $MMCROOT does not look bootable (state=$P_STATE kernel=$P_KERNEL; use -f to override)" >&2
-    exit 1
+
+  # --- target sanity probe ---------------------------------------------------
+  if [ "$FORCE" -eq 0 ]; then
+    if ! probe_part "$MMCROOT"; then
+      echo "ERROR: $MMCROOT is missing or unreadable (use -f to override)" >&2
+      return 1
+    fi
+    if [ "$P_STATE" != "ok" ] || [ "$P_KERNEL" != "yes" ]; then
+      echo "ERROR: $MMCROOT does not look bootable (state=$P_STATE kernel=$P_KERNEL; use -f to override)" >&2
+      return 1
+    fi
+    echo "Target $MMCROOT: $P_TYPE $P_VERSION"
   fi
-  echo "Target $MMCROOT: $P_TYPE $P_VERSION"
-fi
 
-echo "Setting boot to $MMCROOT"
-if ! set_env "$MMCDEV" 0 "$MMCPART" "$MMCROOT"; then
-  echo "ERROR: environment write did not verify; boot selection unchanged or inconsistent" >&2
-  exit 1
-fi
+  echo "Setting boot to $MMCROOT"
+  if ! set_env "$MMCDEV" 0 "$MMCPART" "$MMCROOT"; then
+    echo "ERROR: environment write did not verify; it reads mmcdev=$(env_get mmcdev) mmchwpart=$(env_get mmchwpart) mmcpart=$(env_get mmcpart) mmcroot=$(env_get mmcroot)" >&2
+    echo "If that is not the slot that was booted, the next boot may fail: hold the button at power-on until it turns purple, then let go, for the factory recovery" >&2
+    return 1
+  fi
 
-if [ "$REBOOT" -gt 0 ]; then
-  echo "Rebooting..."
-  reboot
-fi
+  if [ "$REBOOT" -gt 0 ]; then
+    echo "Rebooting..."
+    reboot
+  fi
+  return 0
+}
 
-exit 0
+main "$@"
+exit $?

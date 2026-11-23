@@ -481,18 +481,22 @@ archive is a ForgeFIRM policy that an operator at the machine can waive.
   the machine is not running from and select it:
 
       fwup -a -d /dev/mmcblk2p2 -i my-build.fw -t upgrade.b
-      ffboot b
+      ffboot -e2
 
   `upgrade.a` writes slot A (`/dev/mmcblk2p1`), `upgrade.b` writes slot B
-  (`/dev/mmcblk2p2`); `ffboot -l` says which slot is running.
+  (`/dev/mmcblk2p2`); `ffboot -l` says which slot is running. `ffboot -e2`
+  selects slot B and reboots; add `-n` to select it without rebooting.
 - **From an SD card.** Write `forgefirm-image-glowforge.rootfs.wic.gz` to
   a card and boot from it.
 
 The trust anchor is replaceable. `/etc/forgefirm/keys` holds public keys
-only, as ordinary world-readable files. Put your own public key in
-`forgefirm-release.pub` and the automatic paths verify against your key
-instead; sign your builds with `fwup -S` and they install with no button
-held.
+only, as ordinary world-readable files, on the read-only root filesystem:
+remount it read-write to change them; the next write of a slot brings the
+release key back in that slot. Put your own public key in
+`forgefirm-release.pub` and the release updater verifies against your key
+instead; sign your builds with `fwup -S`, and each one newer than the
+installed version installs with no button held. The extension host refuses a package signed with any firmware key,
+so that key signs no extension package.
 
 The same information, with the panel screens, is at
 https://docs.forgefirm.org/install/updating/#installing-your-own-build.

@@ -1059,7 +1059,7 @@ class LogTreeTests(unittest.TestCase):
         # rules of the logging init script, and the installer's log.
         ours = set(re.findall(self.TREE + "/", text("meta-forgefirm", "recipes-forgefirm", "forgefirm-logging",
                                                     "files", "forgefirm-logging.init")))
-        ours |= set(re.findall(r'^LOG_DIR="%s"$' % self.TREE, text("scripts", "install-forgefirm.sh"), re.M))
+        ours |= set(re.findall(r'^LOG_DIR="(?:\$ROOT)?%s"$' % self.TREE, text("scripts", "install-forgefirm.sh"), re.M))
         self.assertTrue({"system", "install"} <= ours, ours)
         self.assertEqual(ours - rotated, set(), "no rotation for a directory this repository writes")
         # forgetest's journal on the dev image, the file its init script appends to
